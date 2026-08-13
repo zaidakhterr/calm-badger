@@ -15,14 +15,20 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router"
 
 import { Button, buttonVariants } from "@/components/ui/button"
 import {
+  fetchCandidateEvidence,
   fetchCustomerEvidence,
   fetchDocumentEvidence,
+  fetchMatchEvidence,
   fetchRun,
   fetchStructureEvidence,
+  type CandidateEvidence,
+  type CandidateLine,
   type Confidence,
   type CustomerEvidence,
   type DocumentEvidence,
   type EvidenceSource,
+  type MatchEvidence,
+  type MatchLine,
   type RunStep,
   type RunView,
   type StructureEvidence,
@@ -35,10 +41,14 @@ import { cn } from "@/lib/utils"
 const READ_DOCUMENTS_STEP = "read-documents"
 const STRUCTURE_RFQ_STEP = "structure-rfq"
 const RESOLVE_CUSTOMER_STEP = "resolve-customer"
+const RETRIEVE_CANDIDATES_STEP = "retrieve-candidates"
+const MATCH_PRODUCTS_STEP = "match-products"
 const EVIDENCE_STEPS = [
   READ_DOCUMENTS_STEP,
   STRUCTURE_RFQ_STEP,
   RESOLVE_CUSTOMER_STEP,
+  RETRIEVE_CANDIDATES_STEP,
+  MATCH_PRODUCTS_STEP,
 ]
 const POLL_INTERVAL_MS = 1000
 /** A bound on live polling; the server, not the client, owns step state. */
@@ -48,6 +58,8 @@ type RunSnapshot = RunView & {
   documents: DocumentEvidence | null
   structure: StructureEvidence | null
   customer: CustomerEvidence | null
+  candidates: CandidateEvidence | null
+  matches: MatchEvidence | null
 }
 
 /** One server read of everything the graph shows, used by the loader and the poll. */
@@ -58,13 +70,16 @@ async function readRunSnapshot(viewId: string): Promise<RunSnapshot> {
       (entry) => entry.key === key && entry.status !== "waiting"
     )
 
-  const [documents, structure, customer] = await Promise.all([
-    started(READ_DOCUMENTS_STEP) ? fetchDocumentEvidence(viewId) : null,
-    started(STRUCTURE_RFQ_STEP) ? fetchStructureEvidence(viewId) : null,
-    started(RESOLVE_CUSTOMER_STEP) ? fetchCustomerEvidence(viewId) : null,
-  ])
+  const [documents, structure, customer, candidates, matches] =
+    await Promise.all([
+      started(READ_DOCUMENTS_STEP) ? fetchDocumentEvidence(viewId) : null,
+      started(STRUCTURE_RFQ_STEP) ? fetchStructureEvidence(viewId) : null,
+      started(RESOLVE_CUSTOMER_STEP) ? fetchCustomerEvidence(viewId) : null,
+      started(RETRIEVE_CANDIDATES_STEP) ? fetchCandidateEvidence(viewId) : null,
+      started(MATCH_PRODUCTS_STEP) ? fetchMatchEvidence(viewId) : null,
+    ])
 
-  return { ...view, documents, structure, customer }
+  return { ...view, documents, structure, customer, candidates, matches }
 }
 
 export const Route = createFileRoute("/runs/$viewId")({
@@ -240,6 +255,14 @@ function evidencePanel(
 
   if (step.key === RESOLVE_CUSTOMER_STEP && snapshot.customer) {
     return <CustomerEvidencePanel evidence={snapshot.customer} />
+  }
+
+  if (step.key === RETRIEVE_CANDIDATES_STEP && snapshot.candidates) {
+    return <CandidateEvidencePanel evidence={snapshot.candidates} />
+  }
+
+  if (step.key === MATCH_PRODUCTS_STEP && snapshot.matches) {
+    return <MatchEvidencePanel evidence={snapshot.matches} />
   }
 
   return null
@@ -712,6 +735,292 @@ function CustomerEvidencePanel({ evidence }: { evidence: CustomerEvidence }) {
         </div>
       ) : null}
     </div>
+  )
+}
+
+/**
+ * Retrieve candidates. The point of the step is the bound, so the catalogue
+ * scale and the shortlist size come before the candidates themselves.
+ */
+function CandidateEvidencePanel({ evidence }: { evidence: CandidateEvidence }) {
+  return (
+    <div className="space-y-4">
+      {evidence.message ? (
+        <p className="rounded-md border border-workflow-review/40 bg-workflow-review-soft/60 p-3 text-xs leading-5">
+          {evidence.message}
+        </p>
+      ) : null}
+
+      {evidence.totals && evidence.catalog ? (
+        <div>
+          <h3 className="text-[13px] leading-4 font-medium">
+            What was searched
+          </h3>
+          <dl className="mt-2 divide-y rounded-md border text-xs">
+            <MetaRow
+              label="Catalogue searched"
+              value={`${evidence.catalog.activeProducts} active products (${evidence.catalog.archivedExcluded} archived excluded)`}
+            />
+            <MetaRow
+              label="Settled by exact evidence"
+              value={`${evidence.totals.exactCount} of ${evidence.totals.lineCount} lines`}
+            />
+            <MetaRow
+              label="Shortlisted for reranking"
+              value={`${evidence.totals.retrievedCount} lines, at most ${evidence.shortlistSize} candidates each`}
+            />
+            <MetaRow
+              label="Customer wording"
+              value={
+                evidence.customerScoped
+                  ? "Included for the resolved customer"
+                  : "Unavailable: no customer was resolved"
+              }
+            />
+            <MetaRow label="Method" value={evidence.method ?? "—"} mono />
+            <MetaRow
+              label="Elapsed"
+              value={formatDuration(evidence.totals.elapsedMs)}
+            />
+          </dl>
+          <p className="mt-1.5 text-[11px] text-muted-foreground">
+            Retrieval is a D1 full-text search over the whole active catalogue.
+            Only the shortlist below is ever sent to a model.
+          </p>
+        </div>
+      ) : null}
+
+      <div>
+        <h3 className="text-[13px] leading-4 font-medium">
+          Requested lines ({evidence.lines.length})
+        </h3>
+        <ul className="mt-2 space-y-2">
+          {evidence.lines.map((line) => (
+            <CandidateLineRow key={line.position} line={line} />
+          ))}
+        </ul>
+      </div>
+    </div>
+  )
+}
+
+function CandidateLineRow({ line }: { line: CandidateLine }) {
+  return (
+    <li className="rounded-md border px-3 py-2 text-xs">
+      <div className="flex items-start justify-between gap-3">
+        <span className="min-w-0">
+          <span className="text-muted-foreground">{line.position}.</span>{" "}
+          <span className="font-medium">{line.reference}</span>
+        </span>
+        <span className="shrink-0 whitespace-nowrap text-muted-foreground">
+          {line.state === "exact"
+            ? "exact evidence"
+            : `${line.candidates.length} candidates`}
+        </span>
+      </div>
+      <p className="mt-1 text-[11px] text-muted-foreground">{line.note}</p>
+      <ul className="mt-1.5 space-y-1">
+        {line.candidates.map((candidate) => (
+          <li key={candidate.sku} className="flex items-start gap-2">
+            <span className="mt-px shrink-0 font-mono text-[11px] text-muted-foreground">
+              {candidate.rank}. {candidate.sku}
+            </span>
+            <span className="min-w-0 text-muted-foreground">
+              {candidate.name}
+              {candidate.nearDuplicateOf ? (
+                <span className="ml-1 text-[11px]">
+                  (near duplicate of {candidate.nearDuplicateOf})
+                </span>
+              ) : null}
+            </span>
+          </li>
+        ))}
+      </ul>
+      {line.query ? (
+        <p className="mt-1.5 font-mono text-[11px] text-muted-foreground">
+          query: {line.query}
+        </p>
+      ) : null}
+    </li>
+  )
+}
+
+/**
+ * Match products. Business decision first, then the evidence for it, then the
+ * alternatives, then the model's own output and its metadata.
+ */
+function MatchEvidencePanel({ evidence }: { evidence: MatchEvidence }) {
+  return (
+    <div className="space-y-4">
+      {evidence.message ? (
+        <p className="rounded-md border border-workflow-review/40 bg-workflow-review-soft/60 p-3 text-xs leading-5">
+          {evidence.message}
+        </p>
+      ) : null}
+
+      <div>
+        <h3 className="text-[13px] leading-4 font-medium">
+          Product decisions ({evidence.lines.length})
+        </h3>
+        <ul className="mt-2 space-y-2">
+          {evidence.lines.map((line) => (
+            <MatchLineRow key={line.position} line={line} />
+          ))}
+        </ul>
+      </div>
+
+      {evidence.heuristics ? (
+        <div>
+          <h3 className="text-[13px] leading-4 font-medium">
+            Acceptance heuristics
+          </h3>
+          <dl className="mt-2 divide-y rounded-md border text-xs">
+            <MetaRow
+              label="Winner strength"
+              value={evidence.heuristics.winnerStrength.toFixed(2)}
+            />
+            <MetaRow
+              label="Winner gap"
+              value={evidence.heuristics.winnerGap.toFixed(2)}
+            />
+          </dl>
+          <p className="mt-1.5 text-[11px] leading-5 text-muted-foreground">
+            {evidence.heuristics.note}
+          </p>
+        </div>
+      ) : null}
+
+      {evidence.totals ? (
+        <div>
+          <h3 className="text-[13px] leading-4 font-medium">Model and usage</h3>
+          <dl className="mt-2 divide-y rounded-md border text-xs">
+            <MetaRow label="Provider" value={evidence.provider ?? "—"} />
+            <MetaRow label="Model" value={evidence.model ?? "—"} mono />
+            <MetaRow
+              label="Decided without a model"
+              value={`${evidence.totals.deterministicCount} of ${evidence.totals.lineCount} lines`}
+            />
+            <MetaRow
+              label="Model calls"
+              value={`${evidence.totals.modelCalls} (one per reranked line)`}
+            />
+            <MetaRow
+              label="Model latency"
+              value={formatDuration(evidence.totals.providerLatencyMs)}
+            />
+            <MetaRow
+              label="Step elapsed"
+              value={formatDuration(evidence.totals.elapsedMs)}
+            />
+            <MetaRow
+              label="Tokens"
+              value={
+                evidence.totals.usage
+                  ? `${evidence.totals.usage.inputTokens} in · ${evidence.totals.usage.outputTokens} out · ${evidence.totals.usage.totalTokens} total`
+                  : "—"
+              }
+            />
+            <MetaRow
+              label="Estimated cost"
+              value={
+                evidence.totals.estimatedCostUsd === null
+                  ? "Unknown"
+                  : `$${evidence.totals.estimatedCostUsd.toFixed(4)}`
+              }
+            />
+          </dl>
+          <p className="mt-1.5 text-[11px] text-muted-foreground">
+            Cost is an estimate from the configured token prices, not a billed
+            amount. It reads Unknown when those prices are not configured.
+          </p>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+function MatchLineRow({ line }: { line: MatchLine }) {
+  const needsReview = line.state !== "accepted"
+
+  return (
+    <li
+      className={cn(
+        "rounded-md border px-3 py-2 text-xs",
+        needsReview && "border-workflow-review/40 bg-workflow-review-soft/40"
+      )}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <span className="min-w-0">
+          <span className="text-muted-foreground">{line.position}.</span>{" "}
+          <span className="font-medium">{line.reference}</span>
+        </span>
+        <span className="shrink-0 whitespace-nowrap text-muted-foreground">
+          {needsReview ? "Needs review" : "Accepted"}
+        </span>
+      </div>
+
+      <p className="mt-1">
+        {line.sku ? (
+          <>
+            <span className="font-mono text-[11px]">{line.sku}</span>{" "}
+            <span className="text-muted-foreground">{line.productName}</span>
+          </>
+        ) : (
+          <span className="text-muted-foreground">No product selected</span>
+        )}
+      </p>
+
+      <p className="mt-1 text-[11px] leading-5 text-muted-foreground">
+        {line.decisionEvidence}
+      </p>
+
+      {line.confidence ? (
+        <p className="mt-1 text-[11px] text-muted-foreground">
+          {line.confidence.label} · {line.confidence.score.toFixed(2)} ·{" "}
+          {line.confidence.heuristic} This is a demo heuristic, not calibrated
+          certainty.
+        </p>
+      ) : null}
+
+      {line.alternatives.length > 1 ? (
+        <div className="mt-1.5">
+          <p className="text-[11px] text-muted-foreground">
+            Top {line.alternatives.length} of {line.shortlistSize} shortlisted:
+          </p>
+          <ul className="mt-1 space-y-1">
+            {line.alternatives.map((alternative) => (
+              <li key={alternative.sku} className="flex items-start gap-2">
+                <span className="mt-px shrink-0 font-mono text-[11px] text-muted-foreground">
+                  {alternative.score.toFixed(2)} {alternative.sku}
+                </span>
+                <span className="min-w-0 text-muted-foreground">
+                  {alternative.name}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      {line.rejected.length > 0 ? (
+        <p className="mt-1.5 text-[11px] text-workflow-review">
+          Discarded before pricing:{" "}
+          {line.rejected.map((entry) => entry.sku).join(", ")}
+        </p>
+      ) : null}
+
+      {line.originalOutput ? (
+        <details className="mt-1.5 rounded-md border bg-background">
+          <summary className="cursor-pointer px-3 py-2 text-xs">
+            Original model output
+            {line.repaired ? " (repaired before validation)" : ""}
+          </summary>
+          <pre className="max-h-64 overflow-auto border-t px-3 py-2 font-mono text-[11px] leading-5 whitespace-pre-wrap">
+            {line.originalOutput}
+          </pre>
+        </details>
+      ) : null}
+    </li>
   )
 }
 

@@ -18,6 +18,7 @@ export default defineConfig({
           APP_ENV: "test",
           OCR_PROVIDER: "contract-fake",
           EXTRACTION_PROVIDER: "contract-fake",
+          RERANK_PROVIDER: "contract-fake",
           MISTRAL_API_KEY: "",
           OPENROUTER_API_KEY: "",
         },

@@ -1,6 +1,8 @@
 import {
+  loadCandidateEvidence,
   loadCustomerEvidence,
   loadDocumentEvidence,
+  loadMatchEvidence,
   loadStructureEvidence,
 } from "./evidence"
 import {
@@ -112,7 +114,7 @@ async function routeRequest(
   }
 
   const runMatch =
-    /^\/api\/runs\/([A-Za-z0-9_-]+)(?:\/(reset|documents|structure|customer)|\/sources\/([A-Za-z0-9-]+))?$/.exec(
+    /^\/api\/runs\/([A-Za-z0-9_-]+)(?:\/(reset|documents|structure|customer|candidates|matches)|\/sources\/([A-Za-z0-9-]+))?$/.exec(
       url.pathname
     )
 
@@ -134,7 +136,9 @@ async function routeRequest(
     if (
       segment === "documents" ||
       segment === "structure" ||
-      segment === "customer"
+      segment === "customer" ||
+      segment === "candidates" ||
+      segment === "matches"
     ) {
       return stepEvidenceResponse(env, viewId, segment)
     }
@@ -279,7 +283,7 @@ async function readCustomInput(request: Request): Promise<InputResult> {
 async function stepEvidenceResponse(
   env: Env,
   viewId: string,
-  segment: "documents" | "structure" | "customer"
+  segment: "documents" | "structure" | "customer" | "candidates" | "matches"
 ): Promise<Response> {
   const runId = await resolveRunId(env, viewId)
 
@@ -295,7 +299,11 @@ async function stepEvidenceResponse(
       ? await loadDocumentEvidence(env, runId, viewId)
       : segment === "structure"
         ? await loadStructureEvidence(env, runId)
-        : await loadCustomerEvidence(env, runId)
+        : segment === "customer"
+          ? await loadCustomerEvidence(env, runId)
+          : segment === "candidates"
+            ? await loadCandidateEvidence(env, runId)
+            : await loadMatchEvidence(env, runId)
 
   return Response.json({ evidence }, { headers: jsonHeaders })
 }

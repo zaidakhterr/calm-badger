@@ -205,6 +205,117 @@ export type CustomerEvidence = {
   metrics: { elapsedMs: number } | null
 }
 
+export type RetrievedCandidate = {
+  rank: number
+  sku: string
+  name: string
+  category: string
+  manufacturer: string
+  unit: string
+  source: string
+  score: number
+  evidence: string
+  nearDuplicateOf: string | null
+}
+
+export type CandidateLine = {
+  position: number
+  reference: string
+  description: string
+  query: string
+  state: string
+  supersededSku: string | null
+  note: string
+  candidates: RetrievedCandidate[]
+}
+
+export type CandidateEvidence = {
+  stepKey: string
+  state: "pending" | "complete" | "error"
+  message: string | null
+  method: string | null
+  shortlistSize: number
+  customerScoped: boolean
+  catalog: {
+    activeProducts: number
+    totalProducts: number
+    archivedExcluded: number
+  } | null
+  lines: CandidateLine[]
+  totals: {
+    lineCount: number
+    exactCount: number
+    retrievedCount: number
+    candidateCount: number
+    elapsedMs: number
+  } | null
+}
+
+export type MatchAlternative = {
+  sku: string
+  name: string
+  score: number
+  reason: string
+  nearDuplicateOf: string | null
+}
+
+export type MatchLine = {
+  position: number
+  reference: string
+  description: string
+  state: string
+  sku: string | null
+  productName: string | null
+  method: string
+  decisionEvidence: string
+  confidence: Confidence
+  winnerScore: number
+  winnerGap: number
+  alternatives: MatchAlternative[]
+  rejected: { sku: string; reason: string }[]
+  candidateCount: number
+  shortlistSize: number
+  repaired: boolean
+  issues: string[]
+  originalOutput: string | null
+  latencyMs: number | null
+  usage: {
+    inputTokens: number
+    outputTokens: number
+    totalTokens: number
+  } | null
+}
+
+export type MatchEvidence = {
+  stepKey: string
+  state: "pending" | "complete" | "error"
+  message: string | null
+  provider: string | null
+  model: string | null
+  heuristics: {
+    winnerStrength: number
+    winnerGap: number
+    note: string
+  } | null
+  lines: MatchLine[]
+  totals: {
+    lineCount: number
+    acceptedCount: number
+    reviewCount: number
+    deterministicCount: number
+    rerankedCount: number
+    modelCalls: number
+    providerLatencyMs: number
+    usage: {
+      inputTokens: number
+      outputTokens: number
+      totalTokens: number
+    } | null
+    estimatedCostUsd: number | null
+    elapsedMs: number
+  } | null
+}
+
 /** Mirrors the Worker's upload policy so a rejected file never leaves the browser. */
 export const UPLOAD_LIMITS = {
   maxBytes: 10 * 1024 * 1024,
@@ -296,6 +407,16 @@ export function fetchCustomerEvidence(
   viewId: string
 ): Promise<CustomerEvidence> {
   return fetchEvidence<CustomerEvidence>(viewId, "customer")
+}
+
+export function fetchCandidateEvidence(
+  viewId: string
+): Promise<CandidateEvidence> {
+  return fetchEvidence<CandidateEvidence>(viewId, "candidates")
+}
+
+export function fetchMatchEvidence(viewId: string): Promise<MatchEvidence> {
+  return fetchEvidence<MatchEvidence>(viewId, "matches")
 }
 
 /** Reads server state. The owner capability is sent only when this browser holds it. */

@@ -13,8 +13,10 @@
  * which is the order the interface reads them in.
  */
 
+import { MATCH_PRODUCTS_STEP_KEY } from "./match-products"
 import { READ_DOCUMENTS_STEP_KEY } from "./read-documents"
 import { RESOLVE_CUSTOMER_STEP_KEY } from "./resolve-customer"
+import { RETRIEVE_CANDIDATES_STEP_KEY } from "./retrieve-candidates"
 import { loadSources } from "./sources"
 import { STRUCTURE_RFQ_STEP_KEY } from "./structure-rfq"
 
@@ -485,6 +487,290 @@ function readResolution(
           label: readText(location.label) ?? "",
           city: readText(location.city) ?? "",
           country: readText(location.country) ?? "",
+        }
+      : null,
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Retrieve candidates                                                        */
+/* -------------------------------------------------------------------------- */
+
+export type CandidateProjection = {
+  rank: number
+  sku: string
+  name: string
+  category: string
+  manufacturer: string
+  unit: string
+  source: string
+  score: number
+  evidence: string
+  nearDuplicateOf: string | null
+}
+
+export type CandidateLineProjection = {
+  position: number
+  reference: string
+  description: string
+  query: string
+  state: string
+  supersededSku: string | null
+  note: string
+  candidates: CandidateProjection[]
+}
+
+export type CandidateEvidenceProjection = {
+  stepKey: string
+  state: "pending" | "complete" | "error"
+  message: string | null
+  method: string | null
+  shortlistSize: number
+  customerScoped: boolean
+  catalog: {
+    activeProducts: number
+    totalProducts: number
+    archivedExcluded: number
+  } | null
+  lines: CandidateLineProjection[]
+  totals: {
+    lineCount: number
+    exactCount: number
+    retrievedCount: number
+    candidateCount: number
+    elapsedMs: number
+  } | null
+}
+
+export async function loadCandidateEvidence(
+  env: Env,
+  runId: string
+): Promise<CandidateEvidenceProjection> {
+  const stored = await readStoredEvidence(
+    env,
+    runId,
+    RETRIEVE_CANDIDATES_STEP_KEY,
+    "candidates"
+  )
+
+  const catalog = stored?.catalog ? asRecord(stored.catalog) : null
+  const totals = stored?.totals ? asRecord(stored.totals) : null
+
+  return {
+    stepKey: RETRIEVE_CANDIDATES_STEP_KEY,
+    state: readState(stored?.state),
+    message: readText(stored?.message),
+    method: readText(stored?.method),
+    shortlistSize: readNumber(stored?.shortlistSize) ?? 0,
+    customerScoped: stored?.customerScoped === true,
+    catalog: catalog
+      ? {
+          activeProducts: readNumber(catalog.activeProducts) ?? 0,
+          totalProducts: readNumber(catalog.totalProducts) ?? 0,
+          archivedExcluded: readNumber(catalog.archivedExcluded) ?? 0,
+        }
+      : null,
+    lines: (Array.isArray(stored?.lines) ? stored.lines : []).map((entry) => {
+      const line = asRecord(entry)
+
+      return {
+        position: readNumber(line.position) ?? 0,
+        reference: readText(line.reference) ?? "",
+        description: readText(line.description) ?? "",
+        query: readText(line.query) ?? "",
+        state: readText(line.state) ?? "retrieved",
+        supersededSku: readText(line.supersededSku),
+        note: readText(line.note) ?? "",
+        candidates: (Array.isArray(line.candidates) ? line.candidates : []).map(
+          (value, index) => {
+            const candidate = asRecord(value)
+
+            return {
+              rank: readNumber(candidate.rank) ?? index + 1,
+              sku: readText(candidate.sku) ?? "",
+              name: readText(candidate.name) ?? "",
+              category: readText(candidate.category) ?? "",
+              manufacturer: readText(candidate.manufacturer) ?? "",
+              unit: readText(candidate.unit) ?? "",
+              source: readText(candidate.source) ?? "",
+              score: readNumber(candidate.score) ?? 0,
+              evidence: readText(candidate.evidence) ?? "",
+              nearDuplicateOf: readText(candidate.nearDuplicateOf),
+            }
+          }
+        ),
+      }
+    }),
+    totals: totals
+      ? {
+          lineCount: readNumber(totals.lineCount) ?? 0,
+          exactCount: readNumber(totals.exactCount) ?? 0,
+          retrievedCount: readNumber(totals.retrievedCount) ?? 0,
+          candidateCount: readNumber(totals.candidateCount) ?? 0,
+          elapsedMs: readNumber(totals.elapsedMs) ?? 0,
+        }
+      : null,
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Match products                                                             */
+/* -------------------------------------------------------------------------- */
+
+export type MatchAlternativeProjection = {
+  sku: string
+  name: string
+  score: number
+  reason: string
+  nearDuplicateOf: string | null
+}
+
+export type MatchLineProjection = {
+  position: number
+  reference: string
+  description: string
+  /** The business result first: what was decided, and on what evidence. */
+  state: string
+  sku: string | null
+  productName: string | null
+  method: string
+  decisionEvidence: string
+  confidence: ConfidenceProjection
+  winnerScore: number
+  winnerGap: number
+  alternatives: MatchAlternativeProjection[]
+  rejected: { sku: string; reason: string }[]
+  candidateCount: number
+  shortlistSize: number
+  repaired: boolean
+  issues: string[]
+  /** Model text as returned, truncated. It never contained a prompt or a key. */
+  originalOutput: string | null
+  latencyMs: number | null
+  usage: {
+    inputTokens: number
+    outputTokens: number
+    totalTokens: number
+  } | null
+}
+
+export type MatchEvidenceProjection = {
+  stepKey: string
+  state: "pending" | "complete" | "error"
+  message: string | null
+  provider: string | null
+  model: string | null
+  heuristics: {
+    winnerStrength: number
+    winnerGap: number
+    note: string
+  } | null
+  lines: MatchLineProjection[]
+  totals: {
+    lineCount: number
+    acceptedCount: number
+    reviewCount: number
+    deterministicCount: number
+    rerankedCount: number
+    modelCalls: number
+    providerLatencyMs: number
+    usage: {
+      inputTokens: number
+      outputTokens: number
+      totalTokens: number
+    } | null
+    estimatedCostUsd: number | null
+    elapsedMs: number
+  } | null
+}
+
+export async function loadMatchEvidence(
+  env: Env,
+  runId: string
+): Promise<MatchEvidenceProjection> {
+  const stored = await readStoredEvidence(
+    env,
+    runId,
+    MATCH_PRODUCTS_STEP_KEY,
+    "matches"
+  )
+
+  const heuristics = stored?.heuristics ? asRecord(stored.heuristics) : null
+  const totals = stored?.totals ? asRecord(stored.totals) : null
+
+  return {
+    stepKey: MATCH_PRODUCTS_STEP_KEY,
+    state: readState(stored?.state),
+    message: readText(stored?.message),
+    provider: readText(stored?.provider),
+    model: readText(stored?.model),
+    heuristics: heuristics
+      ? {
+          winnerStrength: readNumber(heuristics.winnerStrength) ?? 0,
+          winnerGap: readNumber(heuristics.winnerGap) ?? 0,
+          note: readText(heuristics.note) ?? "",
+        }
+      : null,
+    lines: (Array.isArray(stored?.lines) ? stored.lines : []).map((entry) => {
+      const line = asRecord(entry)
+
+      return {
+        position: readNumber(line.position) ?? 0,
+        reference: readText(line.reference) ?? "",
+        description: readText(line.description) ?? "",
+        state: readText(line.state) ?? "review_required",
+        sku: readText(line.sku),
+        productName: readText(line.productName),
+        method: readText(line.method) ?? "none",
+        decisionEvidence: readText(line.decisionEvidence) ?? "",
+        confidence: readConfidence(line.confidence),
+        winnerScore: readNumber(line.winnerScore) ?? 0,
+        winnerGap: readNumber(line.winnerGap) ?? 0,
+        alternatives: (Array.isArray(line.alternatives)
+          ? line.alternatives
+          : []
+        ).map((value) => {
+          const alternative = asRecord(value)
+
+          return {
+            sku: readText(alternative.sku) ?? "",
+            name: readText(alternative.name) ?? "",
+            score: readNumber(alternative.score) ?? 0,
+            reason: readText(alternative.reason) ?? "",
+            nearDuplicateOf: readText(alternative.nearDuplicateOf),
+          }
+        }),
+        rejected: (Array.isArray(line.rejected) ? line.rejected : []).map(
+          (value) => {
+            const rejected = asRecord(value)
+
+            return {
+              sku: readText(rejected.sku) ?? "",
+              reason: readText(rejected.reason) ?? "",
+            }
+          }
+        ),
+        candidateCount: readNumber(line.candidateCount) ?? 0,
+        shortlistSize: readNumber(line.shortlistSize) ?? 0,
+        repaired: line.repaired === true,
+        issues: readStrings(line.issues),
+        originalOutput: readText(line.originalOutput),
+        latencyMs: readNumber(line.latencyMs),
+        usage: readUsage(line.usage),
+      }
+    }),
+    totals: totals
+      ? {
+          lineCount: readNumber(totals.lineCount) ?? 0,
+          acceptedCount: readNumber(totals.acceptedCount) ?? 0,
+          reviewCount: readNumber(totals.reviewCount) ?? 0,
+          deterministicCount: readNumber(totals.deterministicCount) ?? 0,
+          rerankedCount: readNumber(totals.rerankedCount) ?? 0,
+          modelCalls: readNumber(totals.modelCalls) ?? 0,
+          providerLatencyMs: readNumber(totals.providerLatencyMs) ?? 0,
+          usage: readUsage(totals.usage),
+          estimatedCostUsd: readNumber(totals.estimatedCostUsd),
+          elapsedMs: readNumber(totals.elapsedMs) ?? 0,
         }
       : null,
   }

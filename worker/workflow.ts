@@ -1,8 +1,10 @@
 import { WorkflowEntrypoint } from "cloudflare:workers"
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers"
 
+import { matchProducts } from "./match-products"
 import { readDocuments } from "./read-documents"
 import { resolveCustomer } from "./resolve-customer"
+import { retrieveCandidates } from "./retrieve-candidates"
 import { RFQ_RECEIVED_STEP_KEY } from "./runs"
 import { structureRfq } from "./structure-rfq"
 
@@ -12,8 +14,10 @@ export type RfqWorkflowParams = {
 
 export type RfqWorkflowResult = {
   runId: string
-  state: "customer_resolved" | "customer_unresolved" | "failed"
+  state: "products_matched" | "matches_need_review" | "failed"
   acknowledgedAt: string
+  /** Whether identity was settled. An unresolved run still matches products. */
+  customerResolved: boolean
 }
 
 export class RfqWorkflow extends WorkflowEntrypoint<Env, RfqWorkflowParams> {
@@ -63,7 +67,7 @@ export class RfqWorkflow extends WorkflowEntrypoint<Env, RfqWorkflowParams> {
     )
 
     if (documents.state !== "complete") {
-      return { runId, state: "failed", acknowledgedAt }
+      return failure(runId, acknowledgedAt)
     }
 
     const structured = await step.do("structure RFQ", async () =>
@@ -71,22 +75,53 @@ export class RfqWorkflow extends WorkflowEntrypoint<Env, RfqWorkflowParams> {
     )
 
     if (structured.state !== "complete") {
-      return { runId, state: "failed", acknowledgedAt }
+      return failure(runId, acknowledgedAt)
     }
 
     const customer = await step.do("resolve customer", async () =>
       resolveCustomer(this.env, runId)
     )
 
+    if (customer.state === "error") {
+      return failure(runId, acknowledgedAt)
+    }
+
+    // An unresolved customer is a fact, not a failure: matching continues, and
+    // only that customer's private vocabulary is unavailable to it.
+    const customerResolved = customer.state === "resolved"
+
+    const retrieved = await step.do("retrieve candidates", async () =>
+      retrieveCandidates(this.env, runId)
+    )
+
+    if (retrieved.state !== "complete") {
+      return failure(runId, acknowledgedAt, customerResolved)
+    }
+
+    const matched = await step.do("match products", async () =>
+      matchProducts(this.env, runId)
+    )
+
+    if (matched.state !== "complete") {
+      return failure(runId, acknowledgedAt, customerResolved)
+    }
+
     return {
       runId,
       state:
-        customer.state === "resolved"
-          ? "customer_resolved"
-          : customer.state === "unresolved"
-            ? "customer_unresolved"
-            : "failed",
+        matched.reviewCount > 0 || !customerResolved
+          ? "matches_need_review"
+          : "products_matched",
       acknowledgedAt,
+      customerResolved,
     }
   }
+}
+
+function failure(
+  runId: string,
+  acknowledgedAt: string,
+  customerResolved = false
+): RfqWorkflowResult {
+  return { runId, state: "failed", acknowledgedAt, customerResolved }
 }
