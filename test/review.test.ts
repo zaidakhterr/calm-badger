@@ -324,12 +324,19 @@ describe("a shared browser", () => {
       (await settle("unknown-view-id", "not-the-owner", "approve")).status
     ).toBe(404)
 
-    // Searching the catalogue is an owner action too.
+    // Searching the catalogue is an owner action too, and so is searching
+    // customers: both sit behind the same capability gate.
     const search = await exports.default.fetch(
       `${base}/api/runs/${run.viewId}/review/catalog?q=filter`
     )
 
     expect(search.status).toBe(401)
+
+    const customerSearch = await exports.default.fetch(
+      `${base}/api/runs/${run.viewId}/review/customers?q=works`
+    )
+
+    expect(customerSearch.status).toBe(401)
 
     // Nothing moved.
     const after = await readReview(run.viewId)
@@ -644,6 +651,38 @@ describe("approving a review", () => {
     const after = await readReview(run.viewId)
     expect(after.resolvedCount).toBe(0)
     expect(after.state).toBe("pending")
+  })
+
+  it("treats a mislabelled action on a product line as the catalogue choice it carries", async () => {
+    // A product line is decided by the article number a decision carries, not
+    // by the action word next to it. Nothing can be invented either way: the
+    // SKU still has to be an active catalogue product.
+    for (const action of ["customer", "quantity"]) {
+      const { run, ownerCapability, review } = await pausedRun()
+      const product = review.items.find((item) => item.kind === "product")!
+      const sku = product.proposal.sku ?? product.alternatives[0].value
+
+      const invented = await decide(run.viewId, ownerCapability, [
+        { itemId: product.id, action, sku: "NOT-A-REAL-SKU" },
+      ])
+
+      expect(invented.status).toBe(400)
+
+      const recorded = await decide(run.viewId, ownerCapability, [
+        { itemId: product.id, action, sku },
+      ])
+
+      expect(recorded.status).toBe(200)
+
+      const after = await readReview(run.viewId)
+      const decided = after.items.find((item) => item.id === product.id)!
+
+      expect(decided.state).toBe("resolved")
+      expect(decided.decision).toBe("chose_catalog")
+      expect(decided.resolved.sku).toBe(sku)
+      expect(decided.resolved.quantity).toBeNull()
+      expect(decided.resolved.customerId).toBeNull()
+    }
   })
 })
 
