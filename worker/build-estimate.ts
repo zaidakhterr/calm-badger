@@ -31,12 +31,22 @@ export type BuildEstimateOutcome =
   | { state: "blocked"; reason: string }
   | { state: "error"; message: string }
 
+export type BuildEstimateOptions = {
+  /**
+   * Whether an owner review already ran. After one, "not priceable" is no
+   * longer something a human can fix, so it is a terminal error rather than a
+   * node that waits for a review that has already happened.
+   */
+  reviewed: boolean
+}
+
 export async function buildEstimate(
   env: Env,
-  runId: string
+  runId: string,
+  options: BuildEstimateOptions = { reviewed: false }
 ): Promise<BuildEstimateOutcome> {
   try {
-    return await build(env, runId)
+    return await build(env, runId, options)
   } catch (error) {
     const message = "The estimate could not be built."
 
@@ -60,11 +70,33 @@ export async function buildEstimate(
   }
 }
 
-async function build(env: Env, runId: string): Promise<BuildEstimateOutcome> {
+async function build(
+  env: Env,
+  runId: string,
+  options: BuildEstimateOptions
+): Promise<BuildEstimateOutcome> {
   const startedAt = Date.now()
   const assembly = await assembleQuote(env, runId)
 
   if (assembly.state === "blocked") {
+    if (options.reviewed) {
+      // The owner has already decided everything that was open. Waiting again
+      // would be waiting for nobody, so this ends as a terminal state.
+      const message = `The approved corrections still leave this run unpriceable. ${assembly.reason}`
+
+      await failStep(env, runId, message)
+
+      console.error(
+        JSON.stringify({
+          event: "build_estimate_blocked_after_review",
+          runId,
+          step: BUILD_ESTIMATE_STEP_KEY,
+        })
+      )
+
+      return { state: "error", message }
+    }
+
     await holdStep(env, runId, assembly.reason)
 
     console.log(

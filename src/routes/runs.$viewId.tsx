@@ -24,10 +24,20 @@ import {
   fetchDocumentEvidence,
   fetchEstimateEvidence,
   fetchMatchEvidence,
+  fetchReview,
   fetchRun,
   fetchStructureEvidence,
   quoteDownloadUrl,
+  searchCatalog,
+  searchCustomers,
+  settleReview,
+  submitReviewDecisions,
   type AdapterId,
+  type CatalogSearchResult,
+  type CustomerSearchResult,
+  type Review,
+  type ReviewDecisionInput,
+  type ReviewItem,
   type CandidateEvidence,
   type CandidateLine,
   type Confidence,
@@ -53,6 +63,7 @@ const STRUCTURE_RFQ_STEP = "structure-rfq"
 const RESOLVE_CUSTOMER_STEP = "resolve-customer"
 const RETRIEVE_CANDIDATES_STEP = "retrieve-candidates"
 const MATCH_PRODUCTS_STEP = "match-products"
+const REVIEW_STEP = "review-required"
 const BUILD_ESTIMATE_STEP = "build-estimate"
 const DELIVER_STEP = "deliver"
 const DELIVERED_STEP = "delivered"
@@ -62,6 +73,7 @@ const EVIDENCE_STEPS = [
   RESOLVE_CUSTOMER_STEP,
   RETRIEVE_CANDIDATES_STEP,
   MATCH_PRODUCTS_STEP,
+  REVIEW_STEP,
   BUILD_ESTIMATE_STEP,
 ]
 const POLL_INTERVAL_MS = 1000
@@ -74,6 +86,7 @@ type RunSnapshot = RunView & {
   customer: CustomerEvidence | null
   candidates: CandidateEvidence | null
   matches: MatchEvidence | null
+  review: Review | null
   estimate: EstimateEvidence | null
   delivery: DeliveryEvidence | null
 }
@@ -91,12 +104,17 @@ async function readRunSnapshot(viewId: string): Promise<RunSnapshot> {
   // choosing one is what makes it run.
   const priced = started(MATCH_PRODUCTS_STEP)
 
+  // The review node only exists when the run needed one; when it does, it is
+  // the node the reader is being asked to act on.
+  const paused = view.run.steps.some((entry) => entry.key === REVIEW_STEP)
+
   const [
     documents,
     structure,
     customer,
     candidates,
     matches,
+    review,
     estimate,
     delivery,
   ] = await Promise.all([
@@ -105,6 +123,7 @@ async function readRunSnapshot(viewId: string): Promise<RunSnapshot> {
     started(RESOLVE_CUSTOMER_STEP) ? fetchCustomerEvidence(viewId) : null,
     started(RETRIEVE_CANDIDATES_STEP) ? fetchCandidateEvidence(viewId) : null,
     started(MATCH_PRODUCTS_STEP) ? fetchMatchEvidence(viewId) : null,
+    paused ? fetchReview(viewId) : null,
     priced ? fetchEstimateEvidence(viewId) : null,
     priced ? fetchDeliveryEvidence(viewId) : null,
   ])
@@ -116,6 +135,7 @@ async function readRunSnapshot(viewId: string): Promise<RunSnapshot> {
     customer,
     candidates,
     matches,
+    review,
     estimate,
     delivery,
   }
@@ -284,8 +304,21 @@ function evidencePanel(
   step: RunStep,
   snapshot: RunSnapshot,
   viewId: string,
-  onDelivered: () => void
+  onChanged: () => void
 ): React.ReactNode | null {
+  // The review node is the one place a reader is asked to decide rather than
+  // to read, so it offers its questions in every state, including waiting.
+  if (step.key === REVIEW_STEP && snapshot.review) {
+    return (
+      <ReviewPanel
+        review={snapshot.review}
+        viewId={viewId}
+        canDecide={snapshot.viewer.canMutate}
+        onChanged={onChanged}
+      />
+    )
+  }
+
   // Delivery is the one node that offers something while it is still waiting:
   // the adapter choice and its payload are what a reviewer inspects first.
   if (step.key === DELIVER_STEP && snapshot.delivery?.quoteAvailable) {
@@ -294,7 +327,7 @@ function evidencePanel(
         evidence={snapshot.delivery}
         viewId={viewId}
         canDeliver={snapshot.viewer.canMutate}
-        onDelivered={onDelivered}
+        onDelivered={onChanged}
       />
     )
   }
@@ -1235,6 +1268,439 @@ function EstimateLineRow({ line }: { line: QuoteLine }) {
  * Deliver. The adapter is chosen and its payload inspected before anything is
  * delivered, and both adapters are labelled simulated wherever they appear.
  */
+/**
+ * The review node.
+ *
+ * It is a normal node in the linear graph, not a modal or a branch: the same
+ * evidence for everyone, and controls only for the browser that started the
+ * run. Every control chooses between records that already exist — a proposal,
+ * one of the top three alternatives, a catalogue search result, an existing
+ * customer, or a whole-number quantity. Nothing here creates anything.
+ */
+function ReviewPanel({
+  review,
+  viewId,
+  canDecide,
+  onChanged,
+}: {
+  review: Review
+  viewId: string
+  canDecide: boolean
+  onChanged: () => void
+}) {
+  const [error, setError] = useState<string | null>(null)
+  const [isWorking, setIsWorking] = useState(false)
+
+  const open = review.state === "pending"
+  const interactive = canDecide && open
+
+  async function apply(decision: ReviewDecisionInput) {
+    setError(null)
+    setIsWorking(true)
+
+    try {
+      await submitReviewDecisions(viewId, [decision])
+      onChanged()
+    } catch (cause) {
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : "That correction could not be recorded"
+      )
+    } finally {
+      setIsWorking(false)
+    }
+  }
+
+  async function settle(action: "approve" | "reject") {
+    setError(null)
+    setIsWorking(true)
+
+    try {
+      await settleReview(viewId, action)
+      onChanged()
+    } catch (cause) {
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : "That decision could not be recorded"
+      )
+      setIsWorking(false)
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="rounded-md border border-workflow-review/40 bg-workflow-review-soft/60 p-3 text-xs leading-5">
+        <p>
+          {review.state === "pending"
+            ? `${review.resolvedCount} of ${review.itemCount} decisions confirmed. Pricing and delivery stay blocked until this node is approved.`
+            : review.state === "approved"
+              ? "Approved. The workflow resumed through the same deterministic pricing path."
+              : review.state === "rejected"
+                ? "Rejected by the owner. The run stops here; nothing was priced."
+                : "The review window closed before a decision was made, so this run was never priced."}
+        </p>
+        {review.expiresAt && open ? (
+          <p className="mt-1 text-muted-foreground">
+            Decide before {formatTimestamp(review.expiresAt)}. A review never
+            outlives the run data it decides.
+          </p>
+        ) : null}
+      </div>
+
+      <ol className="space-y-3">
+        {review.items.map((item) => (
+          <ReviewItemRow
+            key={item.id}
+            item={item}
+            viewId={viewId}
+            interactive={interactive && !isWorking}
+            onDecide={apply}
+          />
+        ))}
+      </ol>
+
+      {error ? <p className="text-xs text-destructive">{error}</p> : null}
+
+      {interactive ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            size="lg"
+            type="button"
+            disabled={!review.canApprove || isWorking}
+            onClick={() => void settle("approve")}
+          >
+            {isWorking ? "Working…" : "Approve matches"}
+          </Button>
+          <Button
+            size="lg"
+            variant="outline"
+            type="button"
+            disabled={isWorking}
+            onClick={() => void settle("reject")}
+          >
+            Reject
+          </Button>
+          {!review.canApprove ? (
+            <span className="text-[11px] text-muted-foreground">
+              Confirm every decision above to approve.
+            </span>
+          ) : null}
+        </div>
+      ) : null}
+
+      {!canDecide ? (
+        <p className="text-[11px] leading-5 text-muted-foreground">
+          {review.note}
+        </p>
+      ) : null}
+    </div>
+  )
+}
+
+function ReviewItemRow({
+  item,
+  viewId,
+  interactive,
+  onDecide,
+}: {
+  item: ReviewItem
+  viewId: string
+  interactive: boolean
+  onDecide: (decision: ReviewDecisionInput) => Promise<void>
+}) {
+  const [quantity, setQuantity] = useState("")
+  const [query, setQuery] = useState("")
+  const [products, setProducts] = useState<CatalogSearchResult[] | null>(null)
+  const [customers, setCustomers] = useState<CustomerSearchResult[] | null>(
+    null
+  )
+  const [searchError, setSearchError] = useState<string | null>(null)
+
+  const resolved = item.state === "resolved"
+
+  async function search() {
+    setSearchError(null)
+
+    try {
+      if (item.kind === "customer") {
+        setCustomers(await searchCustomers(viewId, query))
+      } else {
+        setProducts(await searchCatalog(viewId, query))
+      }
+    } catch (cause) {
+      setSearchError(
+        cause instanceof Error ? cause.message : "The search failed"
+      )
+    }
+  }
+
+  return (
+    <li className="rounded-md border bg-background px-3 py-2.5 text-xs">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="font-medium">
+            {reviewKindLabel(item.kind)}
+            {item.position >= 0 ? ` · line ${item.position}` : ""}
+          </p>
+          <p className="mt-1 font-mono text-[11px] break-words text-muted-foreground">
+            “{item.sourcePhrase}”
+          </p>
+        </div>
+        <span
+          className={cn(
+            "inline-flex h-5 items-center rounded-md border px-2 text-[11px] font-medium",
+            resolved
+              ? "border-workflow-complete/30 bg-workflow-complete-soft text-workflow-complete"
+              : "border-workflow-review/30 bg-workflow-review-soft text-workflow-review"
+          )}
+        >
+          {resolved ? "Confirmed" : "Needs a decision"}
+        </span>
+      </div>
+
+      <p className="mt-2 leading-5 text-muted-foreground">{item.detail}</p>
+
+      <ul className="mt-2 space-y-1 text-[11px] leading-5 text-muted-foreground">
+        {item.reasons.map((reason) => (
+          <li key={reason}>· {reason}</li>
+        ))}
+      </ul>
+
+      <p className="mt-2 text-[11px] leading-5 text-muted-foreground">
+        Confidence {item.confidence.label} · {item.confidence.score.toFixed(2)}{" "}
+        · {item.confidence.heuristic}
+      </p>
+
+      {resolved ? (
+        <p className="mt-2 leading-5">
+          Confirmed:{" "}
+          <span className="font-mono">
+            {item.resolved.sku ??
+              item.resolved.customerId ??
+              item.resolved.quantity}
+          </span>
+        </p>
+      ) : null}
+
+      {interactive && !resolved ? (
+        <div className="mt-3 space-y-2">
+          {item.proposal.sku ? (
+            <Button
+              size="lg"
+              type="button"
+              onClick={() =>
+                void onDecide({ itemId: item.id, action: "accept" })
+              }
+            >
+              {item.proposal.label}
+            </Button>
+          ) : null}
+
+          {item.kind === "field" ? (
+            <Button
+              size="lg"
+              type="button"
+              onClick={() =>
+                void onDecide({ itemId: item.id, action: "accept" })
+              }
+            >
+              {item.proposal.label}
+            </Button>
+          ) : null}
+
+          {item.alternatives.length > 0 ? (
+            <ul className="space-y-1.5">
+              {item.alternatives.map((alternative) => (
+                <li
+                  key={alternative.value}
+                  className="flex flex-wrap items-center justify-between gap-2 rounded-md border px-2.5 py-1.5"
+                >
+                  <span className="min-w-0">
+                    <span className="font-mono text-[11px]">
+                      {alternative.value}
+                    </span>{" "}
+                    {alternative.label}
+                    <span className="mt-0.5 block text-[11px] text-muted-foreground">
+                      {alternative.detail}
+                    </span>
+                  </span>
+                  <Button
+                    size="lg"
+                    variant="outline"
+                    type="button"
+                    onClick={() =>
+                      void onDecide(
+                        item.kind === "customer"
+                          ? {
+                              itemId: item.id,
+                              action: "alternative",
+                              customerId: alternative.value,
+                            }
+                          : {
+                              itemId: item.id,
+                              action: "alternative",
+                              sku: alternative.value,
+                            }
+                      )
+                    }
+                  >
+                    Choose
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+
+          {item.kind === "quantity" ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                inputMode="numeric"
+                value={quantity}
+                onChange={(event) => setQuantity(event.target.value)}
+                placeholder="Quantity"
+                className="h-8 w-28 rounded-md border bg-background px-2.5 text-xs outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
+              />
+              <Button
+                size="lg"
+                type="button"
+                onClick={() =>
+                  void onDecide({
+                    itemId: item.id,
+                    action: "quantity",
+                    quantity: Number(quantity),
+                  })
+                }
+              >
+                Confirm quantity
+              </Button>
+            </div>
+          ) : null}
+
+          {item.kind === "product" || item.kind === "customer" ? (
+            <div className="space-y-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  placeholder={
+                    item.kind === "customer"
+                      ? "Search existing customers"
+                      : "Search the complete catalogue"
+                  }
+                  className="h-8 min-w-52 flex-1 rounded-md border bg-background px-2.5 text-xs outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
+                />
+                <Button
+                  size="lg"
+                  variant="outline"
+                  type="button"
+                  onClick={() => void search()}
+                >
+                  Search
+                </Button>
+              </div>
+
+              {searchError ? (
+                <p className="text-[11px] text-destructive">{searchError}</p>
+              ) : null}
+
+              {products && item.kind === "product" ? (
+                <ul className="max-h-56 space-y-1.5 overflow-auto">
+                  {products.map((product) => (
+                    <li
+                      key={product.sku}
+                      className="flex flex-wrap items-center justify-between gap-2 rounded-md border px-2.5 py-1.5"
+                    >
+                      <span className="min-w-0">
+                        <span className="font-mono text-[11px]">
+                          {product.sku}
+                        </span>{" "}
+                        {product.name}
+                      </span>
+                      <Button
+                        size="lg"
+                        variant="outline"
+                        type="button"
+                        onClick={() =>
+                          void onDecide({
+                            itemId: item.id,
+                            action: "catalog",
+                            sku: product.sku,
+                          })
+                        }
+                      >
+                        Use
+                      </Button>
+                    </li>
+                  ))}
+                  {products.length === 0 ? (
+                    <li className="text-[11px] text-muted-foreground">
+                      No active catalogue product matched that search.
+                    </li>
+                  ) : null}
+                </ul>
+              ) : null}
+
+              {customers && item.kind === "customer" ? (
+                <ul className="max-h-56 space-y-1.5 overflow-auto">
+                  {customers.map((customer) => (
+                    <li
+                      key={customer.customerId}
+                      className="flex flex-wrap items-center justify-between gap-2 rounded-md border px-2.5 py-1.5"
+                    >
+                      <span className="min-w-0">
+                        {customer.name}
+                        <span className="mt-0.5 block text-[11px] text-muted-foreground">
+                          {customer.customerId} · {customer.tier}
+                          {customer.city ? ` · ${customer.city}` : ""}
+                        </span>
+                      </span>
+                      <Button
+                        size="lg"
+                        variant="outline"
+                        type="button"
+                        onClick={() =>
+                          void onDecide({
+                            itemId: item.id,
+                            action: "customer",
+                            customerId: customer.customerId,
+                          })
+                        }
+                      >
+                        Select
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+
+              <p className="text-[11px] leading-5 text-muted-foreground">
+                {item.kind === "customer"
+                  ? "Only existing customers can be selected; this demo never creates one from a request."
+                  : "Only active catalogue products can be chosen; nothing here creates a product."}
+              </p>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </li>
+  )
+}
+
+function reviewKindLabel(kind: string): string {
+  switch (kind) {
+    case "customer":
+      return "Customer"
+    case "product":
+      return "Product match"
+    case "quantity":
+      return "Quantity"
+    default:
+      return "Extracted field"
+  }
+}
+
 function DeliveryPanel({
   evidence,
   viewId,

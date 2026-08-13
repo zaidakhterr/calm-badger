@@ -91,6 +91,7 @@ async function retrieve(
   await ensureCatalogIndexes(env)
 
   const customerId = await resolvedCustomerId(env, runId)
+  const workspaceHash = await runWorkspaceHash(env, runId)
   const retrievals: { line: LineRow; retrieval: LineRetrieval }[] = []
 
   for (const line of lines) {
@@ -103,7 +104,7 @@ async function retrieve(
           description: line.description,
           catalogSku: line.catalog_sku,
         },
-        customerId
+        { customerId, workspaceHash }
       ),
     })
   }
@@ -214,6 +215,23 @@ async function loadLines(env: Env, runId: string): Promise<LineRow[]> {
     .all<LineRow>()
 
   return rows.results
+}
+
+/**
+ * The browser workspace this run belongs to, if any. It unlocks nothing except
+ * wording that same workspace confirmed in an earlier review.
+ */
+async function runWorkspaceHash(
+  env: Env,
+  runId: string
+): Promise<string | null> {
+  const row = await env.DB.prepare(
+    `SELECT workspace_hash FROM runs WHERE id = ?`
+  )
+    .bind(runId)
+    .first<{ workspace_hash: string | null }>()
+
+  return row?.workspace_hash ?? null
 }
 
 async function resolvedCustomerId(

@@ -212,6 +212,7 @@ function retrieve(
     description?: string
     catalogSku?: string
     customerId?: string
+    workspaceHash?: string
   } = {}
 ): Promise<LineRetrieval> {
   return retrieveForLine(
@@ -221,7 +222,10 @@ function retrieve(
       description: options.description ?? reference,
       catalogSku: options.catalogSku ?? null,
     },
-    options.customerId ?? null
+    {
+      customerId: options.customerId ?? null,
+      workspaceHash: options.workspaceHash ?? null,
+    }
   )
 }
 

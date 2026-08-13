@@ -1,4 +1,4 @@
-import { readOwnerCapability } from "@/lib/run-store"
+import { readOwnerCapability, workspaceId } from "@/lib/run-store"
 
 export type RunStepStatus =
   "waiting" | "active" | "complete" | "review_required" | "error"
@@ -317,6 +317,62 @@ export type MatchEvidence = {
   } | null
 }
 
+export type ReviewAlternative = {
+  /** A catalogue article number or a customer identifier, never free text. */
+  value: string
+  label: string
+  detail: string
+  score: number
+}
+
+export type ReviewItem = {
+  id: string
+  /** `customer`, `product`, `quantity`, or `field`. */
+  kind: string
+  position: number
+  sourcePhrase: string
+  detail: string
+  proposal: {
+    label: string
+    sku: string | null
+    quantity: number | null
+    customerId: string | null
+  }
+  confidence: { label: string; score: number; heuristic: string }
+  reasons: string[]
+  alternatives: ReviewAlternative[]
+  state: string
+  decision: string | null
+  resolved: {
+    sku: string | null
+    quantity: number | null
+    customerId: string | null
+    at: string | null
+  }
+}
+
+export type Review = {
+  stepKey: string
+  state: "not_required" | "pending" | "approved" | "rejected" | "expired"
+  openedAt: string | null
+  expiresAt: string | null
+  decidedAt: string | null
+  summary: string | null
+  itemCount: number
+  resolvedCount: number
+  canApprove: boolean
+  note: string
+  items: ReviewItem[]
+}
+
+export type ReviewDecisionInput = {
+  itemId: string
+  action: "accept" | "alternative" | "catalog" | "quantity" | "customer"
+  sku?: string
+  quantity?: number
+  customerId?: string
+}
+
 export type PricingRule =
   "historical_override" | "customer_tier" | "quantity_break" | "catalog_base"
 
@@ -480,10 +536,16 @@ export async function fetchScenarios(): Promise<Scenario[]> {
 
 type CreatedRun = { run: Run; viewer: Viewer; ownerCapability: string }
 
+/** The workspace header is what later runs learn in; it is never a credential. */
+function workspaceHeaders(): Record<string, string> {
+  const workspace = workspaceId()
+  return workspace ? { "x-workspace-id": workspace } : {}
+}
+
 export async function createRun(scenarioId: string): Promise<CreatedRun> {
   const response = await fetch("/api/runs", {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...workspaceHeaders() },
     body: JSON.stringify({ scenarioId }),
   })
 
@@ -501,7 +563,11 @@ export async function createCustomRun(input: {
   form.set("emailBody", input.emailBody)
   for (const file of input.files) form.append("files", file)
 
-  const response = await fetch("/api/runs", { method: "POST", body: form })
+  const response = await fetch("/api/runs", {
+    method: "POST",
+    headers: workspaceHeaders(),
+    body: form,
+  })
 
   if (!response.ok) throw new Error(await readError(response))
 
@@ -558,6 +624,108 @@ export function fetchDeliveryEvidence(
   viewId: string
 ): Promise<DeliveryEvidence> {
   return fetchEvidence<DeliveryEvidence>(viewId, "delivery")
+}
+
+/** The review as evidence. Any holder of the run URL may read it. */
+export async function fetchReview(viewId: string): Promise<Review> {
+  const response = await fetch(`/api/runs/${encodeURIComponent(viewId)}/review`)
+
+  if (response.status === 404) throw new RunNotFoundError()
+  if (!response.ok) throw new Error(await readError(response))
+
+  return ((await response.json()) as { review: Review }).review
+}
+
+function ownerHeaders(viewId: string): Record<string, string> {
+  const capability = readOwnerCapability(viewId)
+  if (!capability) throw new Error("This browser does not own this run")
+
+  return { authorization: `Bearer ${capability}` }
+}
+
+/** Owner-only: records corrections. It releases nothing on its own. */
+export async function submitReviewDecisions(
+  viewId: string,
+  decisions: ReviewDecisionInput[]
+): Promise<Review> {
+  const response = await fetch(
+    `/api/runs/${encodeURIComponent(viewId)}/review/decisions`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json", ...ownerHeaders(viewId) },
+      body: JSON.stringify({ decisions }),
+    }
+  )
+
+  if (!response.ok) throw new Error(await readError(response))
+
+  return ((await response.json()) as { review: Review }).review
+}
+
+/** Owner-only: the decision that resumes, or stops, the paused workflow. */
+export async function settleReview(
+  viewId: string,
+  action: "approve" | "reject"
+): Promise<Review> {
+  const response = await fetch(
+    `/api/runs/${encodeURIComponent(viewId)}/review`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json", ...ownerHeaders(viewId) },
+      body: JSON.stringify({ action }),
+    }
+  )
+
+  if (!response.ok) throw new Error(await readError(response))
+
+  return ((await response.json()) as { review: Review }).review
+}
+
+export type CatalogSearchResult = {
+  sku: string
+  name: string
+  category: string
+  manufacturer: string
+  unit: string
+}
+
+/** Owner-only: the complete catalogue, for when the shortlist was wrong. */
+export async function searchCatalog(
+  viewId: string,
+  query: string
+): Promise<CatalogSearchResult[]> {
+  const response = await fetch(
+    `/api/runs/${encodeURIComponent(viewId)}/review/catalog?q=${encodeURIComponent(query)}`,
+    { headers: ownerHeaders(viewId) }
+  )
+
+  if (!response.ok) throw new Error(await readError(response))
+
+  return ((await response.json()) as { products: CatalogSearchResult[] })
+    .products
+}
+
+export type CustomerSearchResult = {
+  customerId: string
+  name: string
+  tier: string
+  city: string | null
+}
+
+/** Owner-only: existing customers. There is no path here that creates one. */
+export async function searchCustomers(
+  viewId: string,
+  query: string
+): Promise<CustomerSearchResult[]> {
+  const response = await fetch(
+    `/api/runs/${encodeURIComponent(viewId)}/review/customers?q=${encodeURIComponent(query)}`,
+    { headers: ownerHeaders(viewId) }
+  )
+
+  if (!response.ok) throw new Error(await readError(response))
+
+  return ((await response.json()) as { customers: CustomerSearchResult[] })
+    .customers
 }
 
 /** The canonical quote download. Any holder of the run URL may read it. */

@@ -7,6 +7,7 @@
  */
 
 const CAPABILITY_KEY_PREFIX = "rfq-relay:run-capability:"
+const WORKSPACE_KEY = "rfq-relay:workspace"
 const RECENT_RUNS_KEY = "rfq-relay:recent-runs"
 const RECENT_RUNS_LIMIT = 10
 
@@ -22,6 +23,30 @@ function storage(): Storage | null {
   } catch {
     return null
   }
+}
+
+/**
+ * The anonymous workspace this browser learns in.
+ *
+ * Approved review corrections are remembered against it, so a later run in this
+ * browser recognises wording an earlier review confirmed. It identifies no
+ * person, is generated here rather than assigned by the server, and the server
+ * only ever stores its hash.
+ */
+export function workspaceId(): string | null {
+  const store = storage()
+  if (!store) return null
+
+  const existing = store.getItem(WORKSPACE_KEY)
+  if (existing) return existing
+
+  const bytes = crypto.getRandomValues(new Uint8Array(24))
+  const created = [...bytes]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("")
+
+  store.setItem(WORKSPACE_KEY, created)
+  return created
 }
 
 export function readOwnerCapability(viewId: string): string | null {

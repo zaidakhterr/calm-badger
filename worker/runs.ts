@@ -151,8 +151,13 @@ export async function hashCapability(capability: string): Promise<string> {
  * scenario assets; custom sources are already validated upload bytes.
  */
 export type RunInput =
-  | { kind: "curated"; scenarioId: ScenarioId; requestUrl: string }
-  | { kind: "custom"; sources: PreparedSource[] }
+  | {
+      kind: "curated"
+      scenarioId: ScenarioId
+      requestUrl: string
+      workspaceId?: string | null
+    }
+  | { kind: "custom"; sources: PreparedSource[]; workspaceId?: string | null }
 
 export async function createRun(
   env: Env,
@@ -162,6 +167,12 @@ export async function createRun(
   const viewId = randomToken(16)
   const ownerCapability = randomToken(32)
   const ownerCapabilityHash = await hashCapability(ownerCapability)
+  // The anonymous workspace is where approved corrections are remembered. Like
+  // the owner capability, only its hash is stored, and it never leaves the
+  // browser except as a request header.
+  const workspaceHash = input.workspaceId
+    ? await hashCapability(input.workspaceId)
+    : null
   const now = new Date().toISOString()
 
   // Sources are read before the run exists so that a missing curated asset
@@ -175,14 +186,16 @@ export async function createRun(
     env.DB.prepare(
       `INSERT INTO runs (
          id, view_id, owner_capability_hash, source_kind, scenario_id,
-         status, workflow_instance_id, workflow_state, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, 'active', NULL, 'pending', ?, ?)`
+         status, workflow_instance_id, workflow_state, workspace_hash,
+         created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, 'active', NULL, 'pending', ?, ?, ?)`
     ).bind(
       runId,
       viewId,
       ownerCapabilityHash,
       input.kind,
       input.kind === "curated" ? input.scenarioId : null,
+      workspaceHash,
       now,
       now
     ),
@@ -322,11 +335,25 @@ export async function resolveRunId(
   return row?.id ?? null
 }
 
-/** Deletes the stored originals first, then every persisted record. */
+/**
+ * Deletes the stored originals first, then every persisted record.
+ *
+ * The durable orchestrator is stopped before any of that. A run that stopped at
+ * the review node has a workflow instance hibernating on an event that will now
+ * never arrive; deleting its rows without terminating it would leave that
+ * instance waiting for days against a run that no longer exists.
+ *
+ * `workspace_product_aliases` is deliberately *not* cascaded. Those rows are
+ * the browser workspace's memory rather than this run's artifacts, and the
+ * point of learning them is that a later run benefits.
+ */
 export async function deleteRun(env: Env, runId: string): Promise<void> {
+  await terminateWorkflow(env, runId)
   await deleteStoredSources(env, runId)
 
   await env.DB.batch([
+    env.DB.prepare(`DELETE FROM run_review_items WHERE run_id = ?`).bind(runId),
+    env.DB.prepare(`DELETE FROM run_reviews WHERE run_id = ?`).bind(runId),
     env.DB.prepare(`DELETE FROM run_deliveries WHERE run_id = ?`).bind(runId),
     env.DB.prepare(`DELETE FROM run_quotes WHERE run_id = ?`).bind(runId),
     env.DB.prepare(`DELETE FROM run_line_matches WHERE run_id = ?`).bind(runId),
@@ -348,6 +375,60 @@ export async function deleteRun(env: Env, runId: string): Promise<void> {
     env.DB.prepare(`DELETE FROM run_steps WHERE run_id = ?`).bind(runId),
     env.DB.prepare(`DELETE FROM runs WHERE id = ?`).bind(runId),
   ])
+}
+
+/**
+ * Stops the durable instance behind a run, if it is still running. A completed,
+ * failed, or already-terminated instance refuses, which is not a problem worth
+ * failing a reset over.
+ */
+const STOPPABLE_STATUSES = new Set([
+  "queued",
+  "running",
+  "paused",
+  "waiting",
+  "waitingForPause",
+])
+
+async function terminateWorkflow(env: Env, runId: string): Promise<void> {
+  const row = await env.DB.prepare(
+    `SELECT workflow_instance_id FROM runs WHERE id = ?`
+  )
+    .bind(runId)
+    .first<{ workflow_instance_id: string | null }>()
+
+  if (!row?.workflow_instance_id) return
+
+  try {
+    const instance = await env.RFQ_WORKFLOW.get(row.workflow_instance_id)
+    const { status } = await instance.status()
+
+    // An instance that already reached a final state refuses to be terminated,
+    // and rightly so: there is nothing left to stop.
+    if (!STOPPABLE_STATUSES.has(status)) return
+
+    await instance.terminate()
+
+    console.log(
+      JSON.stringify({ event: "workflow_terminated", runId, reason: "reset" })
+    )
+  } catch {
+    // Nothing left to stop: the instance already finished or is gone.
+  }
+}
+
+/** The workflow instance a run's review event has to be delivered to. */
+export async function workflowInstanceId(
+  env: Env,
+  runId: string
+): Promise<string | null> {
+  const row = await env.DB.prepare(
+    `SELECT workflow_instance_id FROM runs WHERE id = ?`
+  )
+    .bind(runId)
+    .first<{ workflow_instance_id: string | null }>()
+
+  return row?.workflow_instance_id ?? null
 }
 
 function readBearerToken(authorization: string | null): string | null {

@@ -54,6 +54,11 @@
     // leads the runner-up by at least MATCH_WINNER_GAP.
     "MATCH_WINNER_STRENGTH": "0.55",
     "MATCH_WINNER_GAP": "0.12",
+    // How long an owner has to decide a review before it expires. The window
+    // mirrors run retention, so a review never outlives the data it decides:
+    // curated sample runs live seven days, custom uploads twenty-four hours.
+    "REVIEW_WINDOW_SECONDS_CURATED": "604800",
+    "REVIEW_WINDOW_SECONDS_CUSTOM": "86400",
     "OPENROUTER_COST_PER_1M_INPUT_TOKENS_USD": "1.25",
     "OPENROUTER_COST_PER_1M_OUTPUT_TOKENS_USD": "10",
     "POSTHOG_HOST": "https://eu.i.posthog.com",

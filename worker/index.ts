@@ -11,6 +11,15 @@ import {
   loadStructureEvidence,
 } from "./evidence"
 import {
+  loadReviewEvidence,
+  recordDecisions,
+  REVIEW_EVENT_TYPE,
+  searchReviewCatalog,
+  searchReviewCustomers,
+  settleReview,
+  type DecisionInput,
+} from "./review"
+import {
   authorizeOwner,
   createRun,
   deleteRun,
@@ -18,6 +27,7 @@ import {
   isScenarioId,
   loadRun,
   resolveRunId,
+  workflowInstanceId,
   type RunInput,
 } from "./runs"
 import { scenarioPreviews } from "./scenarios"
@@ -119,12 +129,33 @@ async function routeRequest(
   }
 
   const runMatch =
-    /^\/api\/runs\/([A-Za-z0-9_-]+)(?:\/(reset|deliver|documents|structure|customer|candidates|matches|estimate|delivery|quote)|\/delivery\/(preview)|\/sources\/([A-Za-z0-9-]+))?$/.exec(
+    /^\/api\/runs\/([A-Za-z0-9_-]+)(?:\/(reset|deliver|documents|structure|customer|candidates|matches|estimate|delivery|quote|review)|\/delivery\/(preview)|\/review\/(decisions|catalog|customers)|\/sources\/([A-Za-z0-9-]+))?$/.exec(
       url.pathname
     )
 
   if (runMatch) {
-    const [, viewId, segment, deliveryPreview, sourceId] = runMatch
+    const [, viewId, segment, deliveryPreview, reviewSegment, sourceId] =
+      runMatch
+
+    if (reviewSegment === "decisions") {
+      if (request.method !== "POST") {
+        return methodNotAllowed("POST")
+      }
+
+      return reviewDecisionsResponse(request, env, viewId)
+    }
+
+    if (reviewSegment === "catalog" || reviewSegment === "customers") {
+      if (request.method !== "GET") {
+        return methodNotAllowed("GET")
+      }
+
+      return reviewSearchResponse(request, env, viewId, reviewSegment, url)
+    }
+
+    if (segment === "review" && request.method === "POST") {
+      return reviewDecisionResponse(request, env, viewId)
+    }
 
     if (segment === "reset") {
       if (request.method !== "POST") {
@@ -154,6 +185,10 @@ async function routeRequest(
 
     if (segment === "quote") {
       return quoteDownloadResponse(env, viewId)
+    }
+
+    if (segment === "review") {
+      return reviewViewResponse(env, viewId)
     }
 
     if (
@@ -201,6 +236,13 @@ async function createRunResponse(
     ? await readCustomInput(request)
     : await readCuratedInput(request)
 
+  if (input.ok) {
+    // The anonymous workspace this browser learns in. It is optional, opaque,
+    // and only ever stored as a hash; it identifies no person and unlocks
+    // nothing but wording this same browser confirmed earlier.
+    input.value.workspaceId = readWorkspaceId(request)
+  }
+
   if (!input.ok) {
     // Nothing is persisted and no provider is called for a rejected request.
     console.log(
@@ -236,6 +278,17 @@ async function createRunResponse(
 type InputResult =
   | { ok: true; value: RunInput }
   | { ok: false; error: string; reasonCode: string }
+
+/** An opaque browser-generated token, bounded and never logged. */
+function readWorkspaceId(request: Request): string | null {
+  const value = request.headers.get("x-workspace-id")?.trim() ?? ""
+
+  return value.length >= 16 &&
+    value.length <= 128 &&
+    /^[A-Za-z0-9_-]+$/.test(value)
+    ? value
+    : null
+}
 
 async function readCuratedInput(request: Request): Promise<InputResult> {
   const payload = await readJsonBody(request)
@@ -454,6 +507,231 @@ async function deliverRunResponse(
     { status: "delivered", delivery: outcome.delivery },
     { headers: jsonHeaders }
   )
+}
+
+/* -------------------------------------------------------------------------- */
+/* Owner review                                                               */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The review as evidence. It is the same allowlisted projection for the owner
+ * and for a shared viewer: what was asked, what was proposed, on what grounds,
+ * and what was decided. Reading it grants nothing — every control that changes
+ * it is a separate, capability-checked mutation below.
+ */
+async function reviewViewResponse(env: Env, viewId: string): Promise<Response> {
+  const runId = await resolveRunId(env, viewId)
+
+  if (!runId) {
+    return Response.json(
+      { error: "This run is unavailable or has expired" },
+      { status: 404, headers: jsonHeaders }
+    )
+  }
+
+  return Response.json(
+    { review: await loadReviewEvidence(env, runId) },
+    { headers: jsonHeaders }
+  )
+}
+
+const REVIEW_ACTIONS = new Set([
+  "accept",
+  "alternative",
+  "catalog",
+  "quantity",
+  "customer",
+])
+
+/** Records corrections. It never releases the workflow; approval does that. */
+async function reviewDecisionsResponse(
+  request: Request,
+  env: Env,
+  viewId: string
+): Promise<Response> {
+  const authorization = await authorizeOwner(
+    env,
+    viewId,
+    request.headers.get("authorization")
+  )
+
+  if (!authorization.ok) return ownerRejection(authorization.reason)
+
+  const payload = await readJsonBody(request)
+  const submitted = (payload as { decisions?: unknown } | null)?.decisions
+
+  if (!Array.isArray(submitted)) {
+    return Response.json(
+      { error: "A list of review decisions is required" },
+      { status: 400, headers: jsonHeaders }
+    )
+  }
+
+  const decisions: DecisionInput[] = []
+
+  for (const entry of submitted) {
+    const decision = entry as Record<string, unknown>
+
+    if (
+      typeof decision.itemId !== "string" ||
+      typeof decision.action !== "string" ||
+      !REVIEW_ACTIONS.has(decision.action)
+    ) {
+      return Response.json(
+        { error: "Each decision needs a known item and action" },
+        { status: 400, headers: jsonHeaders }
+      )
+    }
+
+    decisions.push({
+      itemId: decision.itemId,
+      action: decision.action as DecisionInput["action"],
+      sku: decision.sku,
+      quantity: decision.quantity,
+      customerId: decision.customerId,
+    })
+  }
+
+  const outcome = await recordDecisions(env, authorization.runId, decisions)
+
+  if (outcome.state === "invalid") {
+    return Response.json(
+      { error: outcome.message },
+      { status: 400, headers: jsonHeaders }
+    )
+  }
+
+  if (outcome.state === "closed") {
+    return Response.json(
+      { error: outcome.message, review: outcome.review },
+      { status: 409, headers: jsonHeaders }
+    )
+  }
+
+  return Response.json(
+    { status: "recorded", review: outcome.review },
+    { headers: jsonHeaders }
+  )
+}
+
+/**
+ * The decision itself. The capability, the review window, and the exact
+ * persisted review state are all validated here; only then is the hibernating
+ * workflow released, and even then it re-reads that state rather than trusting
+ * the event.
+ */
+async function reviewDecisionResponse(
+  request: Request,
+  env: Env,
+  viewId: string
+): Promise<Response> {
+  const authorization = await authorizeOwner(
+    env,
+    viewId,
+    request.headers.get("authorization")
+  )
+
+  if (!authorization.ok) return ownerRejection(authorization.reason)
+
+  const payload = await readJsonBody(request)
+  const action = (payload as { action?: unknown } | null)?.action
+
+  if (action !== "approve" && action !== "reject") {
+    return Response.json(
+      { error: "A review decision must be approve or reject" },
+      { status: 400, headers: jsonHeaders }
+    )
+  }
+
+  const outcome = await settleReview(env, authorization.runId, action)
+
+  if (outcome.state === "absent") {
+    return Response.json(
+      { error: "This run has nothing waiting for review" },
+      { status: 409, headers: jsonHeaders }
+    )
+  }
+
+  if (outcome.state === "incomplete" || outcome.state === "closed") {
+    return Response.json(
+      {
+        error: outcome.message,
+        status: outcome.review.state,
+        review: outcome.review,
+      },
+      { status: 409, headers: jsonHeaders }
+    )
+  }
+
+  await releaseWorkflow(env, authorization.runId)
+
+  return Response.json(
+    {
+      status: outcome.decision === "approve" ? "approved" : "rejected",
+      review: outcome.review,
+    },
+    { headers: jsonHeaders }
+  )
+}
+
+/**
+ * Wakes the hibernating instance. The event is a doorbell, not an instruction:
+ * it carries no decision, and the workflow reads the persisted review to learn
+ * what happened. A failure to deliver leaves the durable business state intact
+ * — the wait ends at its deadline and reaches the same conclusion.
+ */
+async function releaseWorkflow(env: Env, runId: string): Promise<void> {
+  const instanceId = await workflowInstanceId(env, runId)
+  if (!instanceId) return
+
+  try {
+    const instance = await env.RFQ_WORKFLOW.get(instanceId)
+    await instance.sendEvent({
+      type: REVIEW_EVENT_TYPE,
+      payload: { runId },
+    })
+  } catch (error) {
+    console.error(
+      JSON.stringify({
+        event: "review_event_undelivered",
+        runId,
+        error: error instanceof Error ? error.name : "unknown",
+      })
+    )
+  }
+}
+
+/**
+ * Searching beyond the shortlist. Both searches are owner actions, like the
+ * adapter preview: they exist to make a correction possible, and a shared
+ * viewer has no correction to make.
+ */
+async function reviewSearchResponse(
+  request: Request,
+  env: Env,
+  viewId: string,
+  segment: "catalog" | "customers",
+  url: URL
+): Promise<Response> {
+  const authorization = await authorizeOwner(
+    env,
+    viewId,
+    request.headers.get("authorization")
+  )
+
+  if (!authorization.ok) return ownerRejection(authorization.reason)
+
+  const query = (url.searchParams.get("q") ?? "").slice(0, 120)
+
+  return segment === "catalog"
+    ? Response.json(
+        { products: await searchReviewCatalog(env, query) },
+        { headers: jsonHeaders }
+      )
+    : Response.json(
+        { customers: await searchReviewCustomers(env, query) },
+        { headers: jsonHeaders }
+      )
 }
 
 function ownerRejection(

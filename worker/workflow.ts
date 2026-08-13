@@ -6,6 +6,12 @@ import { matchProducts } from "./match-products"
 import { readDocuments } from "./read-documents"
 import { resolveCustomer } from "./resolve-customer"
 import { retrieveCandidates } from "./retrieve-candidates"
+import {
+  expireReview,
+  openReview,
+  readReviewState,
+  REVIEW_EVENT_TYPE,
+} from "./review"
 import { RFQ_RECEIVED_STEP_KEY } from "./runs"
 import { structureRfq } from "./structure-rfq"
 
@@ -15,11 +21,19 @@ export type RfqWorkflowParams = {
 
 export type RfqWorkflowResult = {
   runId: string
-  state: "estimate_built" | "matches_need_review" | "failed"
+  state:
+    | "estimate_built"
+    | "matches_need_review"
+    | "review_rejected"
+    | "review_expired"
+    | "failed"
   acknowledgedAt: string
   /** Whether identity was settled. An unresolved run still matches products. */
   customerResolved: boolean
 }
+
+/** What the Worker delivers once it has validated an owner's decision. */
+export type ReviewEventPayload = { runId: string }
 
 export class RfqWorkflow extends WorkflowEntrypoint<Env, RfqWorkflowParams> {
   async run(
@@ -107,12 +121,58 @@ export class RfqWorkflow extends WorkflowEntrypoint<Env, RfqWorkflowParams> {
       return failure(runId, acknowledgedAt, customerResolved)
     }
 
+    // Everything the run could not decide for itself is consolidated into one
+    // node here. When there is nothing to ask, no review node is ever shown and
+    // pricing follows immediately.
+    const review = await step.do("open review", async () =>
+      openReview(this.env, runId)
+    )
+
+    if (review.state === "error") {
+      return failure(runId, acknowledgedAt, customerResolved)
+    }
+
+    if (review.state === "required") {
+      // The instance hibernates here. It consumes nothing while it waits, and
+      // the client does not have to stay open to keep the run alive.
+      try {
+        await step.waitForEvent<ReviewEventPayload>("owner review", {
+          type: REVIEW_EVENT_TYPE,
+          timeout: review.timeoutMs,
+        })
+      } catch {
+        // A timeout is the ordinary way this wait ends without a decision. It
+        // is not proof of one: the Worker may have persisted an approval that
+        // raced the deadline, so the persisted state below decides, and only a
+        // review still pending is expired.
+        await step.do("close review window", async () => {
+          await expireReview(this.env, runId)
+          return true
+        })
+      }
+
+      // The event proves nothing on its own; the persisted review does. A
+      // replayed, forged, or racing event therefore cannot move this run.
+      const settled = await step.do("read review decision", async () =>
+        readReviewState(this.env, runId)
+      )
+
+      if (settled !== "approved") {
+        return {
+          runId,
+          state: settled === "rejected" ? "review_rejected" : "review_expired",
+          acknowledgedAt,
+          customerResolved,
+        }
+      }
+    }
+
     // Pricing decides for itself whether the run is priceable: identity
-    // settled, every line matched and quantified. A run that is not stops here
-    // with the estimate node still waiting, and the review node of the next
-    // ticket is what releases it. Nothing unreviewed is ever priced.
+    // settled, every line matched and quantified. Approved corrections are
+    // already written into those same facts, so the corrected run is priced by
+    // exactly the deterministic path an untouched run takes.
     const estimate = await step.do("build estimate", async () =>
-      buildEstimate(this.env, runId)
+      buildEstimate(this.env, runId, { reviewed: review.state === "required" })
     )
 
     if (estimate.state === "error") {

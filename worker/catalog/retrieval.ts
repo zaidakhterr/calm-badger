@@ -91,6 +91,19 @@ export type RetrievalQuery = {
   catalogSku: string | null
 }
 
+/**
+ * Whose vocabulary this line may be read with.
+ *
+ * `customerId` unlocks the catalogue's record of that customer's wording, and
+ * `workspaceHash` unlocks wording the owner of *this* browser workspace
+ * confirmed during an earlier review. Both are private: an unresolved run sees
+ * neither, and a run from another workspace never sees the second.
+ */
+export type RetrievalScope = {
+  customerId: string | null
+  workspaceHash: string | null
+}
+
 const PRODUCT_COLUMNS = `sku, name, description, category, manufacturer, unit,
        status, replacement_sku, near_duplicate_of`
 
@@ -245,7 +258,7 @@ async function catalogSignature(env: Env): Promise<{ value: string }> {
 export async function retrieveForLine(
   env: Env,
   query: RetrievalQuery,
-  customerId: string | null
+  scope: RetrievalScope
 ): Promise<LineRetrieval> {
   const searchText = [query.reference, query.description]
     .filter((part) => part && part.trim().length > 0)
@@ -283,7 +296,7 @@ export async function retrieveForLine(
   const alias = await findAlias(
     env,
     [query.reference, query.description],
-    customerId
+    scope
   )
 
   if (alias) {
@@ -300,20 +313,24 @@ export async function retrieveForLine(
       // longer phrase is retrieval evidence: it leads the shortlist, and the
       // model still has to defend it.
       const deterministic =
-        alias.exact && (alias.kind === "alias" || alias.kind === "customer")
+        alias.exact &&
+        (alias.kind === "alias" ||
+          alias.kind === "customer" ||
+          alias.kind === "workspace")
 
       if (deterministic) {
         return {
           state: "exact",
           candidate: {
             ...product,
-            source:
-              alias.kind === "customer" ? "customer_alias" : "known_alias",
+            source: alias.kind === "alias" ? "known_alias" : "customer_alias",
             score: 1,
             evidence:
-              alias.kind === "customer"
-                ? `“${alias.alias}” is wording this customer is recorded as using for ${product.sku}.`
-                : `“${alias.alias}” is a known catalogue name for ${product.sku}.`,
+              alias.kind === "workspace"
+                ? `“${alias.alias}” is wording this browser workspace confirmed for ${product.sku} in an earlier review of this customer's requests.`
+                : alias.kind === "customer"
+                  ? `“${alias.alias}” is wording this customer is recorded as using for ${product.sku}.`
+                  : `“${alias.alias}” is a known catalogue name for ${product.sku}.`,
           },
           shortlist: [],
           query: searchText,
@@ -488,7 +505,7 @@ function tokenise(value: string): string[] {
 async function findAlias(
   env: Env,
   phrases: string[],
-  customerId: string | null
+  scope: RetrievalScope
 ): Promise<AliasMatch | null> {
   const exactPhrases = new Set(
     phrases
@@ -510,7 +527,7 @@ async function findAlias(
       WHERE a.normalised IN (${placeholders})
         AND (a.customer_id IS NULL OR a.customer_id = ?)`
   )
-    .bind(...wanted, customerId)
+    .bind(...wanted, scope.customerId)
     .all<{
       normalised: string
       sku: string
@@ -519,9 +536,35 @@ async function findAlias(
       status: string
     }>()
 
-  if (rows.results.length === 0) return null
+  // Wording this browser workspace confirmed for this customer in an earlier
+  // review. It is stored apart from the seeded catalogue and is only ever read
+  // for a run that carries the same workspace, so one visitor's correction can
+  // never answer another visitor's request.
+  const learned =
+    scope.workspaceHash && scope.customerId
+      ? await env.DB.prepare(
+          `SELECT w.normalised AS normalised, w.sku AS sku, w.alias AS alias,
+                  'workspace' AS kind, p.status AS status
+             FROM workspace_product_aliases w
+             JOIN catalog_products p ON p.sku = w.sku
+            WHERE w.workspace_hash = ? AND w.customer_id = ?
+              AND w.normalised IN (${placeholders})`
+        )
+          .bind(scope.workspaceHash, scope.customerId, ...wanted)
+          .all<{
+            normalised: string
+            sku: string
+            alias: string
+            kind: string
+            status: string
+          }>()
+      : null
 
-  const matches = rows.results.map((row) => ({
+  const found = [...rows.results, ...(learned?.results ?? [])]
+
+  if (found.length === 0) return null
+
+  const matches = found.map((row) => ({
     sku: row.sku,
     alias: row.alias,
     kind: row.kind,
@@ -531,11 +574,20 @@ async function findAlias(
   }))
 
   // An exact statement beats a quotation; a longer quotation beats a shorter
-  // one; then customer wording, a catalogue name, a misspelling, a superseded
-  // number. An archived product still wins its own superseded number, which is
-  // what makes the substitution visible instead of silent.
+  // one; then wording this workspace confirmed itself, this customer's recorded
+  // wording, a catalogue name, a misspelling, a superseded number. An archived
+  // product still wins its own superseded number, which is what makes the
+  // substitution visible instead of silent.
   const rank = (kind: string) =>
-    kind === "customer" ? 0 : kind === "alias" ? 1 : kind === "typo" ? 2 : 3
+    kind === "workspace"
+      ? 0
+      : kind === "customer"
+        ? 1
+        : kind === "alias"
+          ? 2
+          : kind === "typo"
+            ? 3
+            : 4
 
   matches.sort(
     (left, right) =>
