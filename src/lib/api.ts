@@ -509,6 +509,42 @@ export const UPLOAD_LIMITS = {
   acceptAttribute: ".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png",
 } as const
 
+/**
+ * Mirrors the Worker's processing limit so the landing copy states the number
+ * that is actually enforced.
+ */
+export const PROCESSING_LIMIT_PER_HOUR = 5
+
+/**
+ * Being over the hourly processing limit is not a failure of the visitor's
+ * request; the interface says so in its own voice rather than as an error.
+ */
+export class RateLimitedError extends Error {
+  readonly retryAfterSeconds: number
+
+  constructor(message: string, retryAfterSeconds: number) {
+    super(message)
+    this.name = "RateLimitedError"
+    this.retryAfterSeconds = retryAfterSeconds
+  }
+}
+
+async function readRateLimit(response: Response): Promise<RateLimitedError> {
+  try {
+    const body = (await response.json()) as {
+      error?: string
+      retryAfterSeconds?: number
+    }
+
+    return new RateLimitedError(
+      body.error ?? "This demo is at its hourly run limit",
+      body.retryAfterSeconds ?? 3600
+    )
+  } catch {
+    return new RateLimitedError("This demo is at its hourly run limit", 3600)
+  }
+}
+
 export class RunNotFoundError extends Error {
   constructor() {
     super("This run is unavailable or has expired")
@@ -599,6 +635,7 @@ export async function createRun(scenarioId: string): Promise<CreatedRun> {
     body: JSON.stringify({ scenarioId }),
   })
 
+  if (response.status === 429) throw await readRateLimit(response)
   if (!response.ok) throw new Error(await readError(response))
 
   return (await response.json()) as CreatedRun
@@ -619,6 +656,7 @@ export async function createCustomRun(input: {
     body: form,
   })
 
+  if (response.status === 429) throw await readRateLimit(response)
   if (!response.ok) throw new Error(await readError(response))
 
   return (await response.json()) as CreatedRun

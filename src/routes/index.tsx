@@ -13,6 +13,8 @@ import {
   createCustomRun,
   createRun,
   fetchScenarios,
+  PROCESSING_LIMIT_PER_HOUR,
+  RateLimitedError,
   UPLOAD_LIMITS,
   type Scenario,
 } from "@/lib/api"
@@ -32,6 +34,7 @@ function LandingPage() {
   const [selectedId, setSelectedId] = useState(featured.id)
   const [isStarting, setIsStarting] = useState(false)
   const [startError, setStartError] = useState<string | null>(null)
+  const [isLimited, setIsLimited] = useState(false)
   const [recentRuns] = useState(() => readRecentRuns())
   const [mode, setMode] = useState<"curated" | "custom">("curated")
   const [emailBody, setEmailBody] = useState("")
@@ -49,6 +52,7 @@ function LandingPage() {
   async function handleProcessRfq() {
     setIsStarting(true)
     setStartError(null)
+    setIsLimited(false)
 
     try {
       const { run, ownerCapability } =
@@ -65,6 +69,9 @@ function LandingPage() {
 
       await navigate({ to: "/runs/$viewId", params: { viewId: run.viewId } })
     } catch (error) {
+      // Reaching the hourly limit is a boundary of the demo, not a fault: it
+      // is said plainly rather than in the destructive voice used for errors.
+      setIsLimited(error instanceof RateLimitedError)
       setStartError(
         error instanceof Error ? error.message : "The run could not be started"
       )
@@ -139,6 +146,7 @@ function LandingPage() {
           type="button"
           onClick={() => {
             setStartError(null)
+            setIsLimited(false)
             setMode(mode === "custom" ? "curated" : "custom")
           }}
         >
@@ -157,14 +165,25 @@ function LandingPage() {
       </div>
 
       {startError ? (
-        <p className="mt-3 text-[13px] text-destructive">{startError}</p>
+        <p
+          className={
+            isLimited
+              ? "mt-3 rounded-md border border-workflow-review/40 bg-workflow-review-soft/60 p-3 text-[13px] leading-5"
+              : "mt-3 text-[13px] text-destructive"
+          }
+        >
+          {startError}
+        </p>
       ) : null}
 
       <p className="mt-4 text-[13px] leading-5 text-muted-foreground">
         This public demo is for synthetic or non-confidential documents only.
         Custom uploads accept PDF, JPEG, and PNG files, up to{" "}
         {UPLOAD_LIMITS.maxFiles} files and{" "}
-        {UPLOAD_LIMITS.maxBytes / 1024 / 1024} MB combined.
+        {UPLOAD_LIMITS.maxBytes / 1024 / 1024} MB combined. There is no login:
+        the live AI providers are protected by a limit of{" "}
+        {PROCESSING_LIMIT_PER_HOUR} runs an hour from one place, and opening a
+        run you already started never counts against it.
       </p>
 
       {recentRuns.length > 0 ? (
@@ -321,8 +340,9 @@ function CustomSourceForm({
               Submit synthetic or non-confidential material only.
             </span>{" "}
             This is a public demonstration. Uploads and everything derived from
-            them are read by an external OCR provider and kept in private
-            storage; short-lived retention is part of the demo design.
+            them are read by an external OCR provider, kept in private storage,
+            and deleted 24 hours after the run starts. Curated sample runs are
+            deleted after seven days.
           </p>
         </div>
 

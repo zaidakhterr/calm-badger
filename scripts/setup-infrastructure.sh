@@ -502,6 +502,18 @@ else
   else
     cf_wrangler r2 bucket create "$BUCKET_NAME" --location weur --update-config --binding ARTIFACTS
   fi
+
+  # The safety net under the daily cleanup job: a lifecycle rule expires any
+  # object left under the run prefix, whichever way its database row was lost.
+  # Eight days is deliberately one day past the longest retention window, so the
+  # application still owns deletion and this only catches what it missed.
+  # Lifecycle rules are bucket settings rather than Worker configuration, which
+  # is why they are provisioned here and not in wrangler.jsonc.
+  if cf_wrangler r2 bucket lifecycle list "$BUCKET_NAME" 2>/dev/null | grep -q "expire-run-artifacts"; then
+    note "Keeping the existing R2 lifecycle rule expire-run-artifacts."
+  else
+    cf_wrangler r2 bucket lifecycle add "$BUCKET_NAME" expire-run-artifacts "runs/" --expire-days 8 --force
+  fi
 fi
 configure_wrangler "$INFRA_SLUG" "$D1_DATABASE_ID"
 write_to_file "$SETUP_STATE_FILE" D1_DATABASE_ID "$D1_DATABASE_ID"

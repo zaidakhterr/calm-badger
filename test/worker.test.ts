@@ -40,7 +40,7 @@ describe("RFQ Relay Worker", () => {
         catalog: { activeProducts: number; customers: number }
         retrieval: { shortlistSize: number; steps: string[] }
         retention: { state: string }
-        rateLimit: { state: string }
+        rateLimit: { state: string; summary: string }
         adapterContract: { adapters: { id: string; simulated: boolean }[] }
         evaluation: { state: string }
       }
@@ -67,9 +67,12 @@ describe("RFQ Relay Worker", () => {
     expect(ocr.provider).toBe(configuredOcr)
     expect(ocr.live).toBe(configuredOcr !== "contract-fake")
 
-    // Capabilities that are designed but not yet enforced say so.
-    expect(system.retention.state).toBe("planned")
-    expect(system.rateLimit.state).toBe("planned")
+    // Retention and rate limiting are enforced by this build, so the drawer
+    // states them as facts rather than as intentions.
+    expect(system.retention.state).toBe("enforced")
+    expect(system.rateLimit.state).toBe("enforced")
+    expect(system.rateLimit.summary).toContain("5 runs per hour")
+    // Scored evaluation is still designed only, and still says so.
     expect(system.evaluation.state).toBe("planned")
 
     const serialized = JSON.stringify(system)

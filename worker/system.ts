@@ -10,6 +10,7 @@
 
 import { ADAPTERS, ADAPTER_IDS, DEFAULT_ADAPTER } from "./adapters"
 import { SHORTLIST_SIZE } from "./catalog/retrieval"
+import { RATE_LIMIT_MAX_RUNS } from "./rate-limit"
 
 export type SystemDetails = {
   architecture: {
@@ -184,20 +185,23 @@ export async function loadSystemDetails(env: Env): Promise<SystemDetails> {
       note: "Exact and known-alias evidence settles a line without a model call. Only the shortlist is ever sent to a model, never the catalogue. The retrieval interface is the seam a vector index would replace.",
     },
     retention: {
-      state: "planned",
+      state: "enforced",
       summary:
-        "Short-lived retention is part of the demo design. Start over deletes a run's stored artifacts immediately, and a review window never outlives the run data it decides.",
+        "This demo forgets. A daily cleanup deletes the private originals before it cascades the database records, Start over deletes a run immediately, and a review window never outlives the run data it decides.",
       rows: [
-        "Curated sample runs: intended lifetime seven days.",
-        "Custom uploads and everything derived from them: intended lifetime twenty-four hours.",
-        "Scheduled expiry is not yet enforced in this build; today a run is removed when its owner resets it. The cleanup job and the storage lifecycle rule land with the expiry work.",
+        "Curated sample runs: deleted seven days after they start.",
+        "Custom uploads and everything derived from them: deleted twenty-four hours after they start.",
+        "A run still inside a live review window is left until that window closes, then removed on the next sweep.",
+        "Wording confirmed in this browser's workspace is kept for thirty days; it belongs to the workspace rather than to a run, which is why Start over does not remove it.",
+        "A storage lifecycle rule on the run prefix expires any orphaned object as a safety net beneath the cleanup job.",
+        "Durable workflow instances carry only a run identifier and a state name, and are terminated when a run is deleted, so what the platform keeps about a finished instance contains no request content.",
+        "Measurement is cookieless, EU-hosted, and server-side: page paths are bucketed, view identifiers and query strings are never sent, and no RFQ, customer, filename, product, price, prompt, or model output is measured.",
         "Use synthetic or non-confidential documents only.",
       ],
     },
     rateLimit: {
-      state: "planned",
-      summary:
-        "Public rate limiting is designed as five processing runs per hashed IP per hour, with no login and no CAPTCHA, and no raw IP address persisted. It is not yet enforced in this build, so no live limit is claimed here.",
+      state: "enforced",
+      summary: `Processing is limited to ${RATE_LIMIT_MAX_RUNS} runs per hour from one place, with no login and no CAPTCHA. The address is hashed together with a rotating value and the hour it arrived in, so no raw address and no stable per-visitor identifier is ever stored. Reading or sharing an existing run is never limited.`,
     },
     adapterContract: {
       summary:

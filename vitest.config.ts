@@ -21,6 +21,14 @@ export default defineConfig({
           RERANK_PROVIDER: "contract-fake",
           MISTRAL_API_KEY: "",
           OPENROUTER_API_KEY: "",
+          // Analytics is a seam like the providers: the deterministic recorder
+          // is selected here, so a test asserts what would have been sent to
+          // PostHog without a key, a host, or a network call existing at all.
+          ANALYTICS_PROVIDER: "contract-fake",
+          POSTHOG_API_KEY: "",
+          // A fixed salt keeps the rotating visitor hash reproducible within a
+          // test run. It is not a secret and matches nothing deployed.
+          RATE_LIMIT_SALT: "test-rate-limit-salt",
           // The review window is seconds rather than days here, so the
           // hibernating workflow's own expiry can be driven and observed
           // instead of being described. Every review test decides immediately

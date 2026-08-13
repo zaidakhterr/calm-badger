@@ -1,4 +1,5 @@
 import { isAdapterId } from "./adapters"
+import { capturePageview, captureFunnelEvent, logRoute } from "./analytics"
 import { loadQuote } from "./build-estimate"
 import { deliverRun, previewDelivery } from "./deliver"
 import {
@@ -30,6 +31,8 @@ import {
   workflowInstanceId,
   type RunInput,
 } from "./runs"
+import { checkRateLimit, visitorHash } from "./rate-limit"
+import { runRetentionSweep } from "./retention"
 import { scenarioPreviews } from "./scenarios"
 import { loadSystemDetails } from "./system"
 import {
@@ -58,22 +61,32 @@ const jsonHeaders = {
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(
+    request: Request,
+    env: Env,
+    ctx: ExecutionContext
+  ): Promise<Response> {
     const url = new URL(request.url)
     const requestId = crypto.randomUUID()
+    // A view identifier is a bearer read-link and a query string can carry
+    // anything, so the log records the route that was taken, not the URL that
+    // was requested. Operators still get method, route, status, and timing.
+    const route = logRoute(url.pathname)
 
     try {
-      const response = await routeRequest(request, env, url)
+      const response = await routeRequest(request, env, url, ctx)
 
       console.log(
         JSON.stringify({
           event: "http_request",
           requestId,
           method: request.method,
-          path: url.pathname,
+          route,
           status: response.status,
         })
       )
+
+      await capturePageview(env, ctx, request, response)
 
       return response
     } catch (error) {
@@ -82,7 +95,7 @@ export default {
           event: "http_request_failed",
           requestId,
           method: request.method,
-          path: url.pathname,
+          route,
           error: error instanceof Error ? error.message : "Unknown error",
         })
       )
@@ -93,12 +106,40 @@ export default {
       )
     }
   },
+
+  /**
+   * The daily cleanup. One bounded batch: whatever it cannot finish is left
+   * for the next schedule, and a partially purged run is picked up first.
+   */
+  scheduled(
+    controller: ScheduledController,
+    env: Env,
+    ctx: ExecutionContext
+  ): void {
+    ctx.waitUntil(
+      runRetentionSweep(env, {
+        now: new Date(controller.scheduledTime),
+        trigger: "scheduled",
+      }).then(
+        () => undefined,
+        (error: unknown) => {
+          console.error(
+            JSON.stringify({
+              event: "retention_sweep_failed",
+              error: error instanceof Error ? error.name : "unknown",
+            })
+          )
+        }
+      )
+    )
+  },
 } satisfies ExportedHandler<Env>
 
 async function routeRequest(
   request: Request,
   env: Env,
-  url: URL
+  url: URL,
+  ctx: ExecutionContext
 ): Promise<Response> {
   if (url.pathname === "/api/health") {
     if (request.method !== "GET") {
@@ -139,7 +180,7 @@ async function routeRequest(
       return methodNotAllowed("POST")
     }
 
-    return createRunResponse(request, env)
+    return createRunResponse(request, env, ctx)
   }
 
   const runMatch =
@@ -168,7 +209,7 @@ async function routeRequest(
     }
 
     if (segment === "review" && request.method === "POST") {
-      return reviewDecisionResponse(request, env, viewId)
+      return reviewDecisionResponse(request, env, ctx, viewId)
     }
 
     if (segment === "reset") {
@@ -184,7 +225,7 @@ async function routeRequest(
         return methodNotAllowed("POST")
       }
 
-      return deliverRunResponse(request, env, viewId)
+      return deliverRunResponse(request, env, ctx, viewId)
     }
 
     if (request.method !== "GET") {
@@ -243,12 +284,57 @@ function methodNotAllowed(allow: string): Response {
 
 async function createRunResponse(
   request: Request,
-  env: Env
+  env: Env,
+  ctx: ExecutionContext
 ): Promise<Response> {
   const contentType = request.headers.get("content-type") ?? ""
-  const input = contentType.includes("multipart/form-data")
-    ? await readCustomInput(request)
-    : await readCuratedInput(request)
+  const kind = contentType.includes("multipart/form-data")
+    ? "custom"
+    : "curated"
+
+  // Counted before the body is read: processing is what costs money, so the
+  // limit applies before an upload is buffered and long before a provider is
+  // called. Reading an existing run is never limited.
+  const limit = await checkRateLimit(env, request)
+
+  if (!limit.allowed) {
+    console.log(
+      JSON.stringify({
+        event: "run_rate_limited",
+        sourceKind: kind,
+        limit: limit.limit,
+        windowSeconds: limit.windowSeconds,
+      })
+    )
+
+    captureFunnelEvent(env, ctx, {
+      event: "rfq_run_rate_limited",
+      distinctId: await analyticsVisitorId(env, request),
+      properties: { source_kind: kind },
+    })
+
+    return Response.json(
+      {
+        error: `This public demo runs ${limit.limit} requests an hour from one place, so the live AI providers stay affordable for everyone. Please try again in about ${Math.ceil(limit.retryAfterSeconds / 60)} minutes — runs you already started are unaffected.`,
+        limit: limit.limit,
+        windowSeconds: limit.windowSeconds,
+        retryAfterSeconds: limit.retryAfterSeconds,
+        resetAt: limit.resetAt,
+      },
+      {
+        status: 429,
+        headers: {
+          ...jsonHeaders,
+          "retry-after": String(limit.retryAfterSeconds),
+        },
+      }
+    )
+  }
+
+  const input =
+    kind === "custom"
+      ? await readCustomInput(request)
+      : await readCuratedInput(request)
 
   if (input.ok) {
     // The anonymous workspace this browser learns in. It is optional, opaque,
@@ -262,6 +348,14 @@ async function createRunResponse(
     console.log(
       JSON.stringify({ event: "run_rejected", reason: input.reasonCode })
     )
+
+    captureFunnelEvent(env, ctx, {
+      event: "rfq_run_rejected",
+      distinctId: await analyticsVisitorId(env, request),
+      // A reason code, from a fixed list. Never the file, its name, or the
+      // message the visitor is about to read.
+      properties: { source_kind: kind, reason: input.reasonCode },
+    })
 
     return Response.json(
       { error: input.error },
@@ -282,6 +376,18 @@ async function createRunResponse(
     })
   )
 
+  // The funnel starts here. The run identifier is the distinct id, so a funnel
+  // is a run's own progress rather than a visitor's history.
+  captureFunnelEvent(env, ctx, {
+    event: "rfq_run_started",
+    distinctId: runId,
+    properties: {
+      source_kind: input.value.kind,
+      scenario_id:
+        input.value.kind === "curated" ? input.value.scenarioId : "none",
+    },
+  })
+
   // The plaintext owner capability is returned exactly once, here.
   return Response.json(
     { run, viewer: ownerViewer(true), ownerCapability },
@@ -292,6 +398,63 @@ async function createRunResponse(
 type InputResult =
   | { ok: true; value: RunInput }
   | { ok: false; error: string; reasonCode: string }
+
+/**
+ * The hard ceiling on a request body. The upload policy itself lives in
+ * `sources.ts`; this is the transport bound that keeps an oversized or
+ * open-ended body from being buffered before that policy can be applied. The
+ * headroom above the 10 MB upload limit is for multipart framing.
+ */
+const MAX_REQUEST_BYTES = Math.ceil(MAX_UPLOAD_BYTES * 1.1)
+
+/** The body, or `null` once it exceeds the ceiling. Nothing else is read. */
+async function readBoundedBody(request: Request): Promise<Uint8Array | null> {
+  if (!request.body) return new Uint8Array(0)
+
+  const reader = request.body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (!value) continue
+
+      total += value.byteLength
+
+      if (total > MAX_REQUEST_BYTES) {
+        await reader.cancel()
+        return null
+      }
+
+      chunks.push(value)
+    }
+  } catch {
+    return null
+  }
+
+  const body = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) {
+    body.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+
+  return body
+}
+
+/** The rotating hash used as a distinct id before a run exists. */
+async function analyticsVisitorId(env: Env, request: Request): Promise<string> {
+  const hourMs = 60 * 60 * 1000
+
+  return visitorHash(
+    env,
+    request,
+    "analytics",
+    new Date(Math.floor(Date.now() / hourMs) * hourMs)
+  )
+}
 
 /** An opaque browser-generated token, bounded and never logged. */
 function readWorkspaceId(request: Request): string | null {
@@ -332,10 +495,21 @@ async function readCustomInput(request: Request): Promise<InputResult> {
     10
   )
 
-  if (
-    Number.isFinite(declaredLength) &&
-    declaredLength > MAX_UPLOAD_BYTES * 1.1
-  ) {
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_REQUEST_BYTES) {
+    return {
+      ok: false,
+      error: `The request is larger than the ${MAX_UPLOAD_BYTES / (1024 * 1024)} MB upload limit`,
+      reasonCode: "upload_too_large",
+    }
+  }
+
+  // A declared length is a claim, and a chunked request makes no claim at all.
+  // The body is therefore read through a cap rather than buffered whole: an
+  // unbounded or dishonest upload is abandoned at the limit instead of being
+  // held in the isolate's memory.
+  const bytes = await readBoundedBody(request)
+
+  if (!bytes) {
     return {
       ok: false,
       error: `The request is larger than the ${MAX_UPLOAD_BYTES / (1024 * 1024)} MB upload limit`,
@@ -346,7 +520,14 @@ async function readCustomInput(request: Request): Promise<InputResult> {
   let form: FormData
 
   try {
-    form = await request.formData()
+    form = await new Request("https://upload.invalid/", {
+      method: "POST",
+      headers: { "content-type": request.headers.get("content-type") ?? "" },
+      body: bytes.buffer.slice(
+        bytes.byteOffset,
+        bytes.byteOffset + bytes.byteLength
+      ) as ArrayBuffer,
+    }).formData()
   } catch {
     return {
       ok: false,
@@ -481,6 +662,7 @@ async function deliveryPreviewResponse(
 async function deliverRunResponse(
   request: Request,
   env: Env,
+  ctx: ExecutionContext,
   viewId: string
 ): Promise<Response> {
   const authorization = await authorizeOwner(
@@ -516,6 +698,13 @@ async function deliverRunResponse(
       { status: 409, headers: jsonHeaders }
     )
   }
+
+  // The end of the funnel: which adapter, and nothing about what was sent.
+  captureFunnelEvent(env, ctx, {
+    event: "rfq_quote_delivered",
+    distinctId: authorization.runId,
+    properties: { adapter },
+  })
 
   return Response.json(
     { status: "delivered", delivery: outcome.delivery },
@@ -637,6 +826,7 @@ async function reviewDecisionsResponse(
 async function reviewDecisionResponse(
   request: Request,
   env: Env,
+  ctx: ExecutionContext,
   viewId: string
 ): Promise<Response> {
   const authorization = await authorizeOwner(
@@ -679,6 +869,12 @@ async function reviewDecisionResponse(
 
   await releaseWorkflow(env, authorization.runId)
 
+  captureFunnelEvent(env, ctx, {
+    event: "rfq_review_decided",
+    distinctId: authorization.runId,
+    properties: { decision: action },
+  })
+
   return Response.json(
     {
       status: outcome.decision === "approve" ? "approved" : "rejected",
@@ -704,6 +900,13 @@ async function releaseWorkflow(env: Env, runId: string): Promise<void> {
       type: REVIEW_EVENT_TYPE,
       payload: { runId },
     })
+
+    // Logged on both paths on purpose: an approval that never woke its
+    // instance looks exactly like a slow one until the deadline passes, and
+    // these two lines are what tell those apart afterwards.
+    console.log(
+      JSON.stringify({ event: "review_event_delivered", runId, instanceId })
+    )
   } catch (error) {
     console.error(
       JSON.stringify({

@@ -1,0 +1,169 @@
+import { env, exports } from "cloudflare:workers"
+import { describe, expect, it } from "vitest"
+
+/**
+ * The public boundary of the demo: how much processing one visitor may start,
+ * what a visitor is allowed to be recorded as, and what is never limited.
+ */
+
+const base = "https://example.test"
+
+function startRun(address: string, scenarioId = "routine-replenishment") {
+  return exports.default.fetch(`${base}/api/runs`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "cf-connecting-ip": address,
+    },
+    body: JSON.stringify({ scenarioId }),
+  })
+}
+
+describe("processing limits", () => {
+  it("allows five runs an hour from one place and then answers plainly", async () => {
+    const address = "203.0.113.10"
+    const statuses: number[] = []
+
+    for (let attempt = 0; attempt < 6; attempt++) {
+      statuses.push((await startRun(address)).status)
+    }
+
+    expect(statuses.slice(0, 5)).toEqual([201, 201, 201, 201, 201])
+    expect(statuses[5]).toBe(429)
+
+    const refused = await startRun(address)
+    const body = await refused.json<{
+      error: string
+      limit: number
+      windowSeconds: number
+      retryAfterSeconds: number
+    }>()
+
+    expect(refused.status).toBe(429)
+    expect(body.limit).toBe(5)
+    expect(body.windowSeconds).toBe(3600)
+    expect(body.retryAfterSeconds).toBeGreaterThan(0)
+    expect(Number(refused.headers.get("retry-after"))).toBe(
+      body.retryAfterSeconds
+    )
+    // A friendly boundary, not an account problem.
+    expect(body.error).toMatch(/try again/i)
+    expect(body.error).not.toMatch(/error|denied|blocked|forbidden/i)
+  })
+
+  it("counts each place separately", async () => {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      expect((await startRun("203.0.113.20")).status).toBe(201)
+    }
+
+    expect((await startRun("203.0.113.20")).status).toBe(429)
+    expect((await startRun("203.0.113.21")).status).toBe(201)
+  })
+
+  it("persists no address, only a rotating hash", async () => {
+    const address = "203.0.113.30"
+    await startRun(address)
+
+    const rows = await env.DB.prepare(
+      `SELECT bucket_hash, window_start, window_end, hits FROM rate_limit_windows`
+    ).all<{
+      bucket_hash: string
+      window_start: string
+      window_end: string
+      hits: number
+    }>()
+
+    expect(rows.results.length).toBe(1)
+    const [row] = rows.results
+    expect(row.hits).toBe(1)
+    expect(row.bucket_hash).toMatch(/^[0-9a-f]{64}$/)
+    expect(JSON.stringify(rows.results)).not.toContain(address)
+
+    // The window is part of what is hashed, so the same visitor is a different
+    // key in the next hour and nothing accumulates into a per-person history.
+    expect(Date.parse(row.window_end) - Date.parse(row.window_start)).toBe(
+      60 * 60 * 1000
+    )
+  })
+
+  it("never limits reading, sharing, or resetting an existing run", async () => {
+    const address = "203.0.113.40"
+    const created = await startRun(address)
+    const { run, ownerCapability } = await created.json<{
+      run: { viewId: string }
+      ownerCapability: string
+    }>()
+
+    for (let attempt = 0; attempt < 5; attempt++) {
+      await startRun(address)
+    }
+
+    expect((await startRun(address)).status).toBe(429)
+
+    // The visitor is over the limit, and every read of what they already have
+    // still works.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const view = await exports.default.fetch(
+        `${base}/api/runs/${run.viewId}`,
+        { headers: { "cf-connecting-ip": address } }
+      )
+      expect(view.status).toBe(200)
+    }
+
+    const reset = await exports.default.fetch(
+      `${base}/api/runs/${run.viewId}/reset`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${ownerCapability}`,
+          "cf-connecting-ip": address,
+        },
+      }
+    )
+
+    expect(reset.status).toBe(200)
+  })
+
+  it("refuses an oversized upload before it is buffered or stored", async () => {
+    const before = await env.DB.prepare(
+      `SELECT (SELECT COUNT(*) FROM runs) AS runs,
+              (SELECT COUNT(*) FROM run_sources) AS sources`
+    ).first<{ runs: number; sources: number }>()
+
+    // No content-length is declared, and the stream is larger than the upload
+    // ceiling: the body is abandoned at the bound rather than held in memory.
+    const oversized = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (let chunk = 0; chunk < 24; chunk++) {
+          controller.enqueue(new Uint8Array(512 * 1024))
+        }
+        controller.close()
+      },
+    })
+
+    const response = await exports.default.fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: {
+        "content-type": "multipart/form-data; boundary=----rfqrelay",
+        "cf-connecting-ip": "203.0.113.50",
+      },
+      body: oversized,
+      // @ts-expect-error a streamed request body needs duplex in this runtime
+      duplex: "half",
+    })
+
+    expect(response.status).toBe(400)
+    const refusal = await response.json<{ error: string }>()
+    expect(refusal.error).toContain("10 MB")
+
+    // Nothing was persisted for the rejected request, so no provider capacity
+    // and no storage was spent on it.
+    const after = await env.DB.prepare(
+      `SELECT (SELECT COUNT(*) FROM runs) AS runs,
+              (SELECT COUNT(*) FROM run_sources) AS sources`
+    ).first<{ runs: number; sources: number }>()
+
+    expect(after?.runs).toBe(before?.runs)
+    expect(after?.sources).toBe(before?.sources)
+  })
+})

@@ -61,7 +61,21 @@
     "REVIEW_WINDOW_SECONDS_CUSTOM": "86400",
     "OPENROUTER_COST_PER_1M_INPUT_TOKENS_USD": "1.25",
     "OPENROUTER_COST_PER_1M_OUTPUT_TOKENS_USD": "10",
+    // Cookieless, server-side capture against EU ingestion. "contract-fake" is
+    // the deterministic recorder tests read back and, like the other fakes, is
+    // refused when APP_ENV is production; "none" disables measurement. With
+    // "posthog" and no POSTHOG_API_KEY, capture is a no-op rather than an error.
+    "ANALYTICS_PROVIDER": "posthog",
     "POSTHOG_HOST": "https://eu.i.posthog.com",
+  },
+  // The daily retention sweep. It deletes private R2 artifacts before it
+  // cascades D1, is bounded to one batch, and picks an interrupted cleanup up
+  // on the next schedule. The R2 lifecycle rule on the `runs/` prefix (added by
+  // scripts/setup-infrastructure.sh, since lifecycle rules are an account-side
+  // bucket setting rather than Worker configuration) is the safety net beneath
+  // it for objects whose D1 row is already gone.
+  "triggers": {
+    "crons": ["23 3 * * *"],
   },
   "observability": {
     "enabled": true,
