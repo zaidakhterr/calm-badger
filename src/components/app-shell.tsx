@@ -1,12 +1,6 @@
-import { Link, Outlet, useRouterState } from "@tanstack/react-router"
-
-import { buttonVariants } from "@/components/ui/button"
+import { Link, Outlet } from "@tanstack/react-router"
 
 export function AppShell() {
-  const isRunRoute = useRouterState({
-    select: (state) => state.location.pathname.startsWith("/runs/"),
-  })
-
   return (
     <div className="min-h-svh bg-background">
       <header className="sticky top-0 z-20 border-b bg-background/95 backdrop-blur-sm">
@@ -21,19 +15,9 @@ export function AppShell() {
             RFQ Relay
           </Link>
 
-          {isRunRoute ? (
-            <div className="flex items-center gap-2">
-              <span className="hidden text-xs text-muted-foreground sm:inline">
-                Foundation preview
-              </span>
-              <Link
-                to="/"
-                className={buttonVariants({ variant: "ghost", size: "lg" })}
-              >
-                Start over
-              </Link>
-            </div>
-          ) : null}
+          <span className="text-xs text-muted-foreground">
+            Synthetic demo data
+          </span>
         </div>
       </header>
 

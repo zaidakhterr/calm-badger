@@ -26,10 +26,30 @@ For client-only UI work with Vite HMR, use `pnpm dev`.
 The application currently exposes two typed TanStack Router routes:
 
 - `/` — curated RFQ source selection
-- `/runs/:viewId` — the vertical workflow shell
+- `/runs/:viewId` — the persisted vertical workflow for one run
 
 The UI baseline is generated from shadcn preset `b1D0ekIC` (Mira, Neutral,
 Inter, Phosphor icons, and the Base UI primitive layer).
+
+## Runs, sharing, and owner authority
+
+Starting a run creates server state, so the workflow is never a client-side
+animation:
+
+- `POST /api/runs` creates a run, records `RFQ received` as its first completed
+  step, starts the durable workflow, and returns the run plus a plaintext owner
+  capability **once**. Only the SHA-256 hash of that capability is stored.
+- `GET /api/runs/:viewId` returns an allowlisted read-only projection to any
+  holder of the URL. Sending the owner capability as
+  `Authorization: Bearer <capability>` additionally marks the viewer as owner.
+- `POST /api/runs/:viewId/reset` is a mutation and requires the capability
+  scoped to that exact run. The public view identifier is never accepted as
+  authorization.
+
+The originating browser keeps its owner capability and a short recent-run list
+in `localStorage`. A browser that only opened a copied URL is a shared viewer:
+it sees the same workflow evidence, but no approval or reset controls. Shared
+run URLs are bearer links, which is appropriate only for synthetic demo data.
 
 ## Cloudflare runtime
 

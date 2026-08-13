@@ -5,9 +5,11 @@ import {
   FilePdfIcon,
   PaperclipIcon,
 } from "@phosphor-icons/react"
-import { createFileRoute, Link } from "@tanstack/react-router"
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router"
 
-import { Button, buttonVariants } from "@/components/ui/button"
+import { Button } from "@/components/ui/button"
+import { createRun } from "@/lib/api"
+import { readRecentRuns, rememberOwnedRun } from "@/lib/run-store"
 import { cn } from "@/lib/utils"
 
 const scenarios = [
@@ -59,7 +61,34 @@ function LandingPage() {
   const [selectedId, setSelectedId] = useState<ScenarioId>(
     "messy-forwarded-request"
   )
+  const [isStarting, setIsStarting] = useState(false)
+  const [startError, setStartError] = useState<string | null>(null)
+  const [recentRuns] = useState(() => readRecentRuns())
+  const navigate = useNavigate()
   const selectedScenario = scenarios.find(({ id }) => id === selectedId)!
+
+  async function handleProcessRfq() {
+    setIsStarting(true)
+    setStartError(null)
+
+    try {
+      const { run, ownerCapability } = await createRun(selectedId)
+
+      // The capability is returned once, so it is stored before navigating.
+      rememberOwnedRun({
+        viewId: run.viewId,
+        scenarioId: run.source.scenarioId,
+        ownerCapability,
+      })
+
+      await navigate({ to: "/runs/$viewId", params: { viewId: run.viewId } })
+    } catch (error) {
+      setStartError(
+        error instanceof Error ? error.message : "The run could not be started"
+      )
+      setIsStarting(false)
+    }
+  }
 
   return (
     <main className="mx-auto w-full max-w-3xl px-4 py-10 sm:px-6 sm:py-14">
@@ -191,23 +220,56 @@ function LandingPage() {
           Use your own RFQ
           <span className="text-muted-foreground">Coming next</span>
         </Button>
-        <Link
-          to="/runs/$viewId"
-          params={{ viewId: `sample-${selectedScenario.id}` }}
-          className={buttonVariants({
-            size: "lg",
-            className: "w-full sm:w-auto",
-          })}
+        <Button
+          size="lg"
+          type="button"
+          className="w-full sm:w-auto"
+          disabled={isStarting}
+          onClick={() => void handleProcessRfq()}
         >
-          Process RFQ
+          {isStarting ? "Starting run…" : "Process RFQ"}
           <ArrowRightIcon data-icon="inline-end" weight="bold" />
-        </Link>
+        </Button>
       </div>
+
+      {startError ? (
+        <p className="mt-3 text-xs text-destructive">{startError}</p>
+      ) : null}
 
       <p className="mt-4 text-xs leading-5 text-muted-foreground">
         This public demo is for synthetic or non-confidential documents only.
         Custom uploads will accept PDF, JPEG, and PNG files up to 10 MB.
       </p>
+
+      {recentRuns.length > 0 ? (
+        <section className="mt-8" aria-labelledby="recent-runs-heading">
+          <h2
+            id="recent-runs-heading"
+            className="text-[13px] leading-4 font-medium"
+          >
+            Recent runs in this browser
+          </h2>
+          <ul className="mt-2 divide-y rounded-lg border bg-card">
+            {recentRuns.map((recent) => (
+              <li key={recent.viewId}>
+                <Link
+                  to="/runs/$viewId"
+                  params={{ viewId: recent.viewId }}
+                  className="flex h-11 items-center justify-between gap-3 px-3.5 text-xs hover:bg-muted/40"
+                >
+                  <span className="truncate">
+                    {scenarios.find(({ id }) => id === recent.scenarioId)
+                      ?.name ?? "RFQ run"}
+                  </span>
+                  <span className="font-mono text-[11px] text-muted-foreground">
+                    {recent.viewId}
+                  </span>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
     </main>
   )
 }
