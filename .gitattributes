@@ -1,0 +1,5 @@
+# Wrangler owns this generated declaration file and currently emits a few
+# trailing spaces in union/type declarations. Keep whitespace checks strict
+# for authored files without rewriting generated output that `wrangler types
+# --check` expects byte-for-byte.
+worker-configuration.d.ts -whitespace

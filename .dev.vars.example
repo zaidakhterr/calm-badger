@@ -1,0 +1,5 @@
+# Copy to .dev.vars for local development. Never commit real values.
+MISTRAL_API_KEY=
+OPENROUTER_API_KEY=
+POSTHOG_API_KEY=
+RATE_LIMIT_SALT=

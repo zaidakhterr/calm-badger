@@ -1,0 +1,11 @@
+node_modules/
+coverage/
+dist-worker/
+.wrangler/
+.pnpm-store/
+src/routeTree.gen.ts
+worker-configuration.d.ts
+pnpm-lock.yaml
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
