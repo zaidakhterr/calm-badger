@@ -15,7 +15,7 @@ import { GOLD_SCENARIOS, goldScenario } from "./fixtures/gold-scenarios"
  * committed seed SQL and the gold fixtures are only trustworthy while this
  * value holds.
  */
-const EXPECTED_FINGERPRINT = "fcc1b36b"
+const EXPECTED_FINGERPRINT = "b09dc2e0"
 
 const catalog = generateCatalog()
 

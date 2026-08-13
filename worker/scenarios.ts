@@ -338,7 +338,8 @@ export const SCENARIOS: Scenario[] = [
       level: "Medium",
       summary:
         "A technician describes worn parts from measurements. Five of the six lines have a near-duplicate sibling that differs only in one dimension, and one label is unreadable except for its last four digits.",
-      expectedReview: "Expect human confirmation on the near-duplicate lines.",
+      expectedReview:
+        "Expect human confirmation on the superseded bearing, where an archived number leads to a successor, and on the ball valve, where the imperial size and the catalogue alias disagree.",
     },
     email: {
       from: {

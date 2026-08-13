@@ -51,19 +51,39 @@ test("the seed only ever inserts", () => {
     "the seed must not contain destructive statements"
   )
 
-  const updates = [...seedSql.matchAll(/^\s*UPDATE\b/gim)]
-  assert.equal(updates.length, 0, "the seed must not contain UPDATE statements")
-
-  const tables = new Set(
-    [...seedSql.matchAll(/INSERT (?:OR IGNORE )?INTO (\w+)/g)].map(
-      (match) => match[1]
-    )
+  // A statement starts at the beginning of a line and runs to the first
+  // semicolon that ends one; semicolons inside string literals never do.
+  const statements = [...seedSql.matchAll(/^INSERT[\s\S]*?;$/gm)].map(
+    (match) => match[0]
   )
 
-  for (const table of tables) {
+  assert.equal(
+    statements.length,
+    [...seedSql.matchAll(/^INSERT\b/gm)].length,
+    "the seed statements could not be split apart for inspection"
+  )
+
+  for (const statement of statements) {
+    const table = /INSERT (?:OR IGNORE )?INTO (\w+)/i.exec(statement)?.[1]
     assert.ok(
-      table.startsWith("catalog_") || table === "system_metadata",
+      table && (table.startsWith("catalog_") || table === "system_metadata"),
       `the seed writes to an unexpected table: ${table}`
+    )
+
+    // `UPDATE` anywhere in a statement counts, so an `ON CONFLICT ... DO UPDATE`
+    // on a catalogue table cannot slip past as it would with a line-anchored
+    // check. The fingerprint upsert on system_metadata is the one exception.
+    if (!/\bUPDATE\b/i.test(statement)) continue
+
+    assert.equal(
+      table,
+      "system_metadata",
+      `the seed must not update rows in ${table}`
+    )
+    assert.match(
+      statement,
+      /ON CONFLICT \(key\) DO UPDATE/i,
+      "the only permitted update is the system_metadata upsert"
     )
   }
 })

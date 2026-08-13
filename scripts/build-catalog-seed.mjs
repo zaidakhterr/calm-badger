@@ -4,7 +4,7 @@
  *
  * The generator is the source of truth; this script is a pure formatter, so
  * rebuilding on the same seed must leave the committed file byte-identical.
- * `pnpm seed:check` enforces that.
+ * `pnpm data:check` enforces that.
  *
  * Every statement it writes is an `INSERT OR IGNORE` into a `catalog_` table.
  * The file contains no DELETE, DROP, UPDATE, or REPLACE, so importing it into a
@@ -57,7 +57,7 @@ function render(catalog) {
   sections.push(
     [
       "-- Generated file. Do not edit by hand.",
-      "-- Rebuild with `pnpm seed:build`; verify with `pnpm seed:check`.",
+      "-- Rebuild with `pnpm seed:build`; verify with `pnpm data:check`.",
       "--",
       `-- Source: worker/catalog/dataset.ts, seed ${catalog.seed}.`,
       `-- Contents: ${products.length} products, ${catalog.customers.length} customers,`,

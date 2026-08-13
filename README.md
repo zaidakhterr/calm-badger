@@ -53,7 +53,8 @@ pnpm data:check     # verify both are current, importable, and additive
 is an `INSERT OR IGNORE` into a `catalog_` table, so reseeding a running
 deployment adds missing rows and cannot remove or overwrite anything a demo has
 accumulated. Deployment never seeds automatically; seeding is an explicit
-command.
+command, and the setup wizard imports the foundation and catalogue seeds
+together as one confirmed step.
 
 `GET /api/scenarios` serves the three curated requests — Routine replenishment,
 Messy forwarded request (featured and selected by default), and Ambiguous

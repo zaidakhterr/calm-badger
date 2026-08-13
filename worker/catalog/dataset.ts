@@ -977,6 +977,63 @@ function slugEmail(name: string, domain: string): string {
   return `${normalise(given)}.${normalise(family)}@${domain}`
 }
 
+/** The product name without its series suffix: two products that share this
+ * string are the same line in different generations. */
+function seriesFamily(name: string): string {
+  return name.replace(/ series \d+$/, "")
+}
+
+/** How many distinct words two product names have in common. Used to pick the
+ * successor of an archived line that reads as the same thing. */
+function sharedWordCount(left: string, right: string): number {
+  const words = (value: string) =>
+    new Set(
+      value
+        .toLowerCase()
+        .split(/[^a-z0-9/]+/)
+        .filter(Boolean)
+    )
+
+  const leftWords = words(left)
+  let shared = 0
+  for (const word of words(right)) {
+    if (leftWords.has(word)) shared += 1
+  }
+
+  return shared
+}
+
+/** The series number in a product name, counting an unsuffixed name as one. */
+function seriesNumber(name: string): number {
+  const match = / series (\d+)$/.exec(name)
+  return match ? Number(match[1]) : 1
+}
+
+/**
+ * Ranks two candidate successors for an archived product: the closest name
+ * wins, a later series of the same line beats an earlier one, and the SKU
+ * breaks any remaining tie so the choice stays deterministic.
+ */
+function compareSuccessors(left: Product, right: Product, archived: Product) {
+  const byName =
+    sharedWordCount(right.name, archived.name) -
+    sharedWordCount(left.name, archived.name)
+  if (byName !== 0) return byName
+
+  const sameLine = (candidate: Product) =>
+    seriesFamily(candidate.name) === seriesFamily(archived.name)
+  const rank = (candidate: Product) => {
+    if (!sameLine(candidate)) return Number.MAX_SAFE_INTEGER
+    const distance = seriesNumber(candidate.name) - seriesNumber(archived.name)
+    return distance > 0 ? distance : 1000 - distance
+  }
+
+  const bySeries = rank(left) - rank(right)
+  if (bySeries !== 0) return bySeries
+
+  return left.sku < right.sku ? -1 : left.sku > right.sku ? 1 : 0
+}
+
 function generateProducts(random: Random): Product[] {
   const products: Product[] = ANCHOR_PRODUCTS.map((anchor) => ({
     sku: anchor.sku,
@@ -1064,31 +1121,48 @@ function generateProducts(random: Random): Product[] {
     sequence += 1
   }
 
-  // Deliberate near duplicates: a handful of generated lines get a sibling that
-  // differs only in a trailing attribute, which is what makes reranking hard.
-  for (let index = 24; index < products.length; index += 31) {
+  // Deliberate near duplicates: a handful of generated lines are paired with the
+  // later series of the very same line, so the two differ in nothing a request
+  // usually states. The pair always sits inside one family, which is what makes
+  // reranking hard without making the catalogue absurd.
+  const firstGenerated = ANCHOR_PRODUCTS.length
+
+  for (let index = firstGenerated; index < products.length; index += 17) {
     const source = products[index]
-    if (source.nearDuplicateOf) continue
-    const sibling = products[index + 1]
-    if (!sibling) break
+    if (source.nearDuplicateOf || source.status !== "active") continue
+
+    const sibling = products.find(
+      (candidate, position) =>
+        position > index &&
+        candidate.status === "active" &&
+        !candidate.nearDuplicateOf &&
+        candidate.category === source.category &&
+        candidate.manufacturer === source.manufacturer &&
+        seriesFamily(candidate.name) === seriesFamily(source.name)
+    )
+    if (!sibling) continue
+
     sibling.nearDuplicateOf = source.sku
-    sibling.name = `${source.name}, heavy duty`
-    sibling.description = `${source.description} Heavy-duty execution.`
-    sibling.basePriceCents = source.basePriceCents + 240
-    sibling.category = source.category
-    sibling.manufacturer = source.manufacturer
-    sibling.unit = source.unit
   }
 
-  // Archived lines that have a live successor in the same family.
+  // Archived lines that have a live successor: the closest active product in the
+  // same family, so a superseded number always leads somewhere a buyer would
+  // accept as the same thing.
   for (const product of products) {
     if (product.status !== "archived" || product.replacementSku) continue
-    const successor = products.find(
+
+    const candidates = products.filter(
       (candidate) =>
         candidate.status === "active" &&
+        candidate.sku !== product.sku &&
         candidate.category === product.category &&
-        candidate.sku !== product.sku
+        candidate.manufacturer === product.manufacturer
     )
+
+    const successor = candidates.sort((left, right) =>
+      compareSuccessors(left, right, product)
+    )[0]
+
     product.replacementSku = successor ? successor.sku : null
   }
 

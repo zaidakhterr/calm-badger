@@ -426,6 +426,7 @@ put_worker_secret() {
 if [[ "${1:-}" == "--check" ]]; then
   validate_slug "quiet-harbor" || die "Internal slug validation failed."
   [[ -f wrangler.jsonc && -f package.json && -f .dev.vars.example ]] || die "Required project files are missing."
+  [[ -f seed/foundation.sql && -f seed/catalog.sql ]] || die "The seed files the wizard imports are missing."
   printf 'Wizard static self-check passed.\n'
   exit 0
 fi
@@ -506,15 +507,20 @@ configure_wrangler "$INFRA_SLUG" "$D1_DATABASE_ID"
 write_to_file "$SETUP_STATE_FILE" D1_DATABASE_ID "$D1_DATABASE_ID"
 pnpm exec wrangler types
 
-stage "Apply migrations and seed metadata" 3
+stage "Apply migrations and seed the database" 3
 say "Migrations are additive. The foundation seed is an idempotent metadata marker."
+say "The catalogue seed adds the synthetic distributor data every demo run needs."
+say "Both seeds only insert missing rows, so re-running this never overwrites demo state."
 if confirm "Apply pending D1 migrations to $DB_NAME now?"; then
   [[ "$WIZARD_DRY_RUN" == "1" ]] || cf_wrangler d1 migrations apply DB --remote
 else
   die "Remote migrations were not approved."
 fi
-if confirm "Import the idempotent foundation seed now?"; then
-  [[ "$WIZARD_DRY_RUN" == "1" ]] || cf_wrangler d1 execute DB --remote --file ./seed/foundation.sql
+if confirm "Import the idempotent foundation and catalogue seeds now?"; then
+  if [[ "$WIZARD_DRY_RUN" != "1" ]]; then
+    cf_wrangler d1 execute DB --remote --file ./seed/foundation.sql
+    cf_wrangler d1 execute DB --remote --file ./seed/catalog.sql
+  fi
 else
   die "Seed import was not approved."
 fi
