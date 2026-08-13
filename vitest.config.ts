@@ -17,7 +17,9 @@ export default defineConfig({
           // is selected here, and no API key is present in the test isolate.
           APP_ENV: "test",
           OCR_PROVIDER: "contract-fake",
+          EXTRACTION_PROVIDER: "contract-fake",
           MISTRAL_API_KEY: "",
+          OPENROUTER_API_KEY: "",
         },
       },
     }),

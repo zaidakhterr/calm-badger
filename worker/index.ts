@@ -1,4 +1,8 @@
-import { loadDocumentEvidence } from "./evidence"
+import {
+  loadCustomerEvidence,
+  loadDocumentEvidence,
+  loadStructureEvidence,
+} from "./evidence"
 import {
   authorizeOwner,
   createRun,
@@ -108,7 +112,7 @@ async function routeRequest(
   }
 
   const runMatch =
-    /^\/api\/runs\/([A-Za-z0-9_-]+)(?:\/(reset|documents)|\/sources\/([A-Za-z0-9-]+))?$/.exec(
+    /^\/api\/runs\/([A-Za-z0-9_-]+)(?:\/(reset|documents|structure|customer)|\/sources\/([A-Za-z0-9-]+))?$/.exec(
       url.pathname
     )
 
@@ -127,8 +131,12 @@ async function routeRequest(
       return methodNotAllowed("GET")
     }
 
-    if (segment === "documents") {
-      return documentEvidenceResponse(env, viewId)
+    if (
+      segment === "documents" ||
+      segment === "structure" ||
+      segment === "customer"
+    ) {
+      return stepEvidenceResponse(env, viewId, segment)
     }
 
     if (sourceId) {
@@ -264,9 +272,14 @@ async function readCustomInput(request: Request): Promise<InputResult> {
   return { ok: true, value: { kind: "custom", sources: validation.sources } }
 }
 
-async function documentEvidenceResponse(
+/**
+ * Step evidence. Every projection is the same allowlist for an owner and for a
+ * shared viewer; the URL holder's authority is not consulted here.
+ */
+async function stepEvidenceResponse(
   env: Env,
-  viewId: string
+  viewId: string,
+  segment: "documents" | "structure" | "customer"
 ): Promise<Response> {
   const runId = await resolveRunId(env, viewId)
 
@@ -277,10 +290,14 @@ async function documentEvidenceResponse(
     )
   }
 
-  return Response.json(
-    { evidence: await loadDocumentEvidence(env, runId, viewId) },
-    { headers: jsonHeaders }
-  )
+  const evidence =
+    segment === "documents"
+      ? await loadDocumentEvidence(env, runId, viewId)
+      : segment === "structure"
+        ? await loadStructureEvidence(env, runId)
+        : await loadCustomerEvidence(env, runId)
+
+  return Response.json({ evidence }, { headers: jsonHeaders })
 }
 
 /**

@@ -327,6 +327,13 @@ export async function deleteRun(env: Env, runId: string): Promise<void> {
   await deleteStoredSources(env, runId)
 
   await env.DB.batch([
+    env.DB.prepare(`DELETE FROM run_customer_resolution WHERE run_id = ?`).bind(
+      runId
+    ),
+    env.DB.prepare(`DELETE FROM run_rfq_line_items WHERE run_id = ?`).bind(
+      runId
+    ),
+    env.DB.prepare(`DELETE FROM run_rfq WHERE run_id = ?`).bind(runId),
     env.DB.prepare(`DELETE FROM run_source_pages WHERE run_id = ?`).bind(runId),
     env.DB.prepare(`DELETE FROM run_sources WHERE run_id = ?`).bind(runId),
     env.DB.prepare(`DELETE FROM run_step_evidence WHERE run_id = ?`).bind(

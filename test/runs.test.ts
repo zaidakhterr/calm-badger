@@ -171,9 +171,8 @@ describe("revisiting a persisted run", () => {
       workflowState = row?.workflow_state ?? workflowState
     }
 
-    expect(["accepted", "reading_documents", "documents_read"]).toContain(
-      workflowState
-    )
+    expect(workflowState).not.toBe("pending")
+    expect(workflowState).not.toBe("failed")
 
     const instanceRow = await env.DB.prepare(
       `SELECT workflow_instance_id FROM runs WHERE view_id = ?`

@@ -2,7 +2,9 @@ import { WorkflowEntrypoint } from "cloudflare:workers"
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers"
 
 import { readDocuments } from "./read-documents"
+import { resolveCustomer } from "./resolve-customer"
 import { RFQ_RECEIVED_STEP_KEY } from "./runs"
+import { structureRfq } from "./structure-rfq"
 
 export type RfqWorkflowParams = {
   runId: string
@@ -10,7 +12,7 @@ export type RfqWorkflowParams = {
 
 export type RfqWorkflowResult = {
   runId: string
-  state: "documents_read" | "failed"
+  state: "customer_resolved" | "customer_unresolved" | "failed"
   acknowledgedAt: string
 }
 
@@ -51,16 +53,39 @@ export class RfqWorkflow extends WorkflowEntrypoint<Env, RfqWorkflowParams> {
       return now
     })
 
-    // Every failure path is handled inside the step, which records a terminal
+    // Every failure path is handled inside each step, which records a terminal
     // error and returns. Nothing is thrown, so the workflow does not retry a
-    // paid provider call and the graph never stays active forever.
-    const outcome = await step.do("read documents", async () =>
+    // paid provider call and the graph never stays active forever. A step that
+    // did not complete stops the sequence here, so no later step can build on
+    // data that failed validation.
+    const documents = await step.do("read documents", async () =>
       readDocuments(this.env, runId)
+    )
+
+    if (documents.state !== "complete") {
+      return { runId, state: "failed", acknowledgedAt }
+    }
+
+    const structured = await step.do("structure RFQ", async () =>
+      structureRfq(this.env, runId)
+    )
+
+    if (structured.state !== "complete") {
+      return { runId, state: "failed", acknowledgedAt }
+    }
+
+    const customer = await step.do("resolve customer", async () =>
+      resolveCustomer(this.env, runId)
     )
 
     return {
       runId,
-      state: outcome.state === "complete" ? "documents_read" : "failed",
+      state:
+        customer.state === "resolved"
+          ? "customer_resolved"
+          : customer.state === "unresolved"
+            ? "customer_unresolved"
+            : "failed",
       acknowledgedAt,
     }
   }

@@ -11,6 +11,8 @@ declare global {
   interface Env {
     /** Mistral API key. Uploaded with `wrangler secret put MISTRAL_API_KEY`. */
     MISTRAL_API_KEY?: string
+    /** OpenRouter API key. Uploaded with `wrangler secret put OPENROUTER_API_KEY`. */
+    OPENROUTER_API_KEY?: string
   }
 }
 

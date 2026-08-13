@@ -114,6 +114,97 @@ export type DocumentEvidence = {
   sources: EvidenceSource[]
 }
 
+/** High, Medium, or Review beside a number the UI always calls a heuristic. */
+export type Confidence = {
+  label: string
+  score: number
+  heuristic: string
+} | null
+
+export type ValidatedLine = {
+  position: number
+  reference: string
+  description: string
+  quantity: number | null
+  unit: string | null
+  catalogSku: string | null
+  sourceLabel: string
+  sourcePage: number | null
+  state: string
+  reason: string | null
+}
+
+export type StructureEvidence = {
+  stepKey: string
+  state: "pending" | "complete" | "error"
+  message: string | null
+  validated: {
+    customer: {
+      companyName: string | null
+      contactName: string | null
+      contactEmail: string | null
+      contactPhone: string | null
+      deliveryLocation: string | null
+    }
+    source: {
+      channel: string
+      subject: string | null
+      receivedAt: string | null
+      references: string[]
+    }
+    deadline: { date: string | null; text: string | null }
+    lineItems: ValidatedLine[]
+  } | null
+  confidence: Confidence
+  repaired: boolean
+  issues: string[]
+  originalOutput: string | null
+  provider: string | null
+  model: string | null
+  usage: {
+    inputTokens: number
+    outputTokens: number
+    totalTokens: number
+  } | null
+  metrics: { latencyMs: number; elapsedMs: number } | null
+  estimatedCostUsd: number | null
+  reportedCostUsd: number | null
+}
+
+export type CustomerEvidence = {
+  stepKey: string
+  state: "pending" | "resolved" | "unresolved"
+  message: string | null
+  method: string | null
+  resolution: {
+    customerId: string
+    name: string
+    tier: string
+    contact: { id: string; name: string; role: string; email: string } | null
+    location: {
+      id: string
+      label: string
+      city: string
+      country: string
+    } | null
+  } | null
+  confidence: Confidence
+  signals: { kind: string; detail: string; weight: number }[]
+  candidates: {
+    customerId: string
+    name: string
+    score: number
+    signals: string[]
+  }[]
+  inputs: {
+    contactEmail: string | null
+    companyName: string | null
+    deliveryLocation: string | null
+    referenceCount: number
+  } | null
+  metrics: { elapsedMs: number } | null
+}
+
 /** Mirrors the Worker's upload policy so a rejected file never leaves the browser. */
 export const UPLOAD_LIMITS = {
   maxBytes: 10 * 1024 * 1024,
@@ -177,18 +268,34 @@ export async function createCustomRun(input: {
   return (await response.json()) as CreatedRun
 }
 
-export async function fetchDocumentEvidence(
-  viewId: string
-): Promise<DocumentEvidence> {
+async function fetchEvidence<T>(viewId: string, segment: string): Promise<T> {
   const response = await fetch(
-    `/api/runs/${encodeURIComponent(viewId)}/documents`
+    `/api/runs/${encodeURIComponent(viewId)}/${segment}`
   )
 
   if (response.status === 404) throw new RunNotFoundError()
   if (!response.ok) throw new Error(await readError(response))
 
-  const body = (await response.json()) as { evidence: DocumentEvidence }
+  const body = (await response.json()) as { evidence: T }
   return body.evidence
+}
+
+export function fetchDocumentEvidence(
+  viewId: string
+): Promise<DocumentEvidence> {
+  return fetchEvidence<DocumentEvidence>(viewId, "documents")
+}
+
+export function fetchStructureEvidence(
+  viewId: string
+): Promise<StructureEvidence> {
+  return fetchEvidence<StructureEvidence>(viewId, "structure")
+}
+
+export function fetchCustomerEvidence(
+  viewId: string
+): Promise<CustomerEvidence> {
+  return fetchEvidence<CustomerEvidence>(viewId, "customer")
 }
 
 /** Reads server state. The owner capability is sent only when this browser holds it. */
