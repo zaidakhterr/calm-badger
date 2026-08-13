@@ -123,6 +123,86 @@ describe("retention windows", () => {
     expect(view.status).toBe(404)
   })
 
+  it("has already removed the bytes by the time the D1 cascade runs", async () => {
+    const { runId } = await createRun()
+
+    const sources = await env.DB.prepare(
+      `SELECT storage_key FROM run_sources WHERE run_id = ?`
+    )
+      .bind(runId)
+      .all<{ storage_key: string }>()
+
+    expect(sources.results.length).toBeGreaterThan(0)
+    const keys = sources.results.map((row) => row.storage_key)
+
+    // The end state alone cannot tell the two orders apart, so the sweep is
+    // run against an environment that records what happened in what order and
+    // probes R2 at the moment the cascade fires.
+    const calls: string[] = []
+    let headsAtFirstBatch: (boolean | null)[] = []
+
+    const artifacts = new Proxy(env.ARTIFACTS, {
+      get(target, property) {
+        const value: unknown = Reflect.get(target, property)
+        if (typeof value !== "function") return value
+
+        const method = value.bind(target) as (...args: unknown[]) => unknown
+
+        if (property !== "delete") return method
+
+        return (...args: unknown[]) => {
+          calls.push("r2:delete")
+          return method(...args)
+        }
+      },
+    })
+
+    const db = new Proxy(env.DB, {
+      get(target, property) {
+        const value: unknown = Reflect.get(target, property)
+        if (typeof value !== "function") return value
+
+        const method = value.bind(target) as (...args: unknown[]) => unknown
+
+        if (property !== "batch") return method
+
+        return async (...args: unknown[]) => {
+          if (!calls.includes("d1:batch")) {
+            headsAtFirstBatch = await Promise.all(
+              keys.map(async (key) =>
+                (await env.ARTIFACTS.head(key)) === null ? null : true
+              )
+            )
+          }
+
+          calls.push("d1:batch")
+          return method(...args)
+        }
+      },
+    })
+
+    await age(runId, new Date(Date.now() - 8 * DAY_MS))
+    await runRetentionSweep(
+      { ...env, ARTIFACTS: artifacts, DB: db },
+      {
+        now: new Date(),
+      }
+    )
+
+    // Every private object was gone before the first statement batch — the
+    // cascade that deletes the rows pointing at those objects — ran.
+    expect(
+      calls.filter((call) => call === "r2:delete").length
+    ).toBeGreaterThanOrEqual(keys.length)
+    expect(calls.indexOf("r2:delete")).toBeLessThan(calls.indexOf("d1:batch"))
+    expect(calls.lastIndexOf("r2:delete")).toBeLessThan(
+      calls.indexOf("d1:batch")
+    )
+    expect(headsAtFirstBatch).toEqual(keys.map(() => null))
+
+    expect(await runExists(runId)).toBeNull()
+  })
+
   it("leaves an expired run alone while its owner is still inside the review window", async () => {
     const { runId } = await createRun()
     const now = new Date()

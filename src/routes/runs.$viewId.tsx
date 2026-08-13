@@ -1569,12 +1569,13 @@ function ReviewItemRow({
         </p>
       ) : (
         <p className="mt-2 leading-5">
+          {/* A description of what would be used, not an instruction: the
+              label is the catalogue product behind the SKU beside it. */}
           Proposed:{" "}
           {item.proposal.sku ? (
             <>
-              <span className="font-mono text-[11px]">
-                {item.proposal.sku}
-              </span>{" "}
+              <span className="font-mono text-[11px]">{item.proposal.sku}</span>{" "}
+              ·{" "}
             </>
           ) : null}
           {item.proposal.label}

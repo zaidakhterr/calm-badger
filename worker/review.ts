@@ -367,6 +367,16 @@ async function collectItems(env: Env, runId: string): Promise<CollectedItem[]> {
     matches.results.map((row) => [row.position, row])
   )
 
+  // The proposal line is descriptive, not an instruction: the panel already
+  // renders the SKU beside it, and the button next to it is what says
+  // "accept". So the label is what the SKU *is*, read from the catalogue.
+  const proposedNames = await catalogNames(
+    env,
+    matches.results.flatMap((row) =>
+      row.state !== "accepted" && row.sku ? [row.sku] : []
+    )
+  )
+
   for (const line of lines.results) {
     const phrase = line.reference || line.description
 
@@ -418,7 +428,7 @@ async function collectItems(env: Env, runId: string): Promise<CollectedItem[]> {
         sourcePhrase: phrase,
         detail: `“${line.description}” — the catalogue decision for this line is not certain enough to price.`,
         proposedLabel: match.sku
-          ? `Propose ${match.sku}`
+          ? (proposedNames.get(match.sku) ?? match.sku)
           : "No catalogue product could be proposed",
         proposedSku: match.sku,
         proposedQuantity: null,
@@ -436,6 +446,24 @@ async function collectItems(env: Env, runId: string): Promise<CollectedItem[]> {
   }
 
   return items
+}
+
+/** Catalogue names for proposed SKUs, so a proposal reads as a product. */
+async function catalogNames(
+  env: Env,
+  skus: string[]
+): Promise<Map<string, string>> {
+  const unique = [...new Set(skus)]
+  if (unique.length === 0) return new Map()
+
+  const rows = await env.DB.prepare(
+    `SELECT sku, name FROM catalog_products
+      WHERE sku IN (${unique.map(() => "?").join(", ")})`
+  )
+    .bind(...unique)
+    .all<{ sku: string; name: string }>()
+
+  return new Map(rows.results.map((row) => [row.sku, row.name]))
 }
 
 function readMatchAlternatives(raw: string): ReviewAlternative[] {

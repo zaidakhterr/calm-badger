@@ -1,7 +1,8 @@
 import { env, exports } from "cloudflare:workers"
 import { beforeEach, describe, expect, it } from "vitest"
 
-import { bucketPath, logRoute } from "../worker/analytics"
+import { bucketPath, FUNNEL_EVENTS, logRoute } from "../worker/analytics"
+import { selectAnalyticsProvider } from "../worker/providers/analytics"
 import {
   capturedAnalyticsEvents,
   resetCapturedAnalyticsEvents,
@@ -32,6 +33,23 @@ const FORBIDDEN = [
   "stack",
 ]
 
+/**
+ * The sweep itself. Event names are the one place a forbidden word may appear,
+ * so every declared funnel name is removed before the envelopes are searched —
+ * rather than exempting a substring, which would exempt real content too.
+ */
+function expectNoBusinessContent(events: unknown[]): void {
+  let serialized = JSON.stringify(events).toLowerCase()
+
+  for (const name of FUNNEL_EVENTS) {
+    serialized = serialized.replaceAll(name, "")
+  }
+
+  for (const term of FORBIDDEN) {
+    expect(serialized).not.toContain(term)
+  }
+}
+
 let address = 100
 
 function startRun(scenarioId = "routine-replenishment") {
@@ -44,6 +62,67 @@ function startRun(scenarioId = "routine-replenishment") {
       "cf-connecting-ip": `192.0.2.${address % 250}`,
     },
     body: JSON.stringify({ scenarioId }),
+  })
+}
+
+/* -------------------------------------------------------------------------- */
+/* Driving a run to the end of the funnel                                     */
+/* -------------------------------------------------------------------------- */
+
+type ReviewItem = {
+  id: string
+  kind: string
+  proposal: { sku: string | null }
+  alternatives: { value: string }[]
+}
+
+type Review = { state: string; items: ReviewItem[] }
+
+async function readWorkflowState(viewId: string): Promise<string> {
+  const response = await exports.default.fetch(`${base}/api/runs/${viewId}`)
+  const { run } = await response.json<{ run: { workflowState: string } }>()
+
+  return run.workflowState
+}
+
+async function waitForState(viewId: string, ...accept: string[]) {
+  for (let attempt = 0; attempt < 200; attempt++) {
+    const state = await readWorkflowState(viewId)
+    if (accept.includes(state)) return state
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+
+  throw new Error(`Never observed ${accept.join(" or ")}`)
+}
+
+async function readReview(viewId: string): Promise<Review> {
+  const response = await exports.default.fetch(
+    `${base}/api/runs/${viewId}/review`
+  )
+
+  return (await response.json<{ review: Review }>()).review
+}
+
+/** Answers every open question so the review can be approved. */
+function straightforwardDecisions(review: Review) {
+  return review.items.map((item) => {
+    if (item.kind === "quantity") {
+      return { itemId: item.id, action: "quantity", quantity: 10 }
+    }
+
+    if (item.kind === "customer") {
+      return { itemId: item.id, action: "customer", customerId: "CUST-1001" }
+    }
+
+    if (item.kind === "product" && !item.proposal.sku) {
+      return {
+        itemId: item.id,
+        action: "alternative",
+        sku: item.alternatives[0].value,
+      }
+    }
+
+    return { itemId: item.id, action: "accept" }
   })
 }
 
@@ -156,13 +235,163 @@ describe("what the funnel records", () => {
     await startRun()
     await startRun("ambiguous-replacement-parts")
 
-    const serialized = JSON.stringify(capturedAnalyticsEvents()).toLowerCase()
+    expectNoBusinessContent(capturedAnalyticsEvents())
+  })
 
-    for (const term of FORBIDDEN) {
-      // Event names themselves are the one place "rfq" legitimately appears.
-      const withoutNames = serialized.replaceAll("rfq_run", "")
-      expect(withoutNames).not.toContain(term)
-    }
+  it("records the far end of the funnel — a decision and a delivery — as two words", async () => {
+    // The two events no earlier test reaches, captured through the public API
+    // the same way a visitor would produce them.
+    const created = await exports.default.fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "cf-connecting-ip": "192.0.2.220",
+      },
+      body: JSON.stringify({ scenarioId: "messy-forwarded-request" }),
+    })
+
+    expect(created.status).toBe(201)
+    const { run, ownerCapability } = await created.json<{
+      run: { viewId: string }
+      ownerCapability: string
+    }>()
+
+    expect(await waitForState(run.viewId, "awaiting_review", "failed")).toBe(
+      "awaiting_review"
+    )
+
+    const recorded = await exports.default.fetch(
+      `${base}/api/runs/${run.viewId}/review/decisions`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${ownerCapability}`,
+        },
+        body: JSON.stringify({
+          decisions: straightforwardDecisions(await readReview(run.viewId)),
+        }),
+      }
+    )
+
+    expect(recorded.status).toBe(200)
+
+    const approved = await exports.default.fetch(
+      `${base}/api/runs/${run.viewId}/review`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${ownerCapability}`,
+        },
+        body: JSON.stringify({ action: "approve" }),
+      }
+    )
+
+    expect(approved.status).toBe(200)
+    expect(await waitForState(run.viewId, "estimate_built", "failed")).toBe(
+      "estimate_built"
+    )
+
+    const delivered = await exports.default.fetch(
+      `${base}/api/runs/${run.viewId}/deliver`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${ownerCapability}`,
+        },
+        body: JSON.stringify({ adapter: "corebridge-sandbox" }),
+      }
+    )
+
+    expect(delivered.status).toBe(200)
+
+    const runId = (
+      await env.DB.prepare(`SELECT id FROM runs WHERE view_id = ?`)
+        .bind(run.viewId)
+        .first<{ id: string }>()
+    )?.id
+
+    const decision = capturedAnalyticsEvents().find(
+      (event) => event.event === "rfq_review_decided"
+    )
+    const delivery = capturedAnalyticsEvents().find(
+      (event) => event.event === "rfq_quote_delivered"
+    )
+
+    // What was decided and where it went, keyed by the run. Not which items
+    // were corrected, not what they were corrected to, not what was sent.
+    expect(decision).toBeDefined()
+    expect(decision!.distinctId).toBe(runId)
+    expect(decision!.properties).toEqual({ decision: "approve" })
+
+    expect(delivery).toBeDefined()
+    expect(delivery!.distinctId).toBe(runId)
+    expect(delivery!.properties).toEqual({ adapter: "corebridge-sandbox" })
+
+    expectNoBusinessContent([decision!, delivery!])
+  })
+})
+
+describe("which analytics provider a deployment gets", () => {
+  function envWith(overrides: Record<string, string>): Env {
+    return { ...env, ...overrides }
+  }
+
+  it("refuses to send from anywhere but production, even with a key", () => {
+    // A local checkout carries a real project key in `.dev.vars`, and
+    // `APP_ENV` comes from `wrangler.jsonc`. Without this guard a developer's
+    // own traffic lands in the deployed project as public usage.
+    const local = selectAnalyticsProvider(
+      envWith({
+        ANALYTICS_PROVIDER: "posthog",
+        POSTHOG_API_KEY: "phc-a-real-looking-project-key",
+        APP_ENV: "development",
+      })
+    )
+
+    expect(local.name).toBe("none")
+
+    const deployed = selectAnalyticsProvider(
+      envWith({
+        ANALYTICS_PROVIDER: "posthog",
+        POSTHOG_API_KEY: "phc-a-real-looking-project-key",
+        APP_ENV: "production",
+      })
+    )
+
+    expect(deployed.name).toBe("posthog-eu")
+  })
+
+  it("still disables measurement rather than failing when nothing is configured", () => {
+    expect(
+      selectAnalyticsProvider(
+        envWith({
+          ANALYTICS_PROVIDER: "posthog",
+          POSTHOG_API_KEY: "",
+          APP_ENV: "production",
+        })
+      ).name
+    ).toBe("none")
+
+    expect(
+      selectAnalyticsProvider(envWith({ ANALYTICS_PROVIDER: "none" })).name
+    ).toBe("none")
+  })
+
+  it("refuses the deterministic recorder in production", () => {
+    expect(() =>
+      selectAnalyticsProvider(
+        envWith({ ANALYTICS_PROVIDER: "contract-fake", APP_ENV: "production" })
+      )
+    ).toThrow()
+
+    expect(
+      selectAnalyticsProvider(
+        envWith({ ANALYTICS_PROVIDER: "contract-fake", APP_ENV: "test" })
+      ).name
+    ).toBe("contract-fake")
   })
 })
 

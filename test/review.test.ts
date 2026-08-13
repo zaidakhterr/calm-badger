@@ -279,6 +279,13 @@ describe("pausing an uncertain run", () => {
 
     const product = review.items.find((item) => item.kind === "product")!
 
+    // The proposal describes the product; it does not repeat the SKU shown
+    // beside it, and it does not tell the owner what to do — the button does.
+    if (product.proposal.sku) {
+      expect(product.proposal.label).not.toMatch(/^propose\b/i)
+      expect(product.proposal.label).not.toContain(product.proposal.sku)
+    }
+
     expect(product.alternatives.length).toBeGreaterThan(0)
     for (const alternative of product.alternatives) {
       expect(alternative.value).toMatch(/^[A-Z]/)

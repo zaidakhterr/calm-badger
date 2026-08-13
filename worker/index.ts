@@ -86,7 +86,20 @@ export default {
         })
       )
 
-      await capturePageview(env, ctx, request, response)
+      // Measurement never stands between a built response and its caller. A
+      // failure here would otherwise fall into the catch below and turn a
+      // response that was already built into a 500.
+      try {
+        await capturePageview(env, ctx, request, response)
+      } catch (error) {
+        console.warn(
+          JSON.stringify({
+            event: "pageview_capture_failed",
+            requestId,
+            error: error instanceof Error ? error.name : "unknown",
+          })
+        )
+      }
 
       return response
     } catch (error) {
@@ -96,7 +109,9 @@ export default {
           requestId,
           method: request.method,
           route,
-          error: error instanceof Error ? error.message : "Unknown error",
+          // The name of the failure, never its message: a binding error can
+          // carry a query, a storage path, or a key in its text.
+          error: error instanceof Error ? error.name : "unknown",
         })
       )
 
@@ -315,7 +330,7 @@ async function createRunResponse(
 
     return Response.json(
       {
-        error: `This public demo runs ${limit.limit} requests an hour from one place, so the live AI providers stay affordable for everyone. Please try again in about ${Math.ceil(limit.retryAfterSeconds / 60)} minutes — runs you already started are unaffected.`,
+        error: `This public demo allows ${limit.limit} runs an hour from one place, so the live AI providers stay affordable for everyone. Please try again in about ${Math.ceil(limit.retryAfterSeconds / 60)} minutes — runs you already started are unaffected.`,
         limit: limit.limit,
         windowSeconds: limit.windowSeconds,
         retryAfterSeconds: limit.retryAfterSeconds,

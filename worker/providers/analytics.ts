@@ -5,8 +5,9 @@
  * a live implementation (`posthog-analytics.ts`, EU ingestion) and a
  * deterministic contract fake (`contract-fake-analytics.ts`) that tests read
  * back. A third implementation does nothing at all, and is what runs when no
- * project key is configured — a demo without analytics is a demo that still
- * works.
+ * project key is configured, and when one is configured outside production — a
+ * demo without analytics is a demo that still works, and a developer's own
+ * traffic is not public usage.
  *
  * Nothing here decides *what* may be sent. That is `worker/analytics.ts`, which
  * is the only caller: it builds an event out of an allowlist and hands the
@@ -42,13 +43,17 @@ const noopProvider: AnalyticsProvider = {
   },
 }
 
+/** Said once per isolate: a disabled provider should not narrate every event. */
+let disabledOutsideProductionLogged = false
+
 export function selectAnalyticsProvider(env: Env): AnalyticsProvider {
   const configured: string = env.ANALYTICS_PROVIDER
+  const appEnv: string = env.APP_ENV
 
   if (configured === "none") return noopProvider
 
   if (configured === "contract-fake") {
-    if (env.APP_ENV === "production") {
+    if (appEnv === "production") {
       throw new Error(
         "The contract fake analytics provider is not allowed in production"
       )
@@ -60,6 +65,26 @@ export function selectAnalyticsProvider(env: Env): AnalyticsProvider {
   // An unconfigured project key is the ordinary state of a local checkout and
   // of a fork. It disables measurement rather than failing a request.
   if (!env.POSTHOG_API_KEY?.trim()) return noopProvider
+
+  // A key is present, so the only remaining question is whether this isolate is
+  // allowed to use it. It is not, outside production: a local checkout or a
+  // preview otherwise sends real traffic — and real pageviews from a developer
+  // reloading a page — into the deployed project, where it is indistinguishable
+  // from public usage. The key stays configured and unused.
+  if (appEnv !== "production") {
+    if (!disabledOutsideProductionLogged) {
+      disabledOutsideProductionLogged = true
+      console.log(
+        JSON.stringify({
+          event: "analytics_disabled_outside_production",
+          appEnv,
+          detail: "a project key is configured but only production may send",
+        })
+      )
+    }
+
+    return noopProvider
+  }
 
   return createPosthogAnalyticsProvider(env)
 }

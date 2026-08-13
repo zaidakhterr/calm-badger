@@ -64,7 +64,10 @@
     // Cookieless, server-side capture against EU ingestion. "contract-fake" is
     // the deterministic recorder tests read back and, like the other fakes, is
     // refused when APP_ENV is production; "none" disables measurement. With
-    // "posthog" and no POSTHOG_API_KEY, capture is a no-op rather than an error.
+    // "posthog" and no POSTHOG_API_KEY, capture is a no-op rather than an
+    // error, and so is "posthog" with a key outside production — a local
+    // checkout that sets APP_ENV in .dev.vars (or ANALYTICS_PROVIDER "none")
+    // keeps its own traffic out of the deployed project.
     "ANALYTICS_PROVIDER": "posthog",
     "POSTHOG_HOST": "https://eu.i.posthog.com",
   },

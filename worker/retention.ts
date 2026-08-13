@@ -4,10 +4,13 @@
  * A public demo should forget. Curated sample runs are kept for seven days so a
  * shared link stays inspectable for a while; anything a visitor uploaded, and
  * everything derived from it, is kept for twenty-four hours. Both windows are
- * measured from the run's creation, and the same windows are what
- * `REVIEW_WINDOW_SECONDS_*` already give an owner to decide a review — a review
- * therefore cannot outlive the data it decides, and a run waiting on a live
- * review cannot be swept out from under it.
+ * measured from the run's creation, while the equally long
+ * `REVIEW_WINDOW_SECONDS_*` are measured from the moment a review opens — so a
+ * live review can outlast its run's retention window by exactly the delay
+ * between the two anchors. That is why the sweep defers a run whose review is
+ * still pending rather than relying on the windows to line up: a run waiting on
+ * a live review is never swept out from under it, and because the windows are
+ * the same length the deferral is bounded by hours.
  *
  * The sweep is deliberately bounded. It takes a batch, and if there is more to
  * do it says so and leaves the rest for the next schedule rather than trying to
@@ -99,8 +102,8 @@ export async function runRetentionSweep(
   for (const run of candidates) {
     // An owner is still inside a live review window. The run's data is what
     // that decision is about, so it stays until the window closes; the review
-    // window never exceeds the retention window, so this defers by hours at
-    // most and cannot defer forever.
+    // window is no longer than the retention window, so what it defers by is
+    // the delay before the review opened — hours at most, never forever.
     if (
       run.review_state === "pending" &&
       run.review_expires_at !== null &&

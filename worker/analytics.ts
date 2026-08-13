@@ -161,8 +161,11 @@ function sanitizeProperties(
   for (const [key, value] of Object.entries(properties)) {
     if (value === undefined) continue
 
+    // Own keys only: a property named after something on `Object.prototype`
+    // would otherwise resolve to an inherited function rather than a bucket.
+    if (!Object.hasOwn(PROPERTY_BUCKETS, key)) continue
+
     const allowed = PROPERTY_BUCKETS[key]
-    if (!allowed) continue
 
     const candidate = typeof value === "boolean" ? String(value) : value
     if (!allowed.includes(candidate)) continue

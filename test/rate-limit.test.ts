@@ -1,6 +1,8 @@
 import { env, exports } from "cloudflare:workers"
 import { describe, expect, it } from "vitest"
 
+import { checkRateLimit } from "../worker/rate-limit"
+
 /**
  * The public boundary of the demo: how much processing one visitor may start,
  * what a visitor is allowed to be recorded as, and what is never limited.
@@ -84,6 +86,53 @@ describe("processing limits", () => {
     expect(Date.parse(row.window_end) - Date.parse(row.window_start)).toBe(
       60 * 60 * 1000
     )
+  })
+
+  it("starts the same visitor over in the next hour, under an unrelated key", async () => {
+    // The window is a parameter, so the rollover is driven directly rather
+    // than waited an hour for. One synthetic visitor, two adjacent hours.
+    const request = new Request(`${base}/api/runs`, {
+      method: "POST",
+      headers: { "cf-connecting-ip": "203.0.113.60" },
+    })
+
+    const firstHour = new Date("2026-08-13T10:15:00.000Z")
+    const nextHour = new Date("2026-08-13T11:05:00.000Z")
+
+    for (let attempt = 0; attempt < 5; attempt++) {
+      expect((await checkRateLimit(env, request, firstHour)).allowed).toBe(true)
+    }
+
+    const spent = await checkRateLimit(env, request, firstHour)
+    expect(spent.allowed).toBe(false)
+    expect(spent.remaining).toBe(0)
+
+    // The hour turns over: the count starts again, and the counter it starts
+    // in is a different row entirely.
+    const rolled = await checkRateLimit(env, request, nextHour)
+    expect(rolled.allowed).toBe(true)
+    expect(rolled.remaining).toBe(4)
+    expect(Date.parse(rolled.resetAt)).toBe(
+      Date.parse("2026-08-13T12:00:00.000Z")
+    )
+
+    const rows = await env.DB.prepare(
+      `SELECT bucket_hash, window_start, hits FROM rate_limit_windows
+        ORDER BY window_start ASC`
+    ).all<{ bucket_hash: string; window_start: string; hits: number }>()
+
+    expect(rows.results.map((row) => row.hits)).toEqual([6, 1])
+    expect(rows.results.map((row) => row.window_start)).toEqual([
+      "2026-08-13T10:00:00.000Z",
+      "2026-08-13T11:00:00.000Z",
+    ])
+
+    // Nothing links the two hours: the window is part of the hashed material,
+    // so the same visitor is an unrelated key and no per-person history can
+    // accumulate across windows.
+    const [before, after] = rows.results
+    expect(before.bucket_hash).not.toBe(after.bucket_hash)
+    expect(after.bucket_hash).toMatch(/^[0-9a-f]{64}$/)
   })
 
   it("never limits reading, sharing, or resetting an existing run", async () => {
