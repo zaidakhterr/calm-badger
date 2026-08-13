@@ -42,7 +42,7 @@ describe("RFQ Relay Worker", () => {
         retention: { state: string }
         rateLimit: { state: string; summary: string }
         adapterContract: { adapters: { id: string; simulated: boolean }[] }
-        evaluation: { state: string }
+        evaluation: { state: string; summary: string; rows: string[] }
       }
     }>()
 
@@ -72,8 +72,15 @@ describe("RFQ Relay Worker", () => {
     expect(system.retention.state).toBe("enforced")
     expect(system.rateLimit.state).toBe("enforced")
     expect(system.rateLimit.summary).toContain("5 runs per hour")
-    // Scored evaluation is still designed only, and still says so.
-    expect(system.evaluation.state).toBe("planned")
+    // Scored evaluation is measured now, and the drawer says what was measured:
+    // the three curated fixtures, through the deterministic contract fakes,
+    // including the lines where the run asked for confirmation.
+    expect(system.evaluation.state).toBe("measured")
+    expect(system.evaluation.summary).toContain("contract fake")
+    expect(system.evaluation.rows.join(" ")).toContain("18 requested lines")
+    expect(system.evaluation.rows.join(" ")).toContain("eval:live")
+    // The counts are served; the answers behind them are not.
+    expect(JSON.stringify(system.evaluation)).not.toMatch(/NX-[A-Z]{3}-\d{4}/)
 
     const serialized = JSON.stringify(system)
     expect(serialized).not.toContain("API_KEY")

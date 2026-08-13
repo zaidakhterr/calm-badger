@@ -10,6 +10,8 @@
 
 import { ADAPTERS, ADAPTER_IDS, DEFAULT_ADAPTER } from "./adapters"
 import { SHORTLIST_SIZE } from "./catalog/retrieval"
+import { REFERENCE_EVALUATION } from "./evaluation-report"
+import { evaluationSection } from "./evaluation-summary"
 import { RATE_LIMIT_MAX_RUNS } from "./rate-limit"
 
 export type SystemDetails = {
@@ -215,15 +217,10 @@ export async function loadSystemDetails(env: Env): Promise<SystemDetails> {
         simulated: true,
       })),
     },
-    evaluation: {
-      state: "planned",
-      summary:
-        "Three scenario fixtures record the correct customer resolution, extracted fields, and product selection for the curated requests. The answers themselves stay in the test suite and are never served to a browser.",
-      rows: [
-        "The workflow contract is covered by deterministic tests that replace the OCR, model, and delivery providers with contract-compatible fakes.",
-        "Scored fixture evaluation against those gold scenarios is not yet reported; measured accuracy will appear here once that harness lands.",
-        "Live provider evaluation is explicitly invoked and never part of continuous integration.",
-      ],
-    },
+    // Measured, not asserted in copy: the counts come from the committed
+    // scoreboard that `pnpm eval:fixtures` regenerates by replaying the three
+    // curated requests across this API. What it says is true of those fixtures
+    // under the contract fakes, which is exactly what it claims.
+    evaluation: evaluationSection(REFERENCE_EVALUATION),
   }
 }

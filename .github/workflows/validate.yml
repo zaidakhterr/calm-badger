@@ -30,3 +30,11 @@ jobs:
 
       - name: Run repository checks
         run: pnpm check
+
+      # The three curated workflows, scored against the gold fixtures through
+      # the public API with the deterministic contract fakes: no provider
+      # credential, no network call, no variable cost. It fails if the committed
+      # summary that System details serves has drifted from what a fresh
+      # evaluation measures.
+      - name: Evaluate reference fixtures
+        run: node scripts/run-evaluation.mjs --check

@@ -156,3 +156,31 @@ pnpm data:check
 pnpm test
 pnpm build
 ```
+
+## Evaluation
+
+The three curated workflows are scored against gold fixtures by replaying them
+across the public API. The deterministic run uses the contract-compatible fake
+OCR, language-model, and delivery providers, so it needs no credential, makes no
+network call, and costs nothing:
+
+```bash
+pnpm eval:fixtures          # score and refresh worker/evaluation-report.ts
+node scripts/run-evaluation.mjs --check   # score without writing; what CI runs
+```
+
+The committed summary is what System details reports. It is fixture-based and
+measured through the fakes, not a claim about production traffic.
+
+The same scoring runs against the configured live OCR and language-model
+providers, reporting latency, usage, and failures. It is explicitly invoked,
+never part of CI, and costs real money:
+
+```bash
+pnpm eval:live
+```
+
+Provider selection comes from the environment (`OCR_PROVIDER`,
+`EXTRACTION_PROVIDER`, `RERANK_PROVIDER`), and keys are read from `.dev.vars` or
+the environment. A live run that ends up on the fakes fails rather than
+reporting fake results as live ones.
