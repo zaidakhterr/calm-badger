@@ -51,9 +51,9 @@ export class RfqWorkflow extends WorkflowEntrypoint<Env, RfqWorkflowParams> {
       return now
     })
 
-    // The provider failure path is handled inside the step, which records a
-    // terminal error and returns. Nothing is thrown, so the workflow does not
-    // retry a paid provider call and the graph never stays active forever.
+    // Every failure path is handled inside the step, which records a terminal
+    // error and returns. Nothing is thrown, so the workflow does not retry a
+    // paid provider call and the graph never stays active forever.
     const outcome = await step.do("read documents", async () =>
       readDocuments(this.env, runId)
     )

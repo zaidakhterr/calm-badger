@@ -10,7 +10,15 @@
 import { env, exports } from "cloudflare:workers"
 import { describe, expect, it } from "vitest"
 
+import { selectOcrProvider } from "../worker/providers/ocr"
+import { readDocuments } from "../worker/read-documents"
+
 const base = "https://example.test"
+
+/** The bindings of the test isolate with a deliberate misconfiguration. */
+function envWith(overrides: Record<string, string>): Env {
+  return { ...env, ...overrides }
+}
 
 type RunStep = {
   key: string
@@ -423,6 +431,60 @@ describe("a terminal provider failure", () => {
     // A sanitized explanation only: no key, header, or endpoint.
     expect(JSON.stringify(evidence)).not.toContain("Bearer")
     expect(JSON.stringify(evidence)).not.toContain("api.mistral.ai")
+  })
+
+  it("ends in a terminal error when the provider cannot even be selected", async () => {
+    const { run } = await createCuratedRun("routine-replenishment")
+    await waitForStep(run.viewId, "read-documents", ["complete"])
+
+    const row = await env.DB.prepare(`SELECT id FROM runs WHERE view_id = ?`)
+      .bind(run.viewId)
+      .first<{ id: string }>()
+
+    // A misconfigured provider throws after the step is already active. The
+    // step has to reach a terminal error rather than stay active forever.
+    const outcome = await readDocuments(
+      envWith({ OCR_PROVIDER: "contract-fake", APP_ENV: "production" }),
+      row!.id
+    )
+
+    expect(outcome.state).toBe("error")
+
+    const step = await env.DB.prepare(
+      `SELECT status, completed_at FROM run_steps
+        WHERE run_id = ? AND step_key = 'read-documents'`
+    )
+      .bind(row!.id)
+      .first<{ status: string; completed_at: string | null }>()
+
+    expect(step!.status).toBe("error")
+    expect(step!.completed_at).not.toBeNull()
+
+    const stopped = await env.DB.prepare(
+      `SELECT status, workflow_state FROM runs WHERE id = ?`
+    )
+      .bind(row!.id)
+      .first<{ status: string; workflow_state: string }>()
+
+    expect(stopped).toEqual({ status: "error", workflow_state: "failed" })
+  })
+})
+
+describe("selecting the OCR provider", () => {
+  it("refuses to build the contract fake in production", () => {
+    expect(() =>
+      selectOcrProvider(
+        envWith({ OCR_PROVIDER: "contract-fake", APP_ENV: "production" })
+      )
+    ).toThrow(/not allowed in production/)
+  })
+
+  it("builds the contract fake outside production", () => {
+    const provider = selectOcrProvider(
+      envWith({ OCR_PROVIDER: "contract-fake", APP_ENV: "test" })
+    )
+
+    expect(provider.name).toBe("contract-fake")
   })
 })
 

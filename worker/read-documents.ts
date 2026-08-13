@@ -9,6 +9,8 @@
  *
  * A provider failure ends the run: the step becomes a terminal error with a
  * short, sanitized explanation, and the graph stops instead of staying active.
+ * Every other failure — a misconfigured provider, a database hiccup — is caught
+ * by the same outer boundary, so the step can never be abandoned mid-flight.
  */
 
 import {
@@ -47,7 +49,43 @@ export type ReadDocumentsOutcome =
   | { state: "error"; message: string }
   | { state: "skipped" }
 
+/**
+ * Reads every source of a run. Nothing is thrown: a provider failure and any
+ * unexpected failure both end as a terminal error on the step and on the run,
+ * because a throw would let the workflow retry a paid call and then abandon the
+ * step while it still reads `active`.
+ */
 export async function readDocuments(
+  env: Env,
+  runId: string
+): Promise<ReadDocumentsOutcome> {
+  try {
+    return await readAllSources(env, runId)
+  } catch (error) {
+    const message = "The documents could not be read."
+
+    console.error(
+      JSON.stringify({
+        event: "read_documents_failed",
+        runId,
+        step: READ_DOCUMENTS_STEP_KEY,
+        reason: "unexpected",
+        error: error instanceof Error ? error.name : "unknown",
+      })
+    )
+
+    try {
+      await failStep(env, runId, message)
+    } catch {
+      // The database itself is unreachable, so there is nowhere left to record
+      // the failure. Returning still stops the workflow rather than retrying.
+    }
+
+    return { state: "error", message }
+  }
+}
+
+async function readAllSources(
   env: Env,
   runId: string
 ): Promise<ReadDocumentsOutcome> {

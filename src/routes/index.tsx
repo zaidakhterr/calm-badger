@@ -321,8 +321,8 @@ function CustomSourceForm({
               Submit synthetic or non-confidential material only.
             </span>{" "}
             This is a public demonstration. Uploads and everything derived from
-            them are read by an external OCR provider and deleted after 24
-            hours.
+            them are read by an external OCR provider and kept in private
+            storage; short-lived retention is part of the demo design.
           </p>
         </div>
 
