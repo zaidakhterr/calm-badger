@@ -476,6 +476,10 @@ async function evaluateScenario(
       quantity: structuredLine?.quantity ?? quoteLine?.quantity ?? null,
       goldSku: goldLine.expectedSku,
       goldDecision: goldLine.decision,
+      // Retrieval recall. The second arm is not redundant with the first: an
+      // exact SKU or known-alias hit auto-accepts before FTS retrieval runs, so
+      // it produces a match with no shortlist at all. Without it those lines
+      // would score as retrieval misses precisely because they were the easiest.
       shortlisted:
         shortlist.some((candidate) => candidate.sku === goldLine.expectedSku) ||
         matched?.sku === goldLine.expectedSku,

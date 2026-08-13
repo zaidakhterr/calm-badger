@@ -635,9 +635,19 @@ else
     note "No new changes need a commit."
   else
     confirm "Commit exactly the staged files shown above?" || die "Commit was not approved."
-    git commit -m "Establish RFQ Relay foundation"
+    git commit -m "Prepare RFQ Relay for publication"
   fi
 
+  # The staged list above is only what this run changed. A first push publishes
+  # every tracked file and every commit behind it, so show that scope too
+  # before the push gate rather than after it.
+  say "Everything a push publishes — tracked files:"
+  git ls-files | sed 's/^/  /'
+  printf '\n'
+  say "and the commit history behind them:"
+  git log --oneline | sed 's/^/  /'
+  printf '\n'
+  warn "Publishing is irreversible. Check this list for anything that should not be public."
   confirm "Push the current commit to origin/main?" || die "Push was not approved."
   git push --set-upstream origin HEAD:main
 fi

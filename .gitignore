@@ -21,8 +21,10 @@ coverage
 !.dev.vars.example
 !.env.example
 .scratch/
+.tanstack/
 
 # Editor directories and files
+.claude/
 .vscode/*
 !.vscode/extensions.json
 .idea

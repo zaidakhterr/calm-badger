@@ -33,9 +33,25 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # Formatting, linting, the wizard's structural check, the generated-data
+      # check, the Worker integration tests, type generation, and the build —
+      # including `wrangler deploy --dry-run`, so the bundle that is about to
+      # ship is compiled before anything external is touched.
       - name: Validate application
         run: pnpm check
 
+      # The same fixture evaluation the validate workflow runs, repeated here
+      # because this is the only path that deploys. It replays the three
+      # curated workflows through the deterministic contract fakes and fails if
+      # the committed summary that System details serves has drifted, so a
+      # deployment can never advertise numbers it does not reproduce.
+      - name: Evaluate reference fixtures
+        run: node scripts/run-evaluation.mjs --check
+
+      # Additive only. Deployment applies migrations; it never imports seed
+      # data, so accumulated demo state survives every deploy. Seeding is an
+      # explicit `pnpm db:seed:remote` (or one confirmed wizard step), and the
+      # seed itself is `INSERT OR IGNORE`, so even that cannot overwrite rows.
       - name: Apply additive D1 migrations
         uses: cloudflare/wrangler-action@v3
         with:

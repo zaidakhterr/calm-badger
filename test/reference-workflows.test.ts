@@ -85,8 +85,13 @@ describe("the three reference workflows", () => {
       expect(scenario.reranking.topThreeHits).toBeLessThanOrEqual(
         scenario.selection.lines
       )
+      // Every gold line has to arrive in the priced estimate as a real
+      // catalogue SKU. `finalSku` is the one the quote charges for, so assert
+      // that directly rather than letting an earlier candidate stand in for it.
       for (const line of scenario.lines) {
-        expect(line.finalSku ?? line.matchedSku).not.toBeNull()
+        expect(typeof line.finalSku).toBe("string")
+        expect(line.finalSku).not.toBe("")
+        expect(line.quantity).toBeGreaterThan(0)
       }
 
       // Whether review should occur, and whether it did.
