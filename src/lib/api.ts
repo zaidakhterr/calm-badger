@@ -317,6 +317,134 @@ export type MatchEvidence = {
   } | null
 }
 
+export type PricingRule =
+  "historical_override" | "customer_tier" | "quantity_break" | "catalog_base"
+
+export type QuoteLine = {
+  position: number
+  requested: {
+    reference: string
+    description: string
+    sourceLabel: string
+    sourcePage: number | null
+  }
+  sku: string
+  name: string
+  unit: string
+  quantity: number
+  pricing: {
+    rule: PricingRule
+    ruleLabel: string
+    basePriceCents: number
+    unitPriceCents: number
+    discountBp: number | null
+    explanation: string
+  }
+  subtotalCents: number
+  match: { method: string; confidenceLabel: string }
+}
+
+/** The provider-neutral quote. Adapters transform this and nothing else. */
+export type CanonicalQuote = {
+  schema: string
+  quoteNumber: string
+  issuedAt: string
+  currency: string
+  priceBasis: string
+  customer: {
+    customerId: string
+    name: string
+    tier: string
+    tierDiscountBp: number
+    contact: { name: string; role: string; email: string } | null
+    location: {
+      label: string
+      street: string
+      postalCode: string
+      city: string
+      country: string
+    } | null
+  }
+  source: {
+    channel: string
+    subject: string | null
+    receivedAt: string | null
+    references: string[]
+    documents: {
+      kind: string
+      label: string
+      mediaType: string
+      pageCount: number
+    }[]
+  }
+  lines: QuoteLine[]
+  totals: {
+    lineCount: number
+    subtotalCents: number
+    vatRateBp: number
+    vatCents: number
+    totalCents: number
+  }
+  metadata: {
+    generator: string
+    schemaVersion: string
+    pricingPrecedence: PricingRule[]
+    rounding: string
+    note: string
+  }
+}
+
+export type EstimateEvidence = {
+  stepKey: string
+  state: "pending" | "complete" | "error"
+  message: string | null
+  quote: CanonicalQuote | null
+  rules: {
+    precedence: string[]
+    applied: { rule: string; lineCount: number }[]
+    vatRateBp: number
+    rounding: string
+    note: string
+  } | null
+  totals: {
+    lineCount: number
+    subtotalCents: number
+    vatRateBp: number
+    vatCents: number
+    totalCents: number
+    elapsedMs: number
+  } | null
+}
+
+export type AdapterId = "corebridge-sandbox" | "generic-erp-webhook"
+
+export type DeliveryAdapter = {
+  id: AdapterId
+  name: string
+  contract: string
+  payloadFormat: string
+  simulated: boolean
+  notice: string
+}
+
+export type DeliveryEvidence = {
+  stepKey: string
+  adapters: DeliveryAdapter[]
+  defaultAdapter: AdapterId
+  quoteAvailable: boolean
+  quoteNumber: string | null
+  delivery: {
+    adapter: AdapterId
+    adapterName: string
+    externalEstimateId: string
+    deliveredAt: string
+    simulated: boolean
+    notice: string
+    payload: unknown
+    receipt: unknown
+  } | null
+}
+
 /** Mirrors the Worker's upload policy so a rejected file never leaves the browser. */
 export const UPLOAD_LIMITS = {
   maxBytes: 10 * 1024 * 1024,
@@ -418,6 +546,67 @@ export function fetchCandidateEvidence(
 
 export function fetchMatchEvidence(viewId: string): Promise<MatchEvidence> {
   return fetchEvidence<MatchEvidence>(viewId, "matches")
+}
+
+export function fetchEstimateEvidence(
+  viewId: string
+): Promise<EstimateEvidence> {
+  return fetchEvidence<EstimateEvidence>(viewId, "estimate")
+}
+
+export function fetchDeliveryEvidence(
+  viewId: string
+): Promise<DeliveryEvidence> {
+  return fetchEvidence<DeliveryEvidence>(viewId, "delivery")
+}
+
+/** The canonical quote download. Any holder of the run URL may read it. */
+export function quoteDownloadUrl(viewId: string): string {
+  return `/api/runs/${encodeURIComponent(viewId)}/quote`
+}
+
+/** Owner-only: what the chosen adapter would send, before anything is sent. */
+export async function fetchAdapterPreview(
+  viewId: string,
+  adapter: AdapterId
+): Promise<{ payload: unknown; adapter: DeliveryAdapter }> {
+  const capability = readOwnerCapability(viewId)
+  if (!capability) throw new Error("This browser does not own this run")
+
+  const response = await fetch(
+    `/api/runs/${encodeURIComponent(viewId)}/delivery/preview?adapter=${adapter}`,
+    { headers: { authorization: `Bearer ${capability}` } }
+  )
+
+  if (!response.ok) throw new Error(await readError(response))
+
+  return (await response.json()) as {
+    payload: unknown
+    adapter: DeliveryAdapter
+  }
+}
+
+/** Owner-only: runs the simulated delivery. Nothing leaves the application. */
+export async function deliverQuote(
+  viewId: string,
+  adapter: AdapterId
+): Promise<void> {
+  const capability = readOwnerCapability(viewId)
+  if (!capability) throw new Error("This browser does not own this run")
+
+  const response = await fetch(
+    `/api/runs/${encodeURIComponent(viewId)}/deliver`,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${capability}`,
+      },
+      body: JSON.stringify({ adapter }),
+    }
+  )
+
+  if (!response.ok) throw new Error(await readError(response))
 }
 
 /** Reads server state. The owner capability is sent only when this browser holds it. */

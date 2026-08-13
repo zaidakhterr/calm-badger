@@ -5,6 +5,7 @@ import {
   CheckIcon,
   CircleIcon,
   CircleNotchIcon,
+  DownloadSimpleIcon,
   FilePdfIcon,
   ImageSquareIcon,
   LinkSimpleIcon,
@@ -15,20 +16,29 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router"
 
 import { Button, buttonVariants } from "@/components/ui/button"
 import {
+  deliverQuote,
+  fetchAdapterPreview,
   fetchCandidateEvidence,
   fetchCustomerEvidence,
+  fetchDeliveryEvidence,
   fetchDocumentEvidence,
+  fetchEstimateEvidence,
   fetchMatchEvidence,
   fetchRun,
   fetchStructureEvidence,
+  quoteDownloadUrl,
+  type AdapterId,
   type CandidateEvidence,
   type CandidateLine,
   type Confidence,
   type CustomerEvidence,
+  type DeliveryEvidence,
   type DocumentEvidence,
+  type EstimateEvidence,
   type EvidenceSource,
   type MatchEvidence,
   type MatchLine,
+  type QuoteLine,
   type RunStep,
   type RunView,
   type StructureEvidence,
@@ -43,12 +53,16 @@ const STRUCTURE_RFQ_STEP = "structure-rfq"
 const RESOLVE_CUSTOMER_STEP = "resolve-customer"
 const RETRIEVE_CANDIDATES_STEP = "retrieve-candidates"
 const MATCH_PRODUCTS_STEP = "match-products"
+const BUILD_ESTIMATE_STEP = "build-estimate"
+const DELIVER_STEP = "deliver"
+const DELIVERED_STEP = "delivered"
 const EVIDENCE_STEPS = [
   READ_DOCUMENTS_STEP,
   STRUCTURE_RFQ_STEP,
   RESOLVE_CUSTOMER_STEP,
   RETRIEVE_CANDIDATES_STEP,
   MATCH_PRODUCTS_STEP,
+  BUILD_ESTIMATE_STEP,
 ]
 const POLL_INTERVAL_MS = 1000
 /** A bound on live polling; the server, not the client, owns step state. */
@@ -60,6 +74,8 @@ type RunSnapshot = RunView & {
   customer: CustomerEvidence | null
   candidates: CandidateEvidence | null
   matches: MatchEvidence | null
+  estimate: EstimateEvidence | null
+  delivery: DeliveryEvidence | null
 }
 
 /** One server read of everything the graph shows, used by the loader and the poll. */
@@ -70,16 +86,39 @@ async function readRunSnapshot(viewId: string): Promise<RunSnapshot> {
       (entry) => entry.key === key && entry.status !== "waiting"
     )
 
-  const [documents, structure, customer, candidates, matches] =
-    await Promise.all([
-      started(READ_DOCUMENTS_STEP) ? fetchDocumentEvidence(viewId) : null,
-      started(STRUCTURE_RFQ_STEP) ? fetchStructureEvidence(viewId) : null,
-      started(RESOLVE_CUSTOMER_STEP) ? fetchCustomerEvidence(viewId) : null,
-      started(RETRIEVE_CANDIDATES_STEP) ? fetchCandidateEvidence(viewId) : null,
-      started(MATCH_PRODUCTS_STEP) ? fetchMatchEvidence(viewId) : null,
-    ])
+  // The estimate and the delivery choice are read once matching has finished:
+  // the delivery node offers its adapters while it is still waiting, because
+  // choosing one is what makes it run.
+  const priced = started(MATCH_PRODUCTS_STEP)
 
-  return { ...view, documents, structure, customer, candidates, matches }
+  const [
+    documents,
+    structure,
+    customer,
+    candidates,
+    matches,
+    estimate,
+    delivery,
+  ] = await Promise.all([
+    started(READ_DOCUMENTS_STEP) ? fetchDocumentEvidence(viewId) : null,
+    started(STRUCTURE_RFQ_STEP) ? fetchStructureEvidence(viewId) : null,
+    started(RESOLVE_CUSTOMER_STEP) ? fetchCustomerEvidence(viewId) : null,
+    started(RETRIEVE_CANDIDATES_STEP) ? fetchCandidateEvidence(viewId) : null,
+    started(MATCH_PRODUCTS_STEP) ? fetchMatchEvidence(viewId) : null,
+    priced ? fetchEstimateEvidence(viewId) : null,
+    priced ? fetchDeliveryEvidence(viewId) : null,
+  ])
+
+  return {
+    ...view,
+    documents,
+    structure,
+    customer,
+    candidates,
+    matches,
+    estimate,
+    delivery,
+  }
 }
 
 export const Route = createFileRoute("/runs/$viewId")({
@@ -199,7 +238,9 @@ function RunPage() {
 
       <ol className="mt-7" aria-label="RFQ workflow progress">
         {run.steps.map((step, index) => {
-          const panel = evidencePanel(step, snapshot)
+          const panel = evidencePanel(step, snapshot, viewId, () => {
+            void readRunSnapshot(viewId).then(setSnapshot)
+          })
 
           return (
             <WorkflowStepRow
@@ -241,9 +282,34 @@ function RunPage() {
 /** Only steps that actually decided something offer evidence. */
 function evidencePanel(
   step: RunStep,
-  snapshot: RunSnapshot
+  snapshot: RunSnapshot,
+  viewId: string,
+  onDelivered: () => void
 ): React.ReactNode | null {
+  // Delivery is the one node that offers something while it is still waiting:
+  // the adapter choice and its payload are what a reviewer inspects first.
+  if (step.key === DELIVER_STEP && snapshot.delivery?.quoteAvailable) {
+    return (
+      <DeliveryPanel
+        evidence={snapshot.delivery}
+        viewId={viewId}
+        canDeliver={snapshot.viewer.canMutate}
+        onDelivered={onDelivered}
+      />
+    )
+  }
+
+  if (step.key === DELIVERED_STEP && snapshot.delivery?.delivery) {
+    return <DeliveredPanel evidence={snapshot.delivery} viewId={viewId} />
+  }
+
   if (step.status === "waiting") return null
+
+  if (step.key === BUILD_ESTIMATE_STEP && snapshot.estimate) {
+    return (
+      <EstimateEvidencePanel evidence={snapshot.estimate} viewId={viewId} />
+    )
+  }
 
   if (step.key === READ_DOCUMENTS_STEP && snapshot.documents) {
     return <DocumentEvidencePanel evidence={snapshot.documents} />
@@ -1026,6 +1092,374 @@ function MatchLineRow({ line }: { line: MatchLine }) {
       ) : null}
     </li>
   )
+}
+
+/**
+ * Build estimate. The priced lines come first, then the totals, then the rules
+ * that produced them, then the canonical document itself.
+ */
+function EstimateEvidencePanel({
+  evidence,
+  viewId,
+}: {
+  evidence: EstimateEvidence
+  viewId: string
+}) {
+  const quote = evidence.quote
+
+  if (!quote) {
+    return (
+      <p className="rounded-md border border-workflow-review/40 bg-workflow-review-soft/60 p-3 text-xs leading-5">
+        {evidence.message ??
+          "This run is not priced yet. Pricing runs once every line has an accepted product and a confirmed quantity."}
+      </p>
+    )
+  }
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h3 className="text-[13px] leading-4 font-medium">
+          Estimate {quote.quoteNumber}
+        </h3>
+        <p className="mt-1 text-[11px] text-muted-foreground">
+          {quote.customer.name} · {quote.customer.tier} tier
+          {quote.customer.location
+            ? ` · ${quote.customer.location.label}, ${quote.customer.location.city}`
+            : ""}
+        </p>
+        <ul className="mt-2 space-y-2">
+          {quote.lines.map((line) => (
+            <EstimateLineRow key={line.position} line={line} />
+          ))}
+        </ul>
+      </div>
+
+      <div>
+        <h3 className="text-[13px] leading-4 font-medium">Totals</h3>
+        <dl className="mt-2 divide-y rounded-md border text-xs">
+          <MetaRow
+            label="Subtotal (excl. VAT)"
+            value={euro(quote.totals.subtotalCents)}
+          />
+          <MetaRow
+            label={`VAT (${(quote.totals.vatRateBp / 100).toFixed(0)}%)`}
+            value={euro(quote.totals.vatCents)}
+          />
+          <MetaRow label="Total (EUR)" value={euro(quote.totals.totalCents)} />
+        </dl>
+      </div>
+
+      {evidence.rules ? (
+        <div>
+          <h3 className="text-[13px] leading-4 font-medium">Pricing rules</h3>
+          <dl className="mt-2 divide-y rounded-md border text-xs">
+            {evidence.rules.applied.map((entry) => (
+              <MetaRow
+                key={entry.rule}
+                label={ruleLabel(entry.rule)}
+                value={`${entry.lineCount} ${entry.lineCount === 1 ? "line" : "lines"}`}
+              />
+            ))}
+          </dl>
+          <p className="mt-1.5 text-[11px] leading-5 text-muted-foreground">
+            Precedence: {evidence.rules.precedence.map(ruleLabel).join(" → ")}.{" "}
+            {evidence.rules.note} {evidence.rules.rounding}
+          </p>
+        </div>
+      ) : null}
+
+      <div className="flex flex-wrap items-center gap-2">
+        <a
+          className={buttonVariants({ variant: "outline", size: "lg" })}
+          href={quoteDownloadUrl(viewId)}
+          download={`${quote.quoteNumber}.json`}
+        >
+          <DownloadSimpleIcon data-icon="inline-start" />
+          Download canonical quote
+        </a>
+        <span className="text-[11px] text-muted-foreground">
+          Provider-neutral JSON · schema {quote.schema}
+        </span>
+      </div>
+
+      <details className="rounded-md border bg-background">
+        <summary className="cursor-pointer px-3 py-2 text-xs">
+          Canonical quote
+        </summary>
+        <pre className="max-h-72 overflow-auto border-t px-3 py-2 font-mono text-[11px] leading-5 whitespace-pre-wrap">
+          {JSON.stringify(quote, null, 2)}
+        </pre>
+      </details>
+    </div>
+  )
+}
+
+function EstimateLineRow({ line }: { line: QuoteLine }) {
+  return (
+    <li className="rounded-md border px-3 py-2 text-xs">
+      <div className="flex items-start justify-between gap-3">
+        <span className="min-w-0">
+          <span className="font-mono text-[11px] text-muted-foreground">
+            {line.position}. {line.sku}
+          </span>{" "}
+          <span className="font-medium">{line.name}</span>
+        </span>
+        <span className="shrink-0 font-mono text-[11px]">
+          {euro(line.subtotalCents)}
+        </span>
+      </div>
+      <p className="mt-1 text-[11px] text-muted-foreground">
+        {line.quantity} {line.unit} × {euro(line.pricing.unitPriceCents)} ·{" "}
+        {line.pricing.ruleLabel}
+        {line.pricing.discountBp !== null
+          ? ` (${(line.pricing.discountBp / 100).toFixed(2)}%)`
+          : ""}
+      </p>
+      <p className="mt-1 text-[11px] leading-5 text-muted-foreground">
+        {line.pricing.explanation}
+      </p>
+      <p className="mt-1 text-[11px] text-muted-foreground">
+        Requested as “{line.requested.reference}” in{" "}
+        {line.requested.sourceLabel}
+        {line.requested.sourcePage !== null
+          ? `, page ${line.requested.sourcePage}`
+          : ""}
+        .
+      </p>
+    </li>
+  )
+}
+
+/**
+ * Deliver. The adapter is chosen and its payload inspected before anything is
+ * delivered, and both adapters are labelled simulated wherever they appear.
+ */
+function DeliveryPanel({
+  evidence,
+  viewId,
+  canDeliver,
+  onDelivered,
+}: {
+  evidence: DeliveryEvidence
+  viewId: string
+  canDeliver: boolean
+  onDelivered: () => void
+}) {
+  const [adapter, setAdapter] = useState<AdapterId>(evidence.defaultAdapter)
+  const [preview, setPreview] = useState<string | null>(null)
+  const [isWorking, setIsWorking] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const selected =
+    evidence.adapters.find((entry) => entry.id === adapter) ??
+    evidence.adapters[0]
+  const delivered = evidence.delivery
+
+  async function handlePreview(next: AdapterId) {
+    setAdapter(next)
+    setPreview(null)
+    setError(null)
+    setIsWorking(true)
+
+    try {
+      const result = await fetchAdapterPreview(viewId, next)
+      setPreview(JSON.stringify(result.payload, null, 2))
+    } catch (cause) {
+      setError(
+        cause instanceof Error ? cause.message : "The payload could not be read"
+      )
+    } finally {
+      setIsWorking(false)
+    }
+  }
+
+  async function handleDeliver() {
+    setError(null)
+    setIsWorking(true)
+
+    try {
+      await deliverQuote(viewId, adapter)
+      onDelivered()
+    } catch (cause) {
+      setError(
+        cause instanceof Error ? cause.message : "The quote could not be sent"
+      )
+      setIsWorking(false)
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h3 className="text-[13px] leading-4 font-medium">External system</h3>
+        <ul className="mt-2 space-y-2">
+          {evidence.adapters.map((entry) => {
+            const isSelected = entry.id === (delivered?.adapter ?? adapter)
+
+            return (
+              <li key={entry.id}>
+                <label
+                  className={cn(
+                    "flex cursor-pointer gap-2.5 rounded-md border px-3 py-2 text-xs",
+                    isSelected && "border-workflow-active/40 bg-muted/30"
+                  )}
+                >
+                  <input
+                    type="radio"
+                    name="delivery-adapter"
+                    className="mt-1 accent-workflow-active"
+                    value={entry.id}
+                    checked={isSelected}
+                    disabled={delivered !== null || !canDeliver}
+                    onChange={() => void handlePreview(entry.id)}
+                  />
+                  <span className="min-w-0">
+                    <span className="flex flex-wrap items-center gap-1.5">
+                      <span className="font-medium">{entry.name}</span>
+                      <span className="inline-flex h-5 items-center rounded-md border border-workflow-review/30 bg-workflow-review-soft px-2 text-[11px] font-medium text-workflow-review">
+                        Simulated
+                      </span>
+                    </span>
+                    <span className="mt-1 block text-[11px] leading-5 text-muted-foreground">
+                      {entry.contract}
+                    </span>
+                  </span>
+                </label>
+              </li>
+            )
+          })}
+        </ul>
+        <p className="mt-1.5 text-[11px] leading-5 text-muted-foreground">
+          {selected?.notice}
+        </p>
+      </div>
+
+      {canDeliver && !delivered ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            size="lg"
+            variant="outline"
+            type="button"
+            disabled={isWorking}
+            onClick={() => void handlePreview(adapter)}
+          >
+            Inspect payload
+          </Button>
+          <Button
+            size="lg"
+            type="button"
+            disabled={isWorking}
+            onClick={() => void handleDeliver()}
+          >
+            {isWorking ? "Working…" : `Send to ${selected?.name}`}
+          </Button>
+        </div>
+      ) : null}
+
+      {!canDeliver ? (
+        <p className="text-[11px] leading-5 text-muted-foreground">
+          Delivery stays with the browser that started this run. A shared viewer
+          sees the adapter contract and, once it happens, the delivered payload.
+        </p>
+      ) : null}
+
+      {error ? <p className="text-xs text-destructive">{error}</p> : null}
+
+      {preview ? (
+        <details className="rounded-md border bg-background" open>
+          <summary className="cursor-pointer px-3 py-2 text-xs">
+            {selected?.name} payload · {selected?.payloadFormat} · not sent yet
+          </summary>
+          <pre className="max-h-72 overflow-auto border-t px-3 py-2 font-mono text-[11px] leading-5 whitespace-pre-wrap">
+            {preview}
+          </pre>
+        </details>
+      ) : null}
+    </div>
+  )
+}
+
+/** Delivered. The terminal node: the synthetic identifier and what was sent. */
+function DeliveredPanel({
+  evidence,
+  viewId,
+}: {
+  evidence: DeliveryEvidence
+  viewId: string
+}) {
+  const delivered = evidence.delivery
+  if (!delivered) return null
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h3 className="text-[13px] leading-4 font-medium">
+          Simulated external estimate
+        </h3>
+        <dl className="mt-2 divide-y rounded-md border text-xs">
+          <MetaRow
+            label="External estimate ID"
+            value={delivered.externalEstimateId}
+            mono
+          />
+          <MetaRow label="Adapter" value={delivered.adapterName} />
+          <MetaRow
+            label="Accepted"
+            value={formatTimestamp(delivered.deliveredAt)}
+          />
+        </dl>
+        <p className="mt-1.5 text-[11px] leading-5 text-muted-foreground">
+          {delivered.notice}
+        </p>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <a
+          className={buttonVariants({ variant: "outline", size: "lg" })}
+          href={quoteDownloadUrl(viewId)}
+          download={`${evidence.quoteNumber ?? "quote"}.json`}
+        >
+          <DownloadSimpleIcon data-icon="inline-start" />
+          Download canonical quote
+        </a>
+      </div>
+
+      <details className="rounded-md border bg-background">
+        <summary className="cursor-pointer px-3 py-2 text-xs">
+          Transformed payload
+        </summary>
+        <pre className="max-h-72 overflow-auto border-t px-3 py-2 font-mono text-[11px] leading-5 whitespace-pre-wrap">
+          {JSON.stringify(delivered.payload, null, 2)}
+        </pre>
+      </details>
+
+      <details className="rounded-md border bg-background">
+        <summary className="cursor-pointer px-3 py-2 text-xs">
+          Adapter receipt
+        </summary>
+        <pre className="max-h-64 overflow-auto border-t px-3 py-2 font-mono text-[11px] leading-5 whitespace-pre-wrap">
+          {JSON.stringify(delivered.receipt, null, 2)}
+        </pre>
+      </details>
+    </div>
+  )
+}
+
+/** `1490` → `€14.90`, from integer cents, without floating arithmetic. */
+function euro(cents: number): string {
+  const sign = cents < 0 ? "-" : ""
+  const absolute = Math.abs(cents)
+
+  return `${sign}€${Math.trunc(absolute / 100)}.${String(absolute % 100).padStart(2, "0")}`
+}
+
+function ruleLabel(rule: string): string {
+  if (rule === "historical_override") return "Historical override"
+  if (rule === "customer_tier") return "Customer tier"
+  if (rule === "quantity_break") return "Quantity break"
+  if (rule === "catalog_base") return "Catalogue base price"
+  return rule
 }
 
 function ConfidenceBlock({ confidence }: { confidence: Confidence }) {

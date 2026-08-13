@@ -13,10 +13,20 @@
  * which is the order the interface reads them in.
  */
 
+import {
+  ADAPTERS,
+  DEFAULT_ADAPTER,
+  SIMULATION_NOTICE,
+  type AdapterDescription,
+  type AdapterId,
+} from "./adapters"
+import { BUILD_ESTIMATE_STEP_KEY, loadQuote } from "./build-estimate"
+import { DELIVER_STEP_KEY, loadDelivery } from "./deliver"
 import { MATCH_PRODUCTS_STEP_KEY } from "./match-products"
 import { READ_DOCUMENTS_STEP_KEY } from "./read-documents"
 import { RESOLVE_CUSTOMER_STEP_KEY } from "./resolve-customer"
 import { RETRIEVE_CANDIDATES_STEP_KEY } from "./retrieve-candidates"
+import type { CanonicalQuote } from "./quote"
 import { loadSources } from "./sources"
 import { STRUCTURE_RFQ_STEP_KEY } from "./structure-rfq"
 
@@ -772,6 +782,139 @@ export async function loadMatchEvidence(
           usage: readUsage(totals.usage),
           estimatedCostUsd: readNumber(totals.estimatedCostUsd),
           elapsedMs: readNumber(totals.elapsedMs) ?? 0,
+        }
+      : null,
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Build estimate                                                             */
+/* -------------------------------------------------------------------------- */
+
+export type EstimateEvidenceProjection = {
+  stepKey: string
+  state: "pending" | "complete" | "error"
+  message: string | null
+  /**
+   * The canonical quote exactly as it was built and stored. It was assembled
+   * from an allowlist, so it holds business facts only — never a storage key,
+   * a capability, a prompt, or a provider response.
+   */
+  quote: CanonicalQuote | null
+  rules: {
+    precedence: string[]
+    applied: { rule: string; lineCount: number }[]
+    vatRateBp: number
+    rounding: string
+    note: string
+  } | null
+  totals: {
+    lineCount: number
+    subtotalCents: number
+    vatRateBp: number
+    vatCents: number
+    totalCents: number
+    elapsedMs: number
+  } | null
+}
+
+export async function loadEstimateEvidence(
+  env: Env,
+  runId: string
+): Promise<EstimateEvidenceProjection> {
+  const [stored, quote] = await Promise.all([
+    readStoredEvidence(env, runId, BUILD_ESTIMATE_STEP_KEY, "estimate"),
+    loadQuote(env, runId),
+  ])
+
+  const rules = stored?.rules ? asRecord(stored.rules) : null
+  const totals = stored?.totals ? asRecord(stored.totals) : null
+
+  return {
+    stepKey: BUILD_ESTIMATE_STEP_KEY,
+    state: readState(stored?.state),
+    message: readText(stored?.message),
+    quote,
+    rules: rules
+      ? {
+          precedence: readStrings(rules.precedence),
+          applied: (Array.isArray(rules.applied) ? rules.applied : []).map(
+            (entry) => {
+              const applied = asRecord(entry)
+
+              return {
+                rule: readText(applied.rule) ?? "",
+                lineCount: readNumber(applied.lineCount) ?? 0,
+              }
+            }
+          ),
+          vatRateBp: readNumber(rules.vatRateBp) ?? 0,
+          rounding: readText(rules.rounding) ?? "",
+          note: readText(rules.note) ?? "",
+        }
+      : null,
+    totals: totals
+      ? {
+          lineCount: readNumber(totals.lineCount) ?? 0,
+          subtotalCents: readNumber(totals.subtotalCents) ?? 0,
+          vatRateBp: readNumber(totals.vatRateBp) ?? 0,
+          vatCents: readNumber(totals.vatCents) ?? 0,
+          totalCents: readNumber(totals.totalCents) ?? 0,
+          elapsedMs: readNumber(totals.elapsedMs) ?? 0,
+        }
+      : null,
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Deliver                                                                    */
+/* -------------------------------------------------------------------------- */
+
+export type DeliveryEvidenceProjection = {
+  stepKey: string
+  /** Both simulated adapters, always, so the boundary is visible before use. */
+  adapters: AdapterDescription[]
+  defaultAdapter: AdapterId
+  /** Whether pricing has produced a quote for an adapter to transform. */
+  quoteAvailable: boolean
+  quoteNumber: string | null
+  delivery: {
+    adapter: AdapterId
+    adapterName: string
+    externalEstimateId: string
+    deliveredAt: string
+    simulated: true
+    notice: string
+    payload: unknown
+    receipt: unknown
+  } | null
+}
+
+export async function loadDeliveryEvidence(
+  env: Env,
+  runId: string
+): Promise<DeliveryEvidenceProjection> {
+  const [quote, delivery] = await Promise.all([
+    loadQuote(env, runId),
+    loadDelivery(env, runId),
+  ])
+
+  return {
+    stepKey: DELIVER_STEP_KEY,
+    adapters: Object.values(ADAPTERS),
+    defaultAdapter: DEFAULT_ADAPTER,
+    quoteAvailable: quote !== null,
+    quoteNumber: quote?.quoteNumber ?? null,
+    delivery: delivery
+      ? {
+          adapter: delivery.adapter,
+          adapterName: ADAPTERS[delivery.adapter].name,
+          externalEstimateId: delivery.externalEstimateId,
+          deliveredAt: delivery.deliveredAt,
+          simulated: true,
+          notice: SIMULATION_NOTICE,
+          payload: delivery.payload,
+          receipt: delivery.receipt,
         }
       : null,
   }

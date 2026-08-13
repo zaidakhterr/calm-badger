@@ -1,7 +1,12 @@
+import { isAdapterId } from "./adapters"
+import { loadQuote } from "./build-estimate"
+import { deliverRun, previewDelivery } from "./deliver"
 import {
   loadCandidateEvidence,
   loadCustomerEvidence,
+  loadDeliveryEvidence,
   loadDocumentEvidence,
+  loadEstimateEvidence,
   loadMatchEvidence,
   loadStructureEvidence,
 } from "./evidence"
@@ -114,12 +119,12 @@ async function routeRequest(
   }
 
   const runMatch =
-    /^\/api\/runs\/([A-Za-z0-9_-]+)(?:\/(reset|documents|structure|customer|candidates|matches)|\/sources\/([A-Za-z0-9-]+))?$/.exec(
+    /^\/api\/runs\/([A-Za-z0-9_-]+)(?:\/(reset|deliver|documents|structure|customer|candidates|matches|estimate|delivery|quote)|\/delivery\/(preview)|\/sources\/([A-Za-z0-9-]+))?$/.exec(
       url.pathname
     )
 
   if (runMatch) {
-    const [, viewId, segment, sourceId] = runMatch
+    const [, viewId, segment, deliveryPreview, sourceId] = runMatch
 
     if (segment === "reset") {
       if (request.method !== "POST") {
@@ -129,8 +134,26 @@ async function routeRequest(
       return resetRunResponse(request, env, viewId)
     }
 
+    if (segment === "deliver") {
+      if (request.method !== "POST") {
+        return methodNotAllowed("POST")
+      }
+
+      return deliverRunResponse(request, env, viewId)
+    }
+
     if (request.method !== "GET") {
       return methodNotAllowed("GET")
+    }
+
+    // Inspecting an adapter payload before delivery is an owner action, like
+    // delivery itself. What was actually delivered becomes shared evidence.
+    if (deliveryPreview) {
+      return deliveryPreviewResponse(request, env, viewId, url)
+    }
+
+    if (segment === "quote") {
+      return quoteDownloadResponse(env, viewId)
     }
 
     if (
@@ -138,7 +161,9 @@ async function routeRequest(
       segment === "structure" ||
       segment === "customer" ||
       segment === "candidates" ||
-      segment === "matches"
+      segment === "matches" ||
+      segment === "estimate" ||
+      segment === "delivery"
     ) {
       return stepEvidenceResponse(env, viewId, segment)
     }
@@ -283,7 +308,14 @@ async function readCustomInput(request: Request): Promise<InputResult> {
 async function stepEvidenceResponse(
   env: Env,
   viewId: string,
-  segment: "documents" | "structure" | "customer" | "candidates" | "matches"
+  segment:
+    | "documents"
+    | "structure"
+    | "customer"
+    | "candidates"
+    | "matches"
+    | "estimate"
+    | "delivery"
 ): Promise<Response> {
   const runId = await resolveRunId(env, viewId)
 
@@ -303,9 +335,148 @@ async function stepEvidenceResponse(
           ? await loadCustomerEvidence(env, runId)
           : segment === "candidates"
             ? await loadCandidateEvidence(env, runId)
-            : await loadMatchEvidence(env, runId)
+            : segment === "matches"
+              ? await loadMatchEvidence(env, runId)
+              : segment === "estimate"
+                ? await loadEstimateEvidence(env, runId)
+                : await loadDeliveryEvidence(env, runId)
 
   return Response.json({ evidence }, { headers: jsonHeaders })
+}
+
+/**
+ * The canonical quote as a downloadable file. It is the same allowlisted
+ * document the estimate evidence carries, so any holder of the run URL may
+ * read it, exactly as they may read every other evidence projection.
+ */
+async function quoteDownloadResponse(
+  env: Env,
+  viewId: string
+): Promise<Response> {
+  const runId = await resolveRunId(env, viewId)
+  const quote = runId ? await loadQuote(env, runId) : null
+
+  if (!quote) {
+    return Response.json(
+      { error: "This run has no canonical quote yet" },
+      { status: 404, headers: jsonHeaders }
+    )
+  }
+
+  return new Response(`${JSON.stringify(quote, null, 2)}\n`, {
+    headers: {
+      ...jsonHeaders,
+      "content-disposition": `attachment; filename="${quote.quoteNumber}.json"`,
+    },
+  })
+}
+
+async function deliveryPreviewResponse(
+  request: Request,
+  env: Env,
+  viewId: string,
+  url: URL
+): Promise<Response> {
+  const authorization = await authorizeOwner(
+    env,
+    viewId,
+    request.headers.get("authorization")
+  )
+
+  if (!authorization.ok) return ownerRejection(authorization.reason)
+
+  const adapter = url.searchParams.get("adapter")
+
+  if (!isAdapterId(adapter)) {
+    return Response.json(
+      { error: "A known delivery adapter is required" },
+      { status: 400, headers: jsonHeaders }
+    )
+  }
+
+  const preview = await previewDelivery(env, authorization.runId, adapter)
+
+  if (!preview) {
+    return Response.json(
+      { error: "This run has no canonical quote yet" },
+      { status: 409, headers: jsonHeaders }
+    )
+  }
+
+  return Response.json(preview, { headers: jsonHeaders })
+}
+
+/**
+ * Delivery is owner-only and deliberate: the capability is checked, the run
+ * must already be priced, and a second attempt returns what was delivered
+ * rather than delivering twice.
+ */
+async function deliverRunResponse(
+  request: Request,
+  env: Env,
+  viewId: string
+): Promise<Response> {
+  const authorization = await authorizeOwner(
+    env,
+    viewId,
+    request.headers.get("authorization")
+  )
+
+  if (!authorization.ok) return ownerRejection(authorization.reason)
+
+  const payload = await readJsonBody(request)
+  const adapter = (payload as { adapter?: unknown } | null)?.adapter
+
+  if (!isAdapterId(adapter)) {
+    return Response.json(
+      { error: "A known delivery adapter is required" },
+      { status: 400, headers: jsonHeaders }
+    )
+  }
+
+  const outcome = await deliverRun(env, authorization.runId, adapter)
+
+  if (outcome.state === "not_priced") {
+    return Response.json(
+      { error: "This run has no canonical quote to deliver yet" },
+      { status: 409, headers: jsonHeaders }
+    )
+  }
+
+  if (outcome.state === "already_delivered") {
+    return Response.json(
+      { status: "already_delivered", delivery: outcome.delivery },
+      { status: 409, headers: jsonHeaders }
+    )
+  }
+
+  return Response.json(
+    { status: "delivered", delivery: outcome.delivery },
+    { headers: jsonHeaders }
+  )
+}
+
+function ownerRejection(
+  reason: "missing" | "unknown_run" | "forbidden"
+): Response {
+  if (reason === "missing") {
+    return Response.json(
+      { error: "An owner capability is required" },
+      { status: 401, headers: { ...jsonHeaders, "www-authenticate": "Bearer" } }
+    )
+  }
+
+  if (reason === "unknown_run") {
+    return Response.json(
+      { error: "This run is unavailable or has expired" },
+      { status: 404, headers: jsonHeaders }
+    )
+  }
+
+  return Response.json(
+    { error: "This capability does not own this run" },
+    { status: 403, headers: jsonHeaders }
+  )
 }
 
 /**
@@ -394,29 +565,7 @@ async function resetRunResponse(
     request.headers.get("authorization")
   )
 
-  if (!authorization.ok) {
-    if (authorization.reason === "missing") {
-      return Response.json(
-        { error: "An owner capability is required" },
-        {
-          status: 401,
-          headers: { ...jsonHeaders, "www-authenticate": "Bearer" },
-        }
-      )
-    }
-
-    if (authorization.reason === "unknown_run") {
-      return Response.json(
-        { error: "This run is unavailable or has expired" },
-        { status: 404, headers: jsonHeaders }
-      )
-    }
-
-    return Response.json(
-      { error: "This capability does not own this run" },
-      { status: 403, headers: jsonHeaders }
-    )
-  }
+  if (!authorization.ok) return ownerRejection(authorization.reason)
 
   await deleteRun(env, authorization.runId)
 

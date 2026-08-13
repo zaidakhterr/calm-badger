@@ -551,7 +551,9 @@ describe("matching a curated request", () => {
       expect(step.completedAt).not.toBeNull()
     }
 
-    expect(settled.workflowState).toBe("products_matched")
+    // This request has lines a human still has to decide, so the run stops
+    // before pricing rather than quoting an unreviewed match.
+    expect(settled.workflowState).toBe("awaiting_review")
 
     const stored = await env.DB.prepare(
       `SELECT

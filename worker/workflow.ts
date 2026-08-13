@@ -1,6 +1,7 @@
 import { WorkflowEntrypoint } from "cloudflare:workers"
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers"
 
+import { buildEstimate } from "./build-estimate"
 import { matchProducts } from "./match-products"
 import { readDocuments } from "./read-documents"
 import { resolveCustomer } from "./resolve-customer"
@@ -14,7 +15,7 @@ export type RfqWorkflowParams = {
 
 export type RfqWorkflowResult = {
   runId: string
-  state: "products_matched" | "matches_need_review" | "failed"
+  state: "estimate_built" | "matches_need_review" | "failed"
   acknowledgedAt: string
   /** Whether identity was settled. An unresolved run still matches products. */
   customerResolved: boolean
@@ -106,12 +107,24 @@ export class RfqWorkflow extends WorkflowEntrypoint<Env, RfqWorkflowParams> {
       return failure(runId, acknowledgedAt, customerResolved)
     }
 
+    // Pricing decides for itself whether the run is priceable: identity
+    // settled, every line matched and quantified. A run that is not stops here
+    // with the estimate node still waiting, and the review node of the next
+    // ticket is what releases it. Nothing unreviewed is ever priced.
+    const estimate = await step.do("build estimate", async () =>
+      buildEstimate(this.env, runId)
+    )
+
+    if (estimate.state === "error") {
+      return failure(runId, acknowledgedAt, customerResolved)
+    }
+
     return {
       runId,
       state:
-        matched.reviewCount > 0 || !customerResolved
-          ? "matches_need_review"
-          : "products_matched",
+        estimate.state === "complete"
+          ? "estimate_built"
+          : "matches_need_review",
       acknowledgedAt,
       customerResolved,
     }

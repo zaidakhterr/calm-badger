@@ -327,6 +327,8 @@ export async function deleteRun(env: Env, runId: string): Promise<void> {
   await deleteStoredSources(env, runId)
 
   await env.DB.batch([
+    env.DB.prepare(`DELETE FROM run_deliveries WHERE run_id = ?`).bind(runId),
+    env.DB.prepare(`DELETE FROM run_quotes WHERE run_id = ?`).bind(runId),
     env.DB.prepare(`DELETE FROM run_line_matches WHERE run_id = ?`).bind(runId),
     env.DB.prepare(`DELETE FROM run_line_candidates WHERE run_id = ?`).bind(
       runId
