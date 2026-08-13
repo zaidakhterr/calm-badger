@@ -274,13 +274,15 @@ function RunPage() {
               step={step}
               isLast={index === run.steps.length - 1}
               nextStatus={run.steps[index + 1]?.status ?? null}
-              isOpen={openSteps[step.key] ?? opensItself(step)}
+              isOpen={openSteps[step.key] ?? opensItself(step, snapshot)}
               onToggle={
                 panel
                   ? () =>
                       setOpenSteps((current) => ({
                         ...current,
-                        [step.key]: !(current[step.key] ?? opensItself(step)),
+                        [step.key]: !(
+                          current[step.key] ?? opensItself(step, snapshot)
+                        ),
                       }))
                   : null
               }
@@ -305,8 +307,21 @@ function RunPage() {
  * A node opens by itself when it is where the run currently is: the step doing
  * the work, the step asking for a decision, or the step it stopped at. Anything
  * the reviewer opened by hand is remembered separately and stays open.
+ *
+ * Deliver is the exception the graph's own status cannot express. It still
+ * reads `waiting` while it holds the only action left in the flow, so once the
+ * quote exists and nothing has been delivered yet, the node opens itself rather
+ * than hiding the adapter choice behind "Show evidence".
  */
-function opensItself(step: RunStep): boolean {
+function opensItself(step: RunStep, snapshot: RunSnapshot): boolean {
+  if (
+    step.key === DELIVER_STEP &&
+    snapshot.delivery?.quoteAvailable &&
+    !snapshot.delivery.delivery
+  ) {
+    return true
+  }
+
   return (
     step.status === "active" ||
     step.status === "review_required" ||
@@ -1413,7 +1428,7 @@ function ReviewPanel({
         </p>
         {review.expiresAt && open ? (
           <p className="mt-1 text-muted-foreground">
-            Decide before {formatTimestamp(review.expiresAt)}. A review never
+            Decide before {formatDeadline(review.expiresAt)}. A review never
             outlives the run data it decides.
           </p>
         ) : null}
@@ -1552,10 +1567,24 @@ function ReviewItemRow({
               item.resolved.quantity}
           </span>
         </p>
-      ) : null}
+      ) : (
+        <p className="mt-2 leading-5">
+          Proposed:{" "}
+          {item.proposal.sku ? (
+            <>
+              <span className="font-mono text-[11px]">
+                {item.proposal.sku}
+              </span>{" "}
+            </>
+          ) : null}
+          {item.proposal.label}
+        </p>
+      )}
 
       {interactive && !resolved ? (
         <div className="mt-3 space-y-2">
+          {/* The action says what the button does; what is being accepted is
+              the proposal line above it. */}
           {item.proposal.sku ? (
             <Button
               size="lg"
@@ -1564,7 +1593,7 @@ function ReviewItemRow({
                 void onDecide({ itemId: item.id, action: "accept" })
               }
             >
-              {item.proposal.label}
+              Accept proposal
             </Button>
           ) : null}
 
@@ -1576,7 +1605,7 @@ function ReviewItemRow({
                 void onDecide({ itemId: item.id, action: "accept" })
               }
             >
-              {item.proposal.label}
+              Confirm this reading
             </Button>
           ) : null}
 
@@ -2230,4 +2259,23 @@ function formatTimestamp(value: string): string {
     hour: "2-digit",
     minute: "2-digit",
   })
+}
+
+/**
+ * A deadline, unlike an event that already happened, can sit days away: a
+ * seven-day review window shown as a bare clock time reads as "later today".
+ * The date is added whenever the instant is not today.
+ */
+function formatDeadline(value: string): string {
+  const deadline = new Date(value)
+  const isToday = deadline.toDateString() === new Date().toDateString()
+
+  return isToday
+    ? formatTimestamp(value)
+    : deadline.toLocaleString(undefined, {
+        day: "numeric",
+        month: "short",
+        hour: "2-digit",
+        minute: "2-digit",
+      })
 }
