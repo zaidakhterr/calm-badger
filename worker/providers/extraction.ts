@@ -101,13 +101,19 @@ export function selectExtractionProvider(env: Env): ExtractionProvider {
  * Estimated spend for one extraction call, in USD. The per-million-token prices
  * are configured variables rather than constants so they can be corrected
  * without a code change; the interface labels the result as an estimate.
+ *
+ * A missing or malformed price yields `null`, not zero. A free call and an
+ * uncosted call are different facts, and showing "$0.0000" for a deployment
+ * whose prices were never configured would be a quiet lie.
  */
 export function estimateExtractionCostUsd(
   env: Env,
   usage: ExtractionUsage
-): number {
+): number | null {
   const input = readPrice(env.OPENROUTER_COST_PER_1M_INPUT_TOKENS_USD)
   const output = readPrice(env.OPENROUTER_COST_PER_1M_OUTPUT_TOKENS_USD)
+
+  if (input === null || output === null) return null
 
   const total =
     (usage.inputTokens * input) / 1e6 + (usage.outputTokens * output) / 1e6
@@ -115,7 +121,7 @@ export function estimateExtractionCostUsd(
   return Math.round(total * 1e6) / 1e6
 }
 
-function readPrice(value: string): number {
+function readPrice(value: string): number | null {
   const parsed = Number.parseFloat(value)
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null
 }

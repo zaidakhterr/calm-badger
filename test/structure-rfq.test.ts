@@ -13,7 +13,10 @@
 import { env, exports } from "cloudflare:workers"
 import { describe, expect, it } from "vitest"
 
-import { selectExtractionProvider } from "../worker/providers/extraction"
+import {
+  estimateExtractionCostUsd,
+  selectExtractionProvider,
+} from "../worker/providers/extraction"
 import { resolveCustomer } from "../worker/resolve-customer"
 import {
   applyBusinessRules,
@@ -691,6 +694,24 @@ describe("selecting the extraction provider", () => {
     )
 
     expect(provider.name).toBe("contract-fake")
+  })
+
+  it("reports an unknown cost rather than zero when prices are misconfigured", () => {
+    const usage = { inputTokens: 1000, outputTokens: 500, totalTokens: 1500 }
+
+    expect(estimateExtractionCostUsd(env, usage)).toBeGreaterThan(0)
+    expect(
+      estimateExtractionCostUsd(
+        envWith({ OPENROUTER_COST_PER_1M_INPUT_TOKENS_USD: "" }),
+        usage
+      )
+    ).toBeNull()
+    expect(
+      estimateExtractionCostUsd(
+        envWith({ OPENROUTER_COST_PER_1M_OUTPUT_TOKENS_USD: "free" }),
+        usage
+      )
+    ).toBeNull()
   })
 })
 

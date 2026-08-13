@@ -81,10 +81,14 @@ export function createContractFakeExtractionProvider(
         .toLowerCase()
 
       if (corpus.includes(TRIGGERS.providerError)) {
-        throw new ExtractionProviderError(
-          PROVIDER,
-          "The extraction model rejected the request (503).",
-          503
+        // A rejected promise, not a synchronous throw: the live client fails
+        // asynchronously, and a caller that only awaits must see the same shape.
+        return Promise.reject(
+          new ExtractionProviderError(
+            PROVIDER,
+            "The extraction model rejected the request (503).",
+            503
+          )
         )
       }
 

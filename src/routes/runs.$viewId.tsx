@@ -540,7 +540,7 @@ function StructureEvidencePanel({ evidence }: { evidence: StructureEvidence }) {
             label="Estimated cost"
             value={
               evidence.estimatedCostUsd === null
-                ? "—"
+                ? "Unknown"
                 : `$${evidence.estimatedCostUsd.toFixed(4)}`
             }
           />
@@ -553,7 +553,8 @@ function StructureEvidencePanel({ evidence }: { evidence: StructureEvidence }) {
         </dl>
         <p className="mt-1.5 text-[11px] text-muted-foreground">
           Cost is an estimate from the configured token prices, not a billed
-          amount.
+          amount. It reads Unknown when those prices are not configured, rather
+          than showing a misleading zero.
         </p>
       </div>
     </div>

@@ -16,6 +16,10 @@
  * `NoObjectGeneratedError`, which still carries the generated text, so that
  * response follows exactly the same validation path as a well-formed one.
  *
+ * `maxRetries: 0` is set explicitly. The AI SDK retries twice by default, which
+ * would turn one failing extraction into three paid calls and three times the
+ * latency; this demo has no retry story, so a failure is reported once.
+ *
  * The API key comes from the `OPENROUTER_API_KEY` secret binding. It is never
  * logged, never persisted, and never included in stored evidence. Prompts are
  * likewise never persisted or returned.
@@ -75,6 +79,7 @@ export function createOpenRouterExtractionProvider(
           }),
           temperature: 0,
           maxOutputTokens: MAX_OUTPUT_TOKENS,
+          maxRetries: 0,
           abortSignal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         })
 

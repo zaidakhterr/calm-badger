@@ -138,7 +138,8 @@ async function structure(
       issues: [],
       usage: null,
       metrics: { latencyMs: 0, elapsedMs: Date.now() - startedAt },
-      estimatedCostUsd: 0,
+      // No usage was reported, so no estimate is honest here.
+      estimatedCostUsd: null,
       reportedCostUsd: null,
     })
 
@@ -246,7 +247,7 @@ async function stopWithValidationFailure(
     repaired: boolean
     usage: ExtractionResult["usage"]
     originalOutput: string
-    estimatedCostUsd: number
+    estimatedCostUsd: number | null
     reportedCostUsd: number | null
     latencyMs: number
     elapsedMs: number
