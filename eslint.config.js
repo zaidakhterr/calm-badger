@@ -7,6 +7,8 @@ import { defineConfig, globalIgnores } from "eslint/config"
 
 export default defineConfig([
   globalIgnores([
+    ".wrangler",
+    "coverage",
     "dist",
     "dist-worker",
     "worker-configuration.d.ts",
