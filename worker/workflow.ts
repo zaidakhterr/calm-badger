@@ -1,6 +1,7 @@
 import { WorkflowEntrypoint } from "cloudflare:workers"
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers"
 
+import { readDocuments } from "./read-documents"
 import { RFQ_RECEIVED_STEP_KEY } from "./runs"
 
 export type RfqWorkflowParams = {
@@ -9,7 +10,7 @@ export type RfqWorkflowParams = {
 
 export type RfqWorkflowResult = {
   runId: string
-  state: "accepted"
+  state: "documents_read" | "failed"
   acknowledgedAt: string
 }
 
@@ -50,6 +51,17 @@ export class RfqWorkflow extends WorkflowEntrypoint<Env, RfqWorkflowParams> {
       return now
     })
 
-    return { runId, state: "accepted", acknowledgedAt }
+    // The provider failure path is handled inside the step, which records a
+    // terminal error and returns. Nothing is thrown, so the workflow does not
+    // retry a paid provider call and the graph never stays active forever.
+    const outcome = await step.do("read documents", async () =>
+      readDocuments(this.env, runId)
+    )
+
+    return {
+      runId,
+      state: outcome.state === "complete" ? "documents_read" : "failed",
+      acknowledgedAt,
+    }
   }
 }

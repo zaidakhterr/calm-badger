@@ -33,7 +33,12 @@
   ],
   "vars": {
     "APP_ENV": "production",
+    // "mistral" is the live reader. "contract-fake" is the deterministic
+    // provider used by tests and fixture evaluation; it refuses to run when
+    // APP_ENV is production.
+    "OCR_PROVIDER": "mistral",
     "MISTRAL_OCR_MODEL": "mistral-ocr-latest",
+    "OCR_COST_PER_1000_PAGES_USD": "1",
     "OPENROUTER_EXTRACTION_MODEL": "openai/gpt-5.6-luna",
     "OPENROUTER_RERANK_MODEL": "openai/gpt-5.6-luna",
     "POSTHOG_HOST": "https://eu.i.posthog.com",

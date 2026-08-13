@@ -9,7 +9,13 @@ import {
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router"
 
 import { Button } from "@/components/ui/button"
-import { createRun, fetchScenarios, type Scenario } from "@/lib/api"
+import {
+  createCustomRun,
+  createRun,
+  fetchScenarios,
+  UPLOAD_LIMITS,
+  type Scenario,
+} from "@/lib/api"
 import { readRecentRuns, rememberOwnedRun } from "@/lib/run-store"
 import { cn } from "@/lib/utils"
 
@@ -27,17 +33,28 @@ function LandingPage() {
   const [isStarting, setIsStarting] = useState(false)
   const [startError, setStartError] = useState<string | null>(null)
   const [recentRuns] = useState(() => readRecentRuns())
+  const [mode, setMode] = useState<"curated" | "custom">("curated")
+  const [emailBody, setEmailBody] = useState("")
+  const [files, setFiles] = useState<File[]>([])
   const navigate = useNavigate()
 
   const selected =
     scenarios.find((scenario) => scenario.id === selectedId) ?? featured
+
+  const uploadProblem = mode === "custom" ? describeUploadProblem(files) : null
+  const canStart =
+    mode === "curated" ||
+    (emailBody.trim().length > 0 && uploadProblem === null)
 
   async function handleProcessRfq() {
     setIsStarting(true)
     setStartError(null)
 
     try {
-      const { run, ownerCapability } = await createRun(selected.id)
+      const { run, ownerCapability } =
+        mode === "custom"
+          ? await createCustomRun({ emailBody: emailBody.trim(), files })
+          : await createRun(selected.id)
 
       // The capability is returned once, so it is stored before navigating.
       rememberOwnedRun({
@@ -73,7 +90,10 @@ function LandingPage() {
         </p>
       </section>
 
-      <section className="mt-9" aria-labelledby="scenario-heading">
+      <section
+        className={cn("mt-9", mode === "custom" && "hidden")}
+        aria-labelledby="scenario-heading"
+      >
         <div className="flex items-end justify-between gap-4">
           <div>
             <h2 id="scenario-heading" className="text-base font-medium">
@@ -100,18 +120,35 @@ function LandingPage() {
         </div>
       </section>
 
-      <SourcePreview scenario={selected} />
+      {mode === "curated" ? (
+        <SourcePreview scenario={selected} />
+      ) : (
+        <CustomSourceForm
+          emailBody={emailBody}
+          files={files}
+          problem={uploadProblem}
+          onEmailBodyChange={setEmailBody}
+          onFilesChange={setFiles}
+        />
+      )}
 
       <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:items-center sm:justify-between">
-        <Button variant="ghost" size="lg" type="button" disabled>
-          Use your own RFQ
-          <span className="text-muted-foreground">Coming next</span>
+        <Button
+          variant="ghost"
+          size="lg"
+          type="button"
+          onClick={() => {
+            setStartError(null)
+            setMode(mode === "custom" ? "curated" : "custom")
+          }}
+        >
+          {mode === "custom" ? "Use a curated RFQ" : "Use your own RFQ"}
         </Button>
         <Button
           size="lg"
           type="button"
           className="w-full sm:w-auto"
-          disabled={isStarting}
+          disabled={isStarting || !canStart}
           onClick={() => void handleProcessRfq()}
         >
           {isStarting ? "Starting run…" : "Process RFQ"}
@@ -125,7 +162,9 @@ function LandingPage() {
 
       <p className="mt-4 text-xs leading-5 text-muted-foreground">
         This public demo is for synthetic or non-confidential documents only.
-        Custom uploads will accept PDF, JPEG, and PNG files up to 10 MB.
+        Custom uploads accept PDF, JPEG, and PNG files, up to{" "}
+        {UPLOAD_LIMITS.maxFiles} files and{" "}
+        {UPLOAD_LIMITS.maxBytes / 1024 / 1024} MB combined.
       </p>
 
       {recentRuns.length > 0 ? (
@@ -206,6 +245,161 @@ function ScenarioCard({
         {scenario.difficulty.expectedReview}
       </span>
     </button>
+  )
+}
+
+/**
+ * The same limits the Worker enforces, applied in the browser so an
+ * unsupported or oversized file is never uploaded in the first place.
+ */
+function describeUploadProblem(files: File[]): string | null {
+  if (files.length > UPLOAD_LIMITS.maxFiles) {
+    return `Attach at most ${UPLOAD_LIMITS.maxFiles} files to one request.`
+  }
+
+  const unsupported = files.find(
+    (file) =>
+      !(UPLOAD_LIMITS.accept as readonly string[]).includes(
+        file.type.split(";")[0].trim().toLowerCase()
+      )
+  )
+
+  if (unsupported) {
+    return `${unsupported.name} is not a PDF, JPEG, or PNG file.`
+  }
+
+  const combined = files.reduce((total, file) => total + file.size, 0)
+
+  if (combined > UPLOAD_LIMITS.maxBytes) {
+    return `The attachments are ${formatBytes(combined)} combined; the limit is ${UPLOAD_LIMITS.maxBytes / 1024 / 1024} MB.`
+  }
+
+  return null
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+}
+
+function CustomSourceForm({
+  emailBody,
+  files,
+  problem,
+  onEmailBodyChange,
+  onFilesChange,
+}: {
+  emailBody: string
+  files: File[]
+  problem: string | null
+  onEmailBodyChange: (value: string) => void
+  onFilesChange: (files: File[]) => void
+}) {
+  return (
+    <section
+      className="mt-6 overflow-hidden rounded-lg border bg-card shadow-xs"
+      aria-labelledby="custom-source-heading"
+    >
+      <div className="flex items-center justify-between gap-4 border-b px-4 py-3">
+        <div>
+          <h2 id="custom-source-heading" className="text-[13px] font-medium">
+            Your own RFQ
+          </h2>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            Paste an email body and attach the documents it refers to.
+          </p>
+        </div>
+        <PaperclipIcon className="size-4 text-muted-foreground" aria-hidden />
+      </div>
+
+      <div className="space-y-4 p-4 sm:p-5">
+        <div className="flex gap-2.5 rounded-md border border-workflow-review/40 bg-workflow-review-soft/60 p-3 text-xs leading-5">
+          <WarningCircleIcon className="mt-0.5 size-4 shrink-0" aria-hidden />
+          <p>
+            <span className="font-medium">
+              Submit synthetic or non-confidential material only.
+            </span>{" "}
+            This is a public demonstration. Uploads and everything derived from
+            them are read by an external OCR provider and deleted after 24
+            hours.
+          </p>
+        </div>
+
+        <div>
+          <label
+            htmlFor="custom-email-body"
+            className="text-[13px] leading-4 font-medium"
+          >
+            Email body
+          </label>
+          <textarea
+            id="custom-email-body"
+            value={emailBody}
+            onChange={(event) => onEmailBodyChange(event.target.value)}
+            rows={7}
+            placeholder="Please quote the following items for our north depot…"
+            className="mt-2 w-full resize-y rounded-md border bg-background px-3 py-2 text-sm leading-6 outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
+          />
+        </div>
+
+        <div>
+          <label
+            htmlFor="custom-files"
+            className="text-[13px] leading-4 font-medium"
+          >
+            Attachments
+          </label>
+          <input
+            id="custom-files"
+            type="file"
+            multiple
+            accept={UPLOAD_LIMITS.acceptAttribute}
+            onChange={(event) =>
+              onFilesChange(Array.from(event.target.files ?? []))
+            }
+            className="mt-2 block w-full text-xs file:mr-3 file:h-8 file:rounded-md file:border file:bg-background file:px-2.5 file:text-xs hover:file:bg-muted/40"
+          />
+          <p className="mt-2 text-[11px] text-muted-foreground">
+            PDF, JPEG, or PNG · at most {UPLOAD_LIMITS.maxFiles} files ·{" "}
+            {UPLOAD_LIMITS.maxBytes / 1024 / 1024} MB combined
+          </p>
+
+          {files.length > 0 ? (
+            <ul className="mt-2 divide-y rounded-md border">
+              {files.map((file) => (
+                <li
+                  key={`${file.name}-${file.size}`}
+                  className="flex h-10 items-center justify-between gap-3 px-3 text-xs"
+                >
+                  <span className="flex min-w-0 items-center gap-2">
+                    {file.type === "application/pdf" ? (
+                      <FilePdfIcon
+                        className="size-4 shrink-0 text-muted-foreground"
+                        aria-hidden
+                      />
+                    ) : (
+                      <ImageSquareIcon
+                        className="size-4 shrink-0 text-muted-foreground"
+                        aria-hidden
+                      />
+                    )}
+                    <span className="truncate">{file.name}</span>
+                  </span>
+                  <span className="shrink-0 text-[11px] text-muted-foreground">
+                    {formatBytes(file.size)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+
+          {problem ? (
+            <p className="mt-2 text-xs text-destructive">{problem}</p>
+          ) : null}
+        </div>
+      </div>
+    </section>
   )
 }
 

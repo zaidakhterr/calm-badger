@@ -1,3 +1,4 @@
+import { loadDocumentEvidence } from "./evidence"
 import {
   authorizeOwner,
   createRun,
@@ -5,8 +6,16 @@ import {
   isOwnerRequest,
   isScenarioId,
   loadRun,
+  resolveRunId,
+  type RunInput,
 } from "./runs"
 import { scenarioPreviews } from "./scenarios"
+import {
+  isSupportedUploadType,
+  loadSources,
+  MAX_UPLOAD_BYTES,
+  validateCustomSubmission,
+} from "./sources"
 
 export { RfqWorkflow } from "./workflow"
 
@@ -98,14 +107,15 @@ async function routeRequest(
     return createRunResponse(request, env)
   }
 
-  const runMatch = /^\/api\/runs\/([A-Za-z0-9_-]+)(\/reset)?$/.exec(
-    url.pathname
-  )
+  const runMatch =
+    /^\/api\/runs\/([A-Za-z0-9_-]+)(?:\/(reset|documents)|\/sources\/([A-Za-z0-9-]+))?$/.exec(
+      url.pathname
+    )
 
   if (runMatch) {
-    const [, viewId, resetSegment] = runMatch
+    const [, viewId, segment, sourceId] = runMatch
 
-    if (resetSegment) {
+    if (segment === "reset") {
       if (request.method !== "POST") {
         return methodNotAllowed("POST")
       }
@@ -115,6 +125,14 @@ async function routeRequest(
 
     if (request.method !== "GET") {
       return methodNotAllowed("GET")
+    }
+
+    if (segment === "documents") {
+      return documentEvidenceResponse(env, viewId)
+    }
+
+    if (sourceId) {
+      return sourcePreviewResponse(env, viewId, sourceId)
     }
 
     return runViewResponse(request, env, viewId)
@@ -141,23 +159,32 @@ async function createRunResponse(
   request: Request,
   env: Env
 ): Promise<Response> {
-  const payload = await readJsonBody(request)
-  const scenarioId = (payload as { scenarioId?: unknown } | null)?.scenarioId
+  const contentType = request.headers.get("content-type") ?? ""
+  const input = contentType.includes("multipart/form-data")
+    ? await readCustomInput(request)
+    : await readCuratedInput(request)
 
-  if (!isScenarioId(scenarioId)) {
+  if (!input.ok) {
+    // Nothing is persisted and no provider is called for a rejected request.
+    console.log(
+      JSON.stringify({ event: "run_rejected", reason: input.reasonCode })
+    )
+
     return Response.json(
-      { error: "A known curated scenario is required" },
+      { error: input.error },
       { status: 400, headers: jsonHeaders }
     )
   }
 
-  const { runId, run, ownerCapability } = await createRun(env, { scenarioId })
+  const { runId, run, ownerCapability } = await createRun(env, input.value)
 
   console.log(
     JSON.stringify({
       event: "run_created",
       runId,
-      scenarioId,
+      sourceKind: input.value.kind,
+      scenarioId:
+        input.value.kind === "curated" ? input.value.scenarioId : null,
       steps: run.steps.length,
     })
   )
@@ -167,6 +194,142 @@ async function createRunResponse(
     { run, viewer: ownerViewer(true), ownerCapability },
     { status: 201, headers: jsonHeaders }
   )
+}
+
+type InputResult =
+  | { ok: true; value: RunInput }
+  | { ok: false; error: string; reasonCode: string }
+
+async function readCuratedInput(request: Request): Promise<InputResult> {
+  const payload = await readJsonBody(request)
+  const scenarioId = (payload as { scenarioId?: unknown } | null)?.scenarioId
+
+  if (!isScenarioId(scenarioId)) {
+    return {
+      ok: false,
+      error: "A known curated scenario is required",
+      reasonCode: "unknown_scenario",
+    }
+  }
+
+  return {
+    ok: true,
+    value: { kind: "curated", scenarioId, requestUrl: request.url },
+  }
+}
+
+/**
+ * Custom submissions are validated before anything is stored, so an
+ * unsupported type or an oversized upload cannot reach a paid provider.
+ */
+async function readCustomInput(request: Request): Promise<InputResult> {
+  const declaredLength = Number.parseInt(
+    request.headers.get("content-length") ?? "",
+    10
+  )
+
+  if (
+    Number.isFinite(declaredLength) &&
+    declaredLength > MAX_UPLOAD_BYTES * 1.1
+  ) {
+    return {
+      ok: false,
+      error: `The request is larger than the ${MAX_UPLOAD_BYTES / (1024 * 1024)} MB upload limit`,
+      reasonCode: "upload_too_large",
+    }
+  }
+
+  let form: FormData
+
+  try {
+    form = await request.formData()
+  } catch {
+    return {
+      ok: false,
+      error: "The submitted request could not be read",
+      reasonCode: "unreadable_form",
+    }
+  }
+
+  const validation = await validateCustomSubmission(form)
+
+  if (!validation.ok) {
+    return {
+      ok: false,
+      error: validation.error,
+      reasonCode: "invalid_submission",
+    }
+  }
+
+  return { ok: true, value: { kind: "custom", sources: validation.sources } }
+}
+
+async function documentEvidenceResponse(
+  env: Env,
+  viewId: string
+): Promise<Response> {
+  const runId = await resolveRunId(env, viewId)
+
+  if (!runId) {
+    return Response.json(
+      { error: "This run is unavailable or has expired" },
+      { status: 404, headers: jsonHeaders }
+    )
+  }
+
+  return Response.json(
+    { evidence: await loadDocumentEvidence(env, runId, viewId) },
+    { headers: jsonHeaders }
+  )
+}
+
+/**
+ * Streams an original source from private R2. The bucket itself stays private;
+ * this is the only way back to the bytes, and only for a known run source.
+ */
+async function sourcePreviewResponse(
+  env: Env,
+  viewId: string,
+  sourceId: string
+): Promise<Response> {
+  const runId = await resolveRunId(env, viewId)
+
+  if (!runId) {
+    return Response.json(
+      { error: "This run is unavailable or has expired" },
+      { status: 404, headers: jsonHeaders }
+    )
+  }
+
+  const source = (await loadSources(env, runId)).find(
+    (candidate) => candidate.id === sourceId
+  )
+
+  if (!source || !isSupportedUploadType(source.mediaType)) {
+    return Response.json(
+      { error: "This source is unavailable" },
+      { status: 404, headers: jsonHeaders }
+    )
+  }
+
+  const object = await env.ARTIFACTS.get(source.storageKey)
+
+  if (!object) {
+    return Response.json(
+      { error: "This source is unavailable" },
+      { status: 404, headers: jsonHeaders }
+    )
+  }
+
+  return new Response(object.body, {
+    headers: {
+      "cache-control": "private, max-age=60",
+      "content-type": source.mediaType,
+      "content-disposition": "inline",
+      "content-security-policy": "sandbox; default-src 'none'",
+      "x-content-type-options": "nosniff",
+    },
+  })
 }
 
 async function runViewResponse(

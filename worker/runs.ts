@@ -9,6 +9,12 @@
  */
 
 import { SCENARIO_IDS, isScenarioId, type ScenarioId } from "./scenarios"
+import {
+  curatedSources,
+  deleteStoredSources,
+  storeSources,
+  type PreparedSource,
+} from "./sources"
 
 export { SCENARIO_IDS, isScenarioId }
 export type { ScenarioId }
@@ -140,9 +146,17 @@ export async function hashCapability(capability: string): Promise<string> {
     .join("")
 }
 
+/**
+ * What a run was started from. Curated sources are read out of the shipped
+ * scenario assets; custom sources are already validated upload bytes.
+ */
+export type RunInput =
+  | { kind: "curated"; scenarioId: ScenarioId; requestUrl: string }
+  | { kind: "custom"; sources: PreparedSource[] }
+
 export async function createRun(
   env: Env,
-  input: { scenarioId: ScenarioId }
+  input: RunInput
 ): Promise<CreatedRun> {
   const runId = crypto.randomUUID()
   const viewId = randomToken(16)
@@ -150,13 +164,28 @@ export async function createRun(
   const ownerCapabilityHash = await hashCapability(ownerCapability)
   const now = new Date().toISOString()
 
+  // Sources are read before the run exists so that a missing curated asset
+  // fails without leaving an empty run behind.
+  const sources =
+    input.kind === "curated"
+      ? await curatedSources(env, input.scenarioId, input.requestUrl)
+      : input.sources
+
   const statements = [
     env.DB.prepare(
       `INSERT INTO runs (
          id, view_id, owner_capability_hash, source_kind, scenario_id,
          status, workflow_instance_id, workflow_state, created_at, updated_at
-       ) VALUES (?, ?, ?, 'curated', ?, 'active', NULL, 'pending', ?, ?)`
-    ).bind(runId, viewId, ownerCapabilityHash, input.scenarioId, now, now),
+       ) VALUES (?, ?, ?, ?, ?, 'active', NULL, 'pending', ?, ?)`
+    ).bind(
+      runId,
+      viewId,
+      ownerCapabilityHash,
+      input.kind,
+      input.kind === "curated" ? input.scenarioId : null,
+      now,
+      now
+    ),
     ...WORKFLOW_STEPS.map((step, index) => {
       const isReceived = step.key === RFQ_RECEIVED_STEP_KEY
 
@@ -172,7 +201,9 @@ export async function createRun(
         index,
         step.title,
         isReceived ? "complete" : "waiting",
-        isReceived ? "Request stored and queued for processing." : step.waiting,
+        isReceived
+          ? `Stored ${sources.length} ${sources.length === 1 ? "source" : "sources"} and queued the request.`
+          : step.waiting,
         isReceived ? now : null,
         isReceived ? now : null,
         now
@@ -181,6 +212,7 @@ export async function createRun(
   ]
 
   await env.DB.batch(statements)
+  await storeSources(env, runId, sources, now)
 
   const instance = await env.RFQ_WORKFLOW.create({ params: { runId } })
   await env.DB.prepare(
@@ -278,8 +310,28 @@ export async function isOwnerRequest(
   return result.ok
 }
 
+/** Resolves the internal run identifier behind a public view identifier. */
+export async function resolveRunId(
+  env: Env,
+  viewId: string
+): Promise<string | null> {
+  const row = await env.DB.prepare(`SELECT id FROM runs WHERE view_id = ?`)
+    .bind(viewId)
+    .first<{ id: string }>()
+
+  return row?.id ?? null
+}
+
+/** Deletes the stored originals first, then every persisted record. */
 export async function deleteRun(env: Env, runId: string): Promise<void> {
+  await deleteStoredSources(env, runId)
+
   await env.DB.batch([
+    env.DB.prepare(`DELETE FROM run_source_pages WHERE run_id = ?`).bind(runId),
+    env.DB.prepare(`DELETE FROM run_sources WHERE run_id = ?`).bind(runId),
+    env.DB.prepare(`DELETE FROM run_step_evidence WHERE run_id = ?`).bind(
+      runId
+    ),
     env.DB.prepare(`DELETE FROM run_steps WHERE run_id = ?`).bind(runId),
     env.DB.prepare(`DELETE FROM runs WHERE id = ?`).bind(runId),
   ])

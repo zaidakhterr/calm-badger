@@ -11,7 +11,14 @@ export default defineConfig({
     cloudflareTest({
       wrangler: { configPath: "./wrangler.jsonc" },
       miniflare: {
-        bindings: { TEST_D1_MIGRATIONS: migrations },
+        bindings: {
+          TEST_D1_MIGRATIONS: migrations,
+          // Tests never reach a live provider: the deterministic contract fake
+          // is selected here, and no API key is present in the test isolate.
+          APP_ENV: "test",
+          OCR_PROVIDER: "contract-fake",
+          MISTRAL_API_KEY: "",
+        },
       },
     }),
   ],

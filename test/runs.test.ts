@@ -123,10 +123,13 @@ describe("revisiting a persisted run", () => {
       "Delivered",
     ])
 
-    const [received, ...downstream] = run.steps
+    const [received, documents, ...later] = run.steps
     expect(received.status).toBe("complete")
     expect(received.completedAt).not.toBeNull()
-    expect(downstream.every((step) => step.status === "waiting")).toBe(true)
+    // Reading documents is queued immediately, so only the steps behind it are
+    // guaranteed to still be waiting.
+    expect(["waiting", "active", "complete"]).toContain(documents.status)
+    expect(later.every((step) => step.status === "waiting")).toBe(true)
   })
 
   it("recovers the same server state on a later request", async () => {
@@ -151,10 +154,12 @@ describe("revisiting a persisted run", () => {
   it("is durably acknowledged by the workflow orchestrator", async () => {
     const { run } = await createRun()
 
+    // The orchestrator acknowledges receipt and then continues, so the durable
+    // evidence is that the run has left its pending state on its own.
     let workflowState = run.workflowState
     for (
       let attempt = 0;
-      attempt < 50 && workflowState !== "accepted";
+      attempt < 50 && workflowState === "pending";
       attempt++
     ) {
       await new Promise((resolve) => setTimeout(resolve, 25))
@@ -166,7 +171,9 @@ describe("revisiting a persisted run", () => {
       workflowState = row?.workflow_state ?? workflowState
     }
 
-    expect(workflowState).toBe("accepted")
+    expect(["accepted", "reading_documents", "documents_read"]).toContain(
+      workflowState
+    )
 
     const instanceRow = await env.DB.prepare(
       `SELECT workflow_instance_id FROM runs WHERE view_id = ?`
