@@ -10,7 +10,7 @@
 import { env, exports } from "cloudflare:workers"
 import { describe, expect, it } from "vitest"
 
-import { selectOcrProvider } from "../worker/providers/ocr"
+import { estimateOcrCostUsd, selectOcrProvider } from "../worker/providers/ocr"
 import { readDocuments } from "../worker/read-documents"
 
 const base = "https://example.test"
@@ -47,7 +47,7 @@ type Evidence = {
     pageCount: number
     pagesProcessed: number
     providerLatencyMs: number
-    estimatedCostUsd: number
+    estimatedCostUsd: number | null
     elapsedMs: number
   } | null
   sources: {
@@ -262,6 +262,31 @@ describe("reading the sources of a curated request", () => {
     expect(pdf.pagesProcessed).toBe(1)
     expect(pdf.estimatedCostUsd).toBeCloseTo(0.001, 6)
     expect(pdf.sanitizedResponse).not.toBeNull()
+  })
+
+  it("shows an unknown cost, not zero, when the page price is not configured", async () => {
+    const { run } = await createCuratedRun("routine-replenishment")
+    await waitForStep(run.viewId, "read-documents", ["complete"])
+
+    const row = await env.DB.prepare(`SELECT id FROM runs WHERE view_id = ?`)
+      .bind(run.viewId)
+      .first<{ id: string }>()
+
+    // The same sources, read by a deployment whose page price was never set.
+    const outcome = await readDocuments(
+      envWith({ OCR_COST_PER_1000_PAGES_USD: "" }),
+      row!.id
+    )
+
+    expect(outcome.state).toBe("complete")
+
+    const evidence = await readEvidence(run.viewId)
+    const pdf = evidence.sources.find(
+      (source) => source.mediaType === "application/pdf"
+    )!
+
+    expect(evidence.totals!.estimatedCostUsd).toBeNull()
+    expect(pdf.estimatedCostUsd).toBeNull()
   })
 
   it("serves the original source through the Worker and never exposes secrets", async () => {
@@ -485,6 +510,19 @@ describe("selecting the OCR provider", () => {
     )
 
     expect(provider.name).toBe("contract-fake")
+  })
+
+  it("reports an unknown cost rather than zero when the page price is misconfigured", () => {
+    expect(estimateOcrCostUsd(env, 2)).toBeGreaterThan(0)
+    expect(
+      estimateOcrCostUsd(envWith({ OCR_COST_PER_1000_PAGES_USD: "" }), 2)
+    ).toBeNull()
+    expect(
+      estimateOcrCostUsd(envWith({ OCR_COST_PER_1000_PAGES_USD: "free" }), 2)
+    ).toBeNull()
+    expect(
+      estimateOcrCostUsd(envWith({ OCR_COST_PER_1000_PAGES_USD: "-1" }), 2)
+    ).toBeNull()
   })
 })
 

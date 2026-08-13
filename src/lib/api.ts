@@ -108,7 +108,8 @@ export type DocumentEvidence = {
     pageCount: number
     pagesProcessed: number
     providerLatencyMs: number
-    estimatedCostUsd: number
+    /** `null` when a page price was not configured; never silently zero. */
+    estimatedCostUsd: number | null
     elapsedMs: number
   } | null
   sources: EvidenceSource[]

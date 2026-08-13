@@ -270,6 +270,64 @@ describe("retrieval ranking fixtures", () => {
     }
   })
 
+  it("keeps two customers' identical wording apart in the alias index", async () => {
+    // What an approved review correction will write in the next ticket: two
+    // workspaces teaching the same phrase for the same product. Neither may
+    // overwrite the other, and neither may leak to anyone else.
+    const phrase = "the usual depot panel"
+
+    try {
+      await env.DB.batch([
+        env.DB.prepare(
+          `INSERT OR IGNORE INTO catalog_product_aliases
+             (sku, alias, alias_kind, customer_id) VALUES (?, ?, 'customer', ?)`
+        ).bind("NX-FLT-1120", phrase, "CUST-1001"),
+        env.DB.prepare(
+          `INSERT OR IGNORE INTO catalog_product_aliases
+             (sku, alias, alias_kind, customer_id) VALUES (?, ?, 'customer', ?)`
+        ).bind("NX-FLT-1120", phrase, "CUST-1002"),
+      ])
+
+      await ensureCatalogIndexes(env)
+
+      const stored = await env.DB.prepare(
+        `SELECT customer_id FROM catalog_alias_lookup
+          WHERE normalised = ? ORDER BY customer_id ASC`
+      )
+        .bind(phrase)
+        .all<{ customer_id: string | null }>()
+
+      expect(stored.results.map((row) => row.customer_id)).toEqual([
+        "CUST-1001",
+        "CUST-1002",
+      ])
+
+      for (const customerId of ["CUST-1001", "CUST-1002"]) {
+        const owned = await retrieve(phrase, { customerId })
+
+        expect(owned.state).toBe("exact")
+        if (owned.state !== "exact") return
+        expect(owned.candidate.sku).toBe("NX-FLT-1120")
+        expect(owned.candidate.source).toBe("customer_alias")
+      }
+
+      // A run that resolved to nobody, and a third customer, never see it.
+      for (const customerId of [undefined, "CUST-1003"]) {
+        expect((await retrieve(phrase, { customerId })).state).not.toBe("exact")
+      }
+    } finally {
+      // The catalogue is shared by every fixture in this file, so the two
+      // added phrases are removed and the indexes rebuilt from it again.
+      await env.DB.prepare(
+        `DELETE FROM catalog_product_aliases WHERE alias = ?`
+      )
+        .bind(phrase)
+        .run()
+
+      await ensureCatalogIndexes(env)
+    }
+  })
+
   it("retrieves a misspelling without accepting it outright", async () => {
     const result = await retrieve("pleeted panel filter 592x592")
 

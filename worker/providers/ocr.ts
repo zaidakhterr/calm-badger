@@ -97,10 +97,18 @@ export function selectOcrProvider(env: Env): OcrProvider {
  * Estimated spend for a document, in USD. The per-page price is a configured
  * variable rather than a constant so that it can be corrected without a code
  * change; the interface labels the result as an estimate.
+ *
+ * A missing or malformed price yields `null`, not zero, exactly as the token
+ * price estimator does. A page that cost nothing and a page whose price was
+ * never configured are different facts, and "$0.0000" for the second one would
+ * be a quiet lie.
  */
-export function estimateOcrCostUsd(env: Env, pagesProcessed: number): number {
+export function estimateOcrCostUsd(
+  env: Env,
+  pagesProcessed: number
+): number | null {
   const perThousand = Number.parseFloat(env.OCR_COST_PER_1000_PAGES_USD)
-  if (!Number.isFinite(perThousand) || perThousand < 0) return 0
+  if (!Number.isFinite(perThousand) || perThousand < 0) return null
 
   return Math.round(((pagesProcessed * perThousand) / 1000) * 1e6) / 1e6
 }

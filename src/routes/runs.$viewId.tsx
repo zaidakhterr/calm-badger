@@ -419,12 +419,16 @@ function DocumentEvidencePanel({ evidence }: { evidence: DocumentEvidence }) {
             />
             <MetaRow
               label="Estimated cost"
-              value={`$${evidence.totals.estimatedCostUsd.toFixed(4)}`}
+              value={
+                evidence.totals.estimatedCostUsd === null
+                  ? "Unknown"
+                  : `$${evidence.totals.estimatedCostUsd.toFixed(4)}`
+              }
             />
           </dl>
           <p className="mt-1.5 text-[11px] text-muted-foreground">
             Cost is an estimate from the configured page price, not a billed
-            amount.
+            amount. It reads Unknown when that price is not configured.
           </p>
         </div>
       ) : null}

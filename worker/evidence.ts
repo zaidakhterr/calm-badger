@@ -56,7 +56,8 @@ export type DocumentEvidenceProjection = {
     pageCount: number
     pagesProcessed: number
     providerLatencyMs: number
-    estimatedCostUsd: number
+    /** `null` when a page price was not configured; never silently zero. */
+    estimatedCostUsd: number | null
     elapsedMs: number
   } | null
   sources: SourceProjection[]
@@ -184,7 +185,7 @@ function readTotals(value: unknown): DocumentEvidenceProjection["totals"] {
     pageCount: readNumber(totals.pageCount) ?? 0,
     pagesProcessed: readNumber(totals.pagesProcessed) ?? 0,
     providerLatencyMs: readNumber(totals.providerLatencyMs) ?? 0,
-    estimatedCostUsd: readNumber(totals.estimatedCostUsd) ?? 0,
+    estimatedCostUsd: readNumber(totals.estimatedCostUsd),
     elapsedMs: readNumber(totals.elapsedMs) ?? 0,
   }
 }

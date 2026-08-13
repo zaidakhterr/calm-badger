@@ -35,7 +35,8 @@ type SourceEvidence = {
   pageCount: number
   pagesProcessed: number
   latencyMs: number
-  estimatedCostUsd: number
+  /** `null` when the configured page price is missing or malformed. */
+  estimatedCostUsd: number | null
   sanitizedResponse: unknown
 }
 
@@ -272,11 +273,16 @@ function totalsOf(sources: SourceEvidence[], elapsedMs: number) {
       (total, source) => total + source.latencyMs,
       0
     ),
-    estimatedCostUsd:
-      Math.round(
-        sources.reduce((total, source) => total + source.estimatedCostUsd, 0) *
-          1e6
-      ) / 1e6,
+    // One uncosted source makes the whole total unknown rather than
+    // understated, so the interface can say so instead of showing $0.0000.
+    estimatedCostUsd: sources.some((source) => source.estimatedCostUsd === null)
+      ? null
+      : Math.round(
+          sources.reduce(
+            (total, source) => total + (source.estimatedCostUsd ?? 0),
+            0
+          ) * 1e6
+        ) / 1e6,
     elapsedMs,
   }
 }
