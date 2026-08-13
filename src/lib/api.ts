@@ -525,6 +525,56 @@ async function readError(response: Response): Promise<string> {
   }
 }
 
+/** The technical context behind System details. Public and read-only. */
+export type SystemDetails = {
+  architecture: {
+    summary: string
+    pieces: { name: string; detail: string }[]
+    steps: string[]
+  }
+  providers: {
+    role: string
+    provider: string
+    model: string | null
+    live: boolean
+    detail: string
+  }[]
+  catalog: {
+    activeProducts: number
+    archivedProducts: number
+    customers: number
+    contacts: number
+    locations: number
+    historicalOrders: number
+    aliases: number
+    note: string
+  }
+  retrieval: { steps: string[]; shortlistSize: number; note: string }
+  retention: { state: "planned" | "enforced"; summary: string; rows: string[] }
+  rateLimit: { state: "planned" | "enforced"; summary: string }
+  adapterContract: {
+    summary: string
+    defaultAdapter: string
+    adapters: {
+      id: string
+      name: string
+      contract: string
+      payloadFormat: string
+      simulated: boolean
+    }[]
+  }
+  evaluation: { state: "planned" | "measured"; summary: string; rows: string[] }
+}
+
+export async function fetchSystemDetails(): Promise<SystemDetails> {
+  const response = await fetch("/api/system")
+
+  if (!response.ok) throw new Error(await readError(response))
+
+  const body = (await response.json()) as { system: SystemDetails }
+  return body.system
+}
+
 export async function fetchScenarios(): Promise<Scenario[]> {
   const response = await fetch("/api/scenarios")
 

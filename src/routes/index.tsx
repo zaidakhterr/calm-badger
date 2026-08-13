@@ -80,7 +80,7 @@ function LandingPage() {
         </p>
         <h1
           id="page-title"
-          className="mt-2 max-w-xl text-2xl leading-tight font-medium tracking-[-0.025em]"
+          className="mt-2 max-w-xl text-xl leading-7 font-medium tracking-[-0.02em]"
         >
           Turn a messy request into a quote you can explain.
         </h1>
@@ -103,7 +103,7 @@ function LandingPage() {
               {featured.name} is selected by default.
             </p>
           </div>
-          <span className="hidden text-xs text-muted-foreground sm:block">
+          <span className="hidden text-[13px] text-muted-foreground sm:block">
             Synthetic data only
           </span>
         </div>
@@ -157,10 +157,10 @@ function LandingPage() {
       </div>
 
       {startError ? (
-        <p className="mt-3 text-xs text-destructive">{startError}</p>
+        <p className="mt-3 text-[13px] text-destructive">{startError}</p>
       ) : null}
 
-      <p className="mt-4 text-xs leading-5 text-muted-foreground">
+      <p className="mt-4 text-[13px] leading-5 text-muted-foreground">
         This public demo is for synthetic or non-confidential documents only.
         Custom uploads accept PDF, JPEG, and PNG files, up to{" "}
         {UPLOAD_LIMITS.maxFiles} files and{" "}
@@ -181,7 +181,7 @@ function LandingPage() {
                 <Link
                   to="/runs/$viewId"
                   params={{ viewId: recent.viewId }}
-                  className="flex h-11 items-center justify-between gap-3 px-3.5 text-xs hover:bg-muted/40"
+                  className="flex h-11 items-center justify-between gap-3 px-3.5 text-[13px] hover:bg-muted/40"
                 >
                   <span className="truncate">
                     {scenarios.find(({ id }) => id === recent.scenarioId)
@@ -234,7 +234,7 @@ function ScenarioCard({
           Featured
         </span>
       ) : null}
-      <span className="mt-2 block text-xs leading-5 text-muted-foreground">
+      <span className="mt-2 block text-[13px] leading-5 text-muted-foreground">
         {scenario.difficulty.summary}
       </span>
       <span className="mt-4 block text-[11px] text-muted-foreground">
@@ -306,7 +306,7 @@ function CustomSourceForm({
           <h2 id="custom-source-heading" className="text-[13px] font-medium">
             Your own RFQ
           </h2>
-          <p className="mt-0.5 text-xs text-muted-foreground">
+          <p className="mt-0.5 text-[13px] text-muted-foreground">
             Paste an email body and attach the documents it refers to.
           </p>
         </div>
@@ -314,7 +314,7 @@ function CustomSourceForm({
       </div>
 
       <div className="space-y-4 p-4 sm:p-5">
-        <div className="flex gap-2.5 rounded-md border border-workflow-review/40 bg-workflow-review-soft/60 p-3 text-xs leading-5">
+        <div className="flex gap-2.5 rounded-md border border-workflow-review/40 bg-workflow-review-soft/60 p-3 text-[13px] leading-5">
           <WarningCircleIcon className="mt-0.5 size-4 shrink-0" aria-hidden />
           <p>
             <span className="font-medium">
@@ -358,7 +358,7 @@ function CustomSourceForm({
             onChange={(event) =>
               onFilesChange(Array.from(event.target.files ?? []))
             }
-            className="mt-2 block w-full text-xs file:mr-3 file:h-8 file:rounded-md file:border file:bg-background file:px-2.5 file:text-xs hover:file:bg-muted/40"
+            className="mt-2 block w-full text-[13px] file:mr-3 file:h-8 file:rounded-md file:border file:bg-background file:px-2.5 file:text-[13px] hover:file:bg-muted/40"
           />
           <p className="mt-2 text-[11px] text-muted-foreground">
             PDF, JPEG, or PNG · at most {UPLOAD_LIMITS.maxFiles} files ·{" "}
@@ -370,7 +370,7 @@ function CustomSourceForm({
               {files.map((file) => (
                 <li
                   key={`${file.name}-${file.size}`}
-                  className="flex h-10 items-center justify-between gap-3 px-3 text-xs"
+                  className="flex h-10 items-center justify-between gap-3 px-3 text-[13px]"
                 >
                   <span className="flex min-w-0 items-center gap-2">
                     {file.type === "application/pdf" ? (
@@ -395,7 +395,7 @@ function CustomSourceForm({
           ) : null}
 
           {problem ? (
-            <p className="mt-2 text-xs text-destructive">{problem}</p>
+            <p className="mt-2 text-[13px] text-destructive">{problem}</p>
           ) : null}
         </div>
       </div>
@@ -414,7 +414,7 @@ function SourcePreview({ scenario }: { scenario: Scenario }) {
           <h2 id="source-preview-heading" className="text-[13px] font-medium">
             Source preview
           </h2>
-          <p className="mt-0.5 text-xs text-muted-foreground">
+          <p className="mt-0.5 text-[13px] text-muted-foreground">
             {scenario.email.forwarded
               ? "Forwarded email, inline photo, and PDF attachment"
               : "Email, inline photo, and PDF attachment"}
@@ -424,7 +424,7 @@ function SourcePreview({ scenario }: { scenario: Scenario }) {
       </div>
 
       <div className="p-4 sm:p-5">
-        <dl className="grid grid-cols-[4.5rem_1fr] gap-x-3 gap-y-1 text-xs">
+        <dl className="grid grid-cols-[4.5rem_1fr] gap-x-3 gap-y-1 text-[13px]">
           <dt className="text-muted-foreground">From</dt>
           <dd>
             {scenario.email.from.name} · {scenario.email.from.company}
@@ -453,7 +453,7 @@ function SourcePreview({ scenario }: { scenario: Scenario }) {
               {paragraph}
             </p>
           ))}
-          <div className="mt-3 text-xs leading-5 text-muted-foreground">
+          <div className="mt-3 text-[13px] leading-5 text-muted-foreground">
             {scenario.email.signature.map((line) => (
               <p key={line}>{line}</p>
             ))}
@@ -479,7 +479,7 @@ function SourcePreview({ scenario }: { scenario: Scenario }) {
           href={scenario.pdfAttachment.url}
           target="_blank"
           rel="noreferrer"
-          className="mt-4 inline-flex h-8 items-center gap-2 rounded-md border bg-background px-2.5 text-xs hover:bg-muted/40"
+          className="mt-4 inline-flex h-8 items-center gap-2 rounded-md border bg-background px-2.5 text-[13px] hover:bg-muted/40"
         >
           <FilePdfIcon className="size-4 text-muted-foreground" aria-hidden />
           {scenario.pdfAttachment.filename}
@@ -496,7 +496,7 @@ function SourcePreview({ scenario }: { scenario: Scenario }) {
             {scenario.requestedItems.map((item) => (
               <li
                 key={item.position}
-                className="flex min-h-10 items-start gap-3 px-3 py-2 text-xs"
+                className="flex min-h-10 items-start gap-3 px-3 py-2 text-[13px]"
               >
                 <span className="mt-0.5 w-3 shrink-0 text-muted-foreground">
                   {item.position}
@@ -517,7 +517,7 @@ function SourcePreview({ scenario }: { scenario: Scenario }) {
           </ul>
         </div>
 
-        <div className="mt-4 flex gap-2.5 rounded-md border bg-muted/30 p-3 text-xs leading-5 text-muted-foreground">
+        <div className="mt-4 flex gap-2.5 rounded-md border bg-muted/30 p-3 text-[13px] leading-5 text-muted-foreground">
           <WarningCircleIcon className="mt-0.5 size-4 shrink-0" aria-hidden />
           <p>
             <span className="font-medium text-foreground">

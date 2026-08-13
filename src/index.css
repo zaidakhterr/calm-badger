@@ -12,6 +12,9 @@
   --color-workflow-complete-soft: var(--workflow-complete-soft);
   --color-workflow-review: var(--workflow-review);
   --color-workflow-review-soft: var(--workflow-review-soft);
+  /* The active connector: one low-amplitude trace that moves down the spine
+     while the step below it is running. Nothing else on the page animates. */
+  --animate-workflow-trace: workflow-trace 1.8s linear infinite;
   --font-heading: var(--font-sans);
   --font-sans: "Inter Variable", sans-serif;
   --color-sidebar-ring: var(--sidebar-ring);
@@ -52,6 +55,15 @@
   --radius-2xl: calc(var(--radius) * 1.8);
   --radius-3xl: calc(var(--radius) * 2.2);
   --radius-4xl: calc(var(--radius) * 2.6);
+
+  @keyframes workflow-trace {
+    from {
+      background-position: 0 100%;
+    }
+    to {
+      background-position: 0 -100%;
+    }
+  }
 }
 
 :root {

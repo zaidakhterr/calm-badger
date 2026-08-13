@@ -1,6 +1,5 @@
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import {
-  ArrowClockwiseIcon,
   CaretDownIcon,
   CheckIcon,
   CircleIcon,
@@ -11,6 +10,7 @@ import {
   LinkSimpleIcon,
   EnvelopeSimpleIcon,
   WarningIcon,
+  XIcon,
 } from "@phosphor-icons/react"
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router"
 
@@ -55,6 +55,7 @@ import {
   type ValidatedLine,
   resetRun,
 } from "@/lib/api"
+import { usePublishRunHeader } from "@/lib/run-header"
 import { forgetRun } from "@/lib/run-store"
 import { cn } from "@/lib/utils"
 
@@ -153,6 +154,8 @@ function RunPage() {
   const loaded = Route.useLoaderData()
   const navigate = useNavigate()
 
+  const publishHeader = usePublishRunHeader()
+
   const [snapshot, setSnapshot] = useState<RunSnapshot>(loaded)
   const [openSteps, setOpenSteps] = useState<Record<string, boolean>>({})
   const [isResetting, setIsResetting] = useState(false)
@@ -191,7 +194,12 @@ function RunPage() {
     return () => clearInterval(timer)
   }, [isSettled, viewId])
 
-  async function handleStartOver() {
+  /**
+   * Start over is a real deletion, not a navigation: the server drops the run's
+   * artifacts, this browser forgets the capability and the recent-run entry,
+   * and only then does the reviewer return to selection.
+   */
+  const handleStartOver = useCallback(async () => {
     setIsResetting(true)
     setResetError(null)
 
@@ -205,49 +213,47 @@ function RunPage() {
       )
       setIsResetting(false)
     }
-  }
+  }, [navigate, viewId])
+
+  // The header shows the same state the graph does, from the same snapshot.
+  const headerStatus = runStatusSentence(run, completed)
+  const canReset = viewer.canMutate
+
+  useEffect(() => {
+    publishHeader({
+      status: headerStatus,
+      startOver: canReset
+        ? {
+            label: isResetting ? "Deleting…" : "Start over",
+            disabled: isResetting,
+            onSelect: () => void handleStartOver(),
+          }
+        : null,
+    })
+
+    return () => publishHeader(null)
+  }, [publishHeader, headerStatus, canReset, isResetting, handleStartOver])
 
   return (
-    <main className="mx-auto w-full max-w-3xl px-4 py-8 sm:px-6 sm:py-10">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-        <div>
-          <div className="flex items-center gap-2">
-            <span className="inline-flex h-5 items-center rounded-md border border-workflow-active/20 bg-workflow-active-soft px-2 text-[11px] font-medium text-workflow-active">
-              {viewer.isOwner ? "Your run" : "Shared view"}
-            </span>
-            <span className="font-mono text-[11px] text-muted-foreground">
-              {run.viewId}
-            </span>
-          </div>
-          <h1 className="mt-3 text-xl leading-7 font-medium tracking-[-0.02em]">
-            RFQ workflow
-          </h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            {completed} of {run.steps.length} steps complete · started{" "}
-            {formatTimestamp(run.createdAt)}
-            {run.source.kind === "custom" ? " · your own sources" : ""}
-          </p>
-        </div>
-
-        {viewer.canMutate ? (
-          <Button
-            size="lg"
-            variant="outline"
-            type="button"
-            disabled={isResetting}
-            onClick={() => void handleStartOver()}
-          >
-            <ArrowClockwiseIcon data-icon="inline-start" />
-            {isResetting ? "Deleting run…" : "Start over"}
-          </Button>
-        ) : null}
+    <main className="mx-auto w-full max-w-3xl px-4 py-6 sm:px-6 sm:py-8">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="inline-flex h-5 items-center rounded-md border border-workflow-active/20 bg-workflow-active-soft px-2 text-[11px] font-medium text-workflow-active">
+          {viewer.isOwner ? "Your run" : "Shared view"}
+        </span>
+        <span className="font-mono text-[11px] text-muted-foreground">
+          {run.viewId}
+        </span>
+        <span className="text-[11px] text-muted-foreground">
+          started {formatTimestamp(run.createdAt)}
+          {run.source.kind === "custom" ? " · your own sources" : ""}
+        </span>
       </div>
 
       {resetError ? (
-        <p className="mt-4 text-xs text-destructive">{resetError}</p>
+        <p className="mt-3 text-sm text-destructive">{resetError}</p>
       ) : null}
 
-      <div className="mt-7 flex gap-3 rounded-lg border bg-muted/30 p-3.5 text-xs leading-5 text-muted-foreground">
+      <div className="mt-4 flex gap-3 rounded-lg border bg-muted/30 p-3.5 text-[13px] leading-5 text-muted-foreground">
         <LinkSimpleIcon className="mt-0.5 size-4 shrink-0" aria-hidden />
         <p>
           {viewer.isOwner
@@ -256,7 +262,7 @@ function RunPage() {
         </p>
       </div>
 
-      <ol className="mt-7" aria-label="RFQ workflow progress">
+      <ol className="mt-6" aria-label="RFQ workflow progress">
         {run.steps.map((step, index) => {
           const panel = evidencePanel(step, snapshot, viewId, () => {
             void readRunSnapshot(viewId).then(setSnapshot)
@@ -267,19 +273,14 @@ function RunPage() {
               key={step.key}
               step={step}
               isLast={index === run.steps.length - 1}
-              isOpen={
-                openSteps[step.key] ??
-                (step.status === "active" || step.status === "error")
-              }
+              nextStatus={run.steps[index + 1]?.status ?? null}
+              isOpen={openSteps[step.key] ?? opensItself(step)}
               onToggle={
                 panel
                   ? () =>
                       setOpenSteps((current) => ({
                         ...current,
-                        [step.key]: !(
-                          current[step.key] ??
-                          (step.status === "active" || step.status === "error")
-                        ),
+                        [step.key]: !(current[step.key] ?? opensItself(step)),
                       }))
                   : null
               }
@@ -291,12 +292,47 @@ function RunPage() {
       </ol>
 
       {stoppedStep ? (
-        <p className="mt-2 text-xs text-muted-foreground">
-          The workflow stopped at this step. There is no retry in this demo.
+        <p className="mt-1 text-[13px] leading-5 text-muted-foreground">
+          The workflow stopped at this step and will not continue. This demo has
+          no retry: start over to run another request.
         </p>
       ) : null}
     </main>
   )
+}
+
+/**
+ * A node opens by itself when it is where the run currently is: the step doing
+ * the work, the step asking for a decision, or the step it stopped at. Anything
+ * the reviewer opened by hand is remembered separately and stays open.
+ */
+function opensItself(step: RunStep): boolean {
+  return (
+    step.status === "active" ||
+    step.status === "review_required" ||
+    step.status === "error"
+  )
+}
+
+/** The one-line status the header carries, from the same polled snapshot. */
+function runStatusSentence(run: RunView["run"], completed: number): string {
+  const total = run.steps.length
+  const stopped = run.steps.find((step) => step.status === "error")
+
+  if (stopped) return `Stopped · ${stopped.title}`
+
+  const review = run.steps.find((step) => step.status === "review_required")
+  if (review) return "Waiting for review"
+
+  const activeIndex = run.steps.findIndex((step) => step.status === "active")
+
+  if (activeIndex >= 0) {
+    return `${run.steps[activeIndex].title} · step ${activeIndex + 1} of ${total}`
+  }
+
+  if (completed === total) return "Complete · delivered"
+
+  return `${completed} of ${total} steps complete`
 }
 
 /** Only steps that actually decided something offer evidence. */
@@ -367,15 +403,26 @@ function evidencePanel(
   return null
 }
 
+/**
+ * One node of the vertical graph.
+ *
+ * The title never changes; the status sentence underneath it does, so the
+ * column does not reflow as work progresses. State is carried by icon, line
+ * treatment, and words as well as colour. The connector below a node traces the
+ * step that follows it: it animates only while that next step is running, and
+ * turns solid once the path through it is complete.
+ */
 function WorkflowStepRow({
   step,
   isLast,
+  nextStatus,
   isOpen,
   onToggle,
   children,
 }: {
   step: RunStep
   isLast: boolean
+  nextStatus: RunStep["status"] | null
   isOpen: boolean
   onToggle: (() => void) | null
   children: React.ReactNode
@@ -384,6 +431,7 @@ function WorkflowStepRow({
   const isActive = step.status === "active"
   const isReview = step.status === "review_required"
   const isError = step.status === "error"
+  const elapsed = stepDuration(step)
 
   return (
     <li className="grid grid-cols-[1.75rem_1fr] gap-3">
@@ -395,16 +443,19 @@ function WorkflowStepRow({
               "border-workflow-complete bg-workflow-complete-soft text-workflow-complete",
             isActive &&
               "border-workflow-active bg-workflow-active-soft text-workflow-active",
-            (isReview || isError) &&
-              "border-workflow-review bg-workflow-review-soft text-workflow-review"
+            isReview &&
+              "border-workflow-review bg-workflow-review-soft text-workflow-review",
+            isError && "border-destructive bg-destructive/10 text-destructive"
           )}
         >
           {isComplete ? (
             <CheckIcon className="size-3.5" weight="bold" />
           ) : isActive ? (
             <CircleNotchIcon className="size-3.5 animate-spin motion-reduce:animate-none" />
-          ) : isReview || isError ? (
+          ) : isReview ? (
             <WarningIcon className="size-3.5" />
+          ) : isError ? (
+            <XIcon className="size-3.5" weight="bold" />
           ) : (
             <CircleIcon
               className="size-2.5 text-muted-foreground/50"
@@ -416,8 +467,9 @@ function WorkflowStepRow({
           <span
             className={cn(
               "min-h-7 w-px flex-1 bg-border",
-              isComplete && "bg-workflow-complete",
-              isActive && "bg-workflow-active"
+              isComplete && nextStatus !== "waiting" && "bg-workflow-complete",
+              nextStatus === "active" &&
+                "animate-workflow-trace bg-workflow-active bg-gradient-to-b from-workflow-active/25 via-workflow-active to-workflow-active/25 bg-[length:100%_200%] motion-reduce:animate-none"
             )}
           />
         ) : null}
@@ -425,24 +477,30 @@ function WorkflowStepRow({
 
       <article
         className={cn(
-          "mb-3 min-h-18 rounded-lg border bg-card px-4 py-3 shadow-xs",
+          "mb-3 rounded-lg border bg-card px-4 py-3.5 shadow-xs",
           isActive && "border-workflow-active/40",
-          (isReview || isError) && "border-workflow-review/40"
+          isReview && "border-workflow-review/40",
+          isError && "border-destructive/40"
         )}
       >
         <div className="flex items-start justify-between gap-4">
-          <div>
-            <h2 className="text-[13px] leading-4 font-medium">{step.title}</h2>
-            <p className="mt-1.5 text-xs leading-5 text-muted-foreground">
+          <div className="min-w-0">
+            <h2 className="text-base leading-5 font-medium">{step.title}</h2>
+            <p className="mt-1.5 text-sm leading-5 text-muted-foreground">
               {step.summary}
             </p>
           </div>
           <span
             className={cn(
-              "mt-0.5 text-[11px] whitespace-nowrap text-muted-foreground",
-              isComplete && "text-workflow-complete",
-              isActive && "text-workflow-active",
-              (isReview || isError) && "text-workflow-review"
+              "mt-0.5 inline-flex h-5 shrink-0 items-center rounded-md border px-2 text-[11px] font-medium whitespace-nowrap text-muted-foreground",
+              isComplete &&
+                "border-workflow-complete/30 bg-workflow-complete-soft text-workflow-complete",
+              isActive &&
+                "border-workflow-active/20 bg-workflow-active-soft text-workflow-active",
+              isReview &&
+                "border-workflow-review/30 bg-workflow-review-soft text-workflow-review",
+              isError &&
+                "border-destructive/30 bg-destructive/10 text-destructive"
             )}
           >
             {statusLabel(step.status)}
@@ -451,7 +509,9 @@ function WorkflowStepRow({
 
         {step.completedAt ? (
           <p className="mt-2 text-[11px] text-muted-foreground">
-            Completed {formatTimestamp(step.completedAt)}
+            {isError ? "Stopped" : "Completed"} at{" "}
+            {formatTimestamp(step.completedAt)}
+            {elapsed ? ` · took ${elapsed}` : ""}
           </p>
         ) : null}
 
@@ -461,7 +521,7 @@ function WorkflowStepRow({
               type="button"
               onClick={onToggle}
               aria-expanded={isOpen}
-              className="mt-2.5 inline-flex h-8 items-center gap-1.5 rounded-md border bg-background px-2.5 text-xs outline-none hover:bg-muted/40 focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
+              className="mt-2.5 inline-flex h-8 items-center gap-1.5 rounded-md border bg-background px-2.5 text-[13px] leading-4 font-medium outline-none hover:bg-muted/40 focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
             >
               {isOpen ? "Hide evidence" : "Show evidence"}
               <CaretDownIcon
@@ -480,11 +540,21 @@ function WorkflowStepRow({
   )
 }
 
+/** How long a finished step actually took, from persisted timestamps. */
+function stepDuration(step: RunStep): string | null {
+  if (!step.startedAt || !step.completedAt) return null
+
+  const elapsed =
+    new Date(step.completedAt).getTime() - new Date(step.startedAt).getTime()
+
+  return elapsed > 0 ? formatDuration(elapsed) : null
+}
+
 function DocumentEvidencePanel({ evidence }: { evidence: DocumentEvidence }) {
   return (
     <div className="space-y-4">
       {evidence.state === "error" && evidence.message ? (
-        <p className="rounded-md border border-workflow-review/40 bg-workflow-review-soft/60 p-3 text-xs leading-5">
+        <p className="rounded-md border border-workflow-review/40 bg-workflow-review-soft/60 p-3 text-sm leading-6">
           {evidence.message}
         </p>
       ) : null}
@@ -501,7 +571,7 @@ function DocumentEvidencePanel({ evidence }: { evidence: DocumentEvidence }) {
       {evidence.totals ? (
         <div>
           <h3 className="text-[13px] leading-4 font-medium">Model and usage</h3>
-          <dl className="mt-2 divide-y rounded-md border text-xs">
+          <dl className="mt-2 divide-y rounded-md border text-[13px]">
             <MetaRow label="Provider" value={evidence.provider ?? "—"} />
             <MetaRow label="Model" value={evidence.model ?? "—"} mono />
             <MetaRow
@@ -547,7 +617,7 @@ function StructureEvidencePanel({ evidence }: { evidence: StructureEvidence }) {
   return (
     <div className="space-y-4">
       {evidence.message ? (
-        <p className="rounded-md border border-workflow-review/40 bg-workflow-review-soft/60 p-3 text-xs leading-5">
+        <p className="rounded-md border border-workflow-review/40 bg-workflow-review-soft/60 p-3 text-sm leading-6">
           {evidence.message}
         </p>
       ) : null}
@@ -558,7 +628,7 @@ function StructureEvidencePanel({ evidence }: { evidence: StructureEvidence }) {
             <h3 className="text-[13px] leading-4 font-medium">
               Validated request
             </h3>
-            <dl className="mt-2 divide-y rounded-md border text-xs">
+            <dl className="mt-2 divide-y rounded-md border text-[13px]">
               <MetaRow
                 label="Company"
                 value={validated.customer.companyName ?? "Not stated"}
@@ -623,7 +693,7 @@ function StructureEvidencePanel({ evidence }: { evidence: StructureEvidence }) {
 
       {evidence.originalOutput ? (
         <details className="rounded-md border bg-background">
-          <summary className="cursor-pointer px-3 py-2 text-xs">
+          <summary className="cursor-pointer px-3 py-2 text-[13px]">
             Original model output
             {evidence.repaired ? " (repaired before validation)" : ""}
           </summary>
@@ -635,7 +705,7 @@ function StructureEvidencePanel({ evidence }: { evidence: StructureEvidence }) {
 
       <div>
         <h3 className="text-[13px] leading-4 font-medium">Model and usage</h3>
-        <dl className="mt-2 divide-y rounded-md border text-xs">
+        <dl className="mt-2 divide-y rounded-md border text-[13px]">
           <MetaRow label="Provider" value={evidence.provider ?? "—"} />
           <MetaRow label="Model" value={evidence.model ?? "—"} mono />
           <MetaRow
@@ -693,7 +763,7 @@ function LineItemRow({ line }: { line: ValidatedLine }) {
   return (
     <li
       className={cn(
-        "rounded-md border px-3 py-2 text-xs",
+        "rounded-md border px-3 py-2 text-[13px]",
         needsReview && "border-workflow-review/40 bg-workflow-review-soft/40"
       )}
     >
@@ -732,7 +802,7 @@ function CustomerEvidencePanel({ evidence }: { evidence: CustomerEvidence }) {
   return (
     <div className="space-y-4">
       {evidence.message ? (
-        <p className="rounded-md border border-workflow-review/40 bg-workflow-review-soft/60 p-3 text-xs leading-5">
+        <p className="rounded-md border border-workflow-review/40 bg-workflow-review-soft/60 p-3 text-sm leading-6">
           {evidence.message}
         </p>
       ) : null}
@@ -742,7 +812,7 @@ function CustomerEvidencePanel({ evidence }: { evidence: CustomerEvidence }) {
           <h3 className="text-[13px] leading-4 font-medium">
             Resolved customer
           </h3>
-          <dl className="mt-2 divide-y rounded-md border text-xs">
+          <dl className="mt-2 divide-y rounded-md border text-[13px]">
             <MetaRow label="Customer" value={evidence.resolution.name} />
             <MetaRow
               label="Account"
@@ -771,7 +841,7 @@ function CustomerEvidencePanel({ evidence }: { evidence: CustomerEvidence }) {
           <h3 className="text-[13px] leading-4 font-medium">
             Identity evidence
           </h3>
-          <ul className="mt-2 space-y-1.5 text-xs">
+          <ul className="mt-2 space-y-1.5 text-[13px]">
             {evidence.signals.map((signal) => (
               <li key={signal.kind} className="flex items-start gap-2">
                 <span className="mt-px shrink-0 font-mono text-[11px] text-muted-foreground">
@@ -789,7 +859,7 @@ function CustomerEvidencePanel({ evidence }: { evidence: CustomerEvidence }) {
           <h3 className="text-[13px] leading-4 font-medium">
             Other candidates
           </h3>
-          <dl className="mt-2 divide-y rounded-md border text-xs">
+          <dl className="mt-2 divide-y rounded-md border text-[13px]">
             {evidence.candidates.slice(1).map((candidate) => (
               <MetaRow
                 key={candidate.customerId}
@@ -808,7 +878,7 @@ function CustomerEvidencePanel({ evidence }: { evidence: CustomerEvidence }) {
           <h3 className="text-[13px] leading-4 font-medium">
             What was considered
           </h3>
-          <dl className="mt-2 divide-y rounded-md border text-xs">
+          <dl className="mt-2 divide-y rounded-md border text-[13px]">
             <MetaRow
               label="Sender address"
               value={evidence.inputs.contactEmail ?? "Not stated"}
@@ -849,7 +919,7 @@ function CandidateEvidencePanel({ evidence }: { evidence: CandidateEvidence }) {
   return (
     <div className="space-y-4">
       {evidence.message ? (
-        <p className="rounded-md border border-workflow-review/40 bg-workflow-review-soft/60 p-3 text-xs leading-5">
+        <p className="rounded-md border border-workflow-review/40 bg-workflow-review-soft/60 p-3 text-sm leading-6">
           {evidence.message}
         </p>
       ) : null}
@@ -859,7 +929,7 @@ function CandidateEvidencePanel({ evidence }: { evidence: CandidateEvidence }) {
           <h3 className="text-[13px] leading-4 font-medium">
             What was searched
           </h3>
-          <dl className="mt-2 divide-y rounded-md border text-xs">
+          <dl className="mt-2 divide-y rounded-md border text-[13px]">
             <MetaRow
               label="Catalogue searched"
               value={`${evidence.catalog.activeProducts} active products (${evidence.catalog.archivedExcluded} archived excluded)`}
@@ -909,7 +979,7 @@ function CandidateEvidencePanel({ evidence }: { evidence: CandidateEvidence }) {
 
 function CandidateLineRow({ line }: { line: CandidateLine }) {
   return (
-    <li className="rounded-md border px-3 py-2 text-xs">
+    <li className="rounded-md border px-3 py-2 text-[13px]">
       <div className="flex items-start justify-between gap-3">
         <span className="min-w-0">
           <span className="text-muted-foreground">{line.position}.</span>{" "}
@@ -956,7 +1026,7 @@ function MatchEvidencePanel({ evidence }: { evidence: MatchEvidence }) {
   return (
     <div className="space-y-4">
       {evidence.message ? (
-        <p className="rounded-md border border-workflow-review/40 bg-workflow-review-soft/60 p-3 text-xs leading-5">
+        <p className="rounded-md border border-workflow-review/40 bg-workflow-review-soft/60 p-3 text-sm leading-6">
           {evidence.message}
         </p>
       ) : null}
@@ -977,7 +1047,7 @@ function MatchEvidencePanel({ evidence }: { evidence: MatchEvidence }) {
           <h3 className="text-[13px] leading-4 font-medium">
             Acceptance heuristics
           </h3>
-          <dl className="mt-2 divide-y rounded-md border text-xs">
+          <dl className="mt-2 divide-y rounded-md border text-[13px]">
             <MetaRow
               label="Winner strength"
               value={evidence.heuristics.winnerStrength.toFixed(2)}
@@ -996,7 +1066,7 @@ function MatchEvidencePanel({ evidence }: { evidence: MatchEvidence }) {
       {evidence.totals ? (
         <div>
           <h3 className="text-[13px] leading-4 font-medium">Model and usage</h3>
-          <dl className="mt-2 divide-y rounded-md border text-xs">
+          <dl className="mt-2 divide-y rounded-md border text-[13px]">
             <MetaRow label="Provider" value={evidence.provider ?? "—"} />
             <MetaRow label="Model" value={evidence.model ?? "—"} mono />
             <MetaRow
@@ -1048,7 +1118,7 @@ function MatchLineRow({ line }: { line: MatchLine }) {
   return (
     <li
       className={cn(
-        "rounded-md border px-3 py-2 text-xs",
+        "rounded-md border px-3 py-2 text-[13px]",
         needsReview && "border-workflow-review/40 bg-workflow-review-soft/40"
       )}
     >
@@ -1114,7 +1184,7 @@ function MatchLineRow({ line }: { line: MatchLine }) {
 
       {line.originalOutput ? (
         <details className="mt-1.5 rounded-md border bg-background">
-          <summary className="cursor-pointer px-3 py-2 text-xs">
+          <summary className="cursor-pointer px-3 py-2 text-[13px]">
             Original model output
             {line.repaired ? " (repaired before validation)" : ""}
           </summary>
@@ -1142,7 +1212,7 @@ function EstimateEvidencePanel({
 
   if (!quote) {
     return (
-      <p className="rounded-md border border-workflow-review/40 bg-workflow-review-soft/60 p-3 text-xs leading-5">
+      <p className="rounded-md border border-workflow-review/40 bg-workflow-review-soft/60 p-3 text-sm leading-6">
         {evidence.message ??
           "This run is not priced yet. Pricing runs once every line has an accepted product and a confirmed quantity."}
       </p>
@@ -1170,7 +1240,7 @@ function EstimateEvidencePanel({
 
       <div>
         <h3 className="text-[13px] leading-4 font-medium">Totals</h3>
-        <dl className="mt-2 divide-y rounded-md border text-xs">
+        <dl className="mt-2 divide-y rounded-md border text-[13px]">
           <MetaRow
             label="Subtotal (excl. VAT)"
             value={euro(quote.totals.subtotalCents)}
@@ -1186,7 +1256,7 @@ function EstimateEvidencePanel({
       {evidence.rules ? (
         <div>
           <h3 className="text-[13px] leading-4 font-medium">Pricing rules</h3>
-          <dl className="mt-2 divide-y rounded-md border text-xs">
+          <dl className="mt-2 divide-y rounded-md border text-[13px]">
             {evidence.rules.applied.map((entry) => (
               <MetaRow
                 key={entry.rule}
@@ -1217,7 +1287,7 @@ function EstimateEvidencePanel({
       </div>
 
       <details className="rounded-md border bg-background">
-        <summary className="cursor-pointer px-3 py-2 text-xs">
+        <summary className="cursor-pointer px-3 py-2 text-[13px]">
           Canonical quote
         </summary>
         <pre className="max-h-72 overflow-auto border-t px-3 py-2 font-mono text-[11px] leading-5 whitespace-pre-wrap">
@@ -1230,7 +1300,7 @@ function EstimateEvidencePanel({
 
 function EstimateLineRow({ line }: { line: QuoteLine }) {
   return (
-    <li className="rounded-md border px-3 py-2 text-xs">
+    <li className="rounded-md border px-3 py-2 text-[13px]">
       <div className="flex items-start justify-between gap-3">
         <span className="min-w-0">
           <span className="font-mono text-[11px] text-muted-foreground">
@@ -1331,7 +1401,7 @@ function ReviewPanel({
 
   return (
     <div className="space-y-4">
-      <div className="rounded-md border border-workflow-review/40 bg-workflow-review-soft/60 p-3 text-xs leading-5">
+      <div className="rounded-md border border-workflow-review/40 bg-workflow-review-soft/60 p-3 text-sm leading-6">
         <p>
           {review.state === "pending"
             ? `${review.resolvedCount} of ${review.itemCount} decisions confirmed. Pricing and delivery stay blocked until this node is approved.`
@@ -1361,7 +1431,7 @@ function ReviewPanel({
         ))}
       </ol>
 
-      {error ? <p className="text-xs text-destructive">{error}</p> : null}
+      {error ? <p className="text-sm text-destructive">{error}</p> : null}
 
       {interactive ? (
         <div className="flex flex-wrap items-center gap-2">
@@ -1437,7 +1507,7 @@ function ReviewItemRow({
   }
 
   return (
-    <li className="rounded-md border bg-background px-3 py-2.5 text-xs">
+    <li className="rounded-md border bg-background px-3 py-2.5 text-[13px]">
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div className="min-w-0">
           <p className="font-medium">
@@ -1560,7 +1630,7 @@ function ReviewItemRow({
                 value={quantity}
                 onChange={(event) => setQuantity(event.target.value)}
                 placeholder="Quantity"
-                className="h-8 w-28 rounded-md border bg-background px-2.5 text-xs outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
+                className="h-8 w-28 rounded-md border bg-background px-2.5 text-[13px] outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
               />
               <Button
                 size="lg"
@@ -1589,7 +1659,7 @@ function ReviewItemRow({
                       ? "Search existing customers"
                       : "Search the complete catalogue"
                   }
-                  className="h-8 min-w-52 flex-1 rounded-md border bg-background px-2.5 text-xs outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
+                  className="h-8 min-w-52 flex-1 rounded-md border bg-background px-2.5 text-[13px] outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
                 />
                 <Button
                   size="lg"
@@ -1602,7 +1672,7 @@ function ReviewItemRow({
               </div>
 
               {searchError ? (
-                <p className="text-[11px] text-destructive">{searchError}</p>
+                <p className="text-[13px] text-destructive">{searchError}</p>
               ) : null}
 
               {products && item.kind === "product" ? (
@@ -1767,7 +1837,7 @@ function DeliveryPanel({
               <li key={entry.id}>
                 <label
                   className={cn(
-                    "flex cursor-pointer gap-2.5 rounded-md border px-3 py-2 text-xs",
+                    "flex cursor-pointer gap-2.5 rounded-md border px-3 py-2 text-[13px]",
                     isSelected && "border-workflow-active/40 bg-muted/30"
                   )}
                 >
@@ -1830,11 +1900,11 @@ function DeliveryPanel({
         </p>
       ) : null}
 
-      {error ? <p className="text-xs text-destructive">{error}</p> : null}
+      {error ? <p className="text-sm text-destructive">{error}</p> : null}
 
       {preview ? (
         <details className="rounded-md border bg-background" open>
-          <summary className="cursor-pointer px-3 py-2 text-xs">
+          <summary className="cursor-pointer px-3 py-2 text-[13px]">
             {selected?.name} payload · {selected?.payloadFormat} · not sent yet
           </summary>
           <pre className="max-h-72 overflow-auto border-t px-3 py-2 font-mono text-[11px] leading-5 whitespace-pre-wrap">
@@ -1863,7 +1933,7 @@ function DeliveredPanel({
         <h3 className="text-[13px] leading-4 font-medium">
           Simulated external estimate
         </h3>
-        <dl className="mt-2 divide-y rounded-md border text-xs">
+        <dl className="mt-2 divide-y rounded-md border text-[13px]">
           <MetaRow
             label="External estimate ID"
             value={delivered.externalEstimateId}
@@ -1892,7 +1962,7 @@ function DeliveredPanel({
       </div>
 
       <details className="rounded-md border bg-background">
-        <summary className="cursor-pointer px-3 py-2 text-xs">
+        <summary className="cursor-pointer px-3 py-2 text-[13px]">
           Transformed payload
         </summary>
         <pre className="max-h-72 overflow-auto border-t px-3 py-2 font-mono text-[11px] leading-5 whitespace-pre-wrap">
@@ -1901,7 +1971,7 @@ function DeliveredPanel({
       </details>
 
       <details className="rounded-md border bg-background">
-        <summary className="cursor-pointer px-3 py-2 text-xs">
+        <summary className="cursor-pointer px-3 py-2 text-[13px]">
           Adapter receipt
         </summary>
         <pre className="max-h-64 overflow-auto border-t px-3 py-2 font-mono text-[11px] leading-5 whitespace-pre-wrap">
@@ -1962,7 +2032,7 @@ function SourceEvidenceCard({ source }: { source: EvidenceSource }) {
   return (
     <li className="rounded-md border">
       <div className="flex items-center justify-between gap-3 border-b px-3 py-2">
-        <span className="flex min-w-0 items-center gap-2 text-xs">
+        <span className="flex min-w-0 items-center gap-2 text-[13px]">
           <SourceIcon kind={source.kind} />
           <span className="truncate font-medium">{source.label}</span>
           <span className="shrink-0 text-[11px] text-muted-foreground">
@@ -1984,7 +2054,7 @@ function SourceEvidenceCard({ source }: { source: EvidenceSource }) {
               href={source.previewUrl}
               target="_blank"
               rel="noreferrer"
-              className="inline-flex h-8 items-center gap-2 rounded-md border bg-background px-2.5 text-xs hover:bg-muted/40"
+              className="inline-flex h-8 items-center gap-2 rounded-md border bg-background px-2.5 text-[13px] hover:bg-muted/40"
             >
               <FilePdfIcon
                 className="size-4 text-muted-foreground"
@@ -2029,7 +2099,7 @@ function SourceEvidenceCard({ source }: { source: EvidenceSource }) {
 
         {source.sanitizedResponse ? (
           <details className="rounded-md border bg-background">
-            <summary className="cursor-pointer px-3 py-2 text-xs">
+            <summary className="cursor-pointer px-3 py-2 text-[13px]">
               Sanitized provider response
             </summary>
             <pre className="max-h-64 overflow-auto border-t px-3 py-2 font-mono text-[11px] leading-5">
@@ -2106,21 +2176,36 @@ function RunPending() {
   )
 }
 
+/**
+ * Not found, or expired. One compact state with one way back: a run that no
+ * longer exists is not a broken graph, and this browser stops offering a link
+ * to it.
+ */
 function RunUnavailable() {
+  const { viewId } = Route.useParams()
+
+  useEffect(() => {
+    forgetRun(viewId)
+  }, [viewId])
+
   return (
-    <main className="mx-auto flex min-h-[calc(100svh-3rem)] max-w-lg flex-col items-center justify-center px-4 text-center">
-      <p className="text-xs font-medium text-muted-foreground">Unavailable</p>
-      <h1 className="mt-2 text-base font-medium">This run is not available</h1>
-      <p className="mt-2 max-w-sm text-sm text-muted-foreground">
-        The link may be incorrect, the run may have been reset, or the temporary
-        demo data may have expired.
-      </p>
-      <Link
-        to="/"
-        className={buttonVariants({ size: "lg", className: "mt-5" })}
-      >
-        Return to RFQ Relay
-      </Link>
+    <main className="mx-auto w-full max-w-lg px-4 py-12 sm:px-6">
+      <div className="rounded-lg border bg-card p-5 shadow-xs">
+        <h1 className="text-base leading-5 font-medium">
+          This run is not available
+        </h1>
+        <p className="mt-2 text-sm leading-6 text-muted-foreground">
+          The link may be incorrect, the run may have been reset, or its
+          short-lived demo data may already be gone. Nothing is broken; there is
+          simply nothing left to show.
+        </p>
+        <Link
+          to="/"
+          className={buttonVariants({ size: "lg", className: "mt-4" })}
+        >
+          Start a new request
+        </Link>
+      </div>
     </main>
   )
 }

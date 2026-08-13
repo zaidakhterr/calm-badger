@@ -31,6 +31,7 @@ import {
   type RunInput,
 } from "./runs"
 import { scenarioPreviews } from "./scenarios"
+import { loadSystemDetails } from "./system"
 import {
   isSupportedUploadType,
   loadSources,
@@ -116,6 +117,19 @@ async function routeRequest(
     // never served to a client.
     return Response.json(
       { scenarios: scenarioPreviews() },
+      { headers: jsonHeaders }
+    )
+  }
+
+  if (url.pathname === "/api/system") {
+    if (request.method !== "GET") {
+      return methodNotAllowed("GET")
+    }
+
+    // Configuration and catalogue scale, read from what the workflow uses. No
+    // secret, key, or run content is part of this projection.
+    return Response.json(
+      { system: await loadSystemDetails(env) },
       { headers: jsonHeaders }
     )
   }
