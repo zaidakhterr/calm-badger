@@ -78,10 +78,15 @@ export async function deliverRun(
   const deliveredAt = new Date().toISOString()
   const delivery = deliverQuote(adapter, quote, deliveredAt)
 
-  await env.DB.prepare(
+  // The read above is not authority to insert: two concurrent requests both
+  // see no delivery. The single-row primary key is the authority, so the
+  // insert itself decides which request delivered, and the loser reports what
+  // was delivered rather than failing.
+  const insert = await env.DB.prepare(
     `INSERT INTO run_deliveries (
        run_id, adapter, external_estimate_id, payload, receipt, delivered_at
-     ) VALUES (?, ?, ?, ?, ?, ?)`
+     ) VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT (run_id) DO NOTHING`
   )
     .bind(
       runId,
@@ -92,6 +97,23 @@ export async function deliverRun(
       deliveredAt
     )
     .run()
+
+  if (insert.meta.changes !== 1) {
+    // Another request won the race. The only way the row is gone again is a
+    // reset in between, which leaves the run with nothing to deliver.
+    const delivered = await loadDelivery(env, runId)
+
+    return delivered
+      ? {
+          state: "already_delivered",
+          delivery: {
+            adapter: ADAPTERS[delivered.adapter],
+            payload: delivered.payload,
+            receipt: delivered.receipt,
+          },
+        }
+      : { state: "not_priced" }
+  }
 
   await env.DB.batch([
     env.DB.prepare(

@@ -19,6 +19,13 @@
  * decision rather than an accident, which is why every line records which rule
  * applied and what it did.
  *
+ * `priceFor` in `worker/catalog/dataset.ts` deliberately does *not* agree with
+ * this. That function writes the synthetic order history, where a past order
+ * reads more believably if it took the better of the tier and a quantity break,
+ * so it picks the larger discount. This file is the pricing contract every
+ * quote is held to, and it is the ordered fallback above. The divergence is
+ * intentional: history is decoration, this is the rule.
+ *
  * Money is integer cents from end to end; no amount is ever held as a float
  * fraction of a euro. A discounted unit price is rounded once, to the nearest
  * cent, with halves going up (`Math.round`). A line subtotal is then an exact

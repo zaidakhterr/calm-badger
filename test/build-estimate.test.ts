@@ -735,6 +735,19 @@ describe("pricing a run that needs no review", () => {
   })
 
   it("uses this customer's active override and ignores a superseded one", async () => {
+    // A distinctive superseded price for a product this request asks for. It is
+    // the most recent row by date and by far the cheapest, so if a superseded
+    // override could reach pricing at all, this is the price that would win.
+    const supersededCents = 1
+    await env.DB.prepare(
+      `INSERT OR REPLACE INTO catalog_price_overrides
+         (customer_id, sku, unit_price_cents, effective_from, active, reason)
+       VALUES ('CUST-1001', 'NX-FLT-1120', ?, '2099-01-01', 0,
+               'Superseded agreement kept for history')`
+    )
+      .bind(supersededCents)
+      .run()
+
     const { run } = await pricedRun()
     const quote = (await readEstimate(run.viewId)).quote!
     const filter = quote.lines.find((line) => line.sku === "NX-FLT-1120")!
@@ -744,18 +757,15 @@ describe("pricing a run that needs no review", () => {
     expect(filter.pricing.rule).toBe("historical_override")
     expect(filter.pricing.unitPriceCents).toBe(1290)
 
-    const superseded = await env.DB.prepare(
-      `SELECT COUNT(*) AS total FROM catalog_price_overrides
-        WHERE active = 0 AND customer_id = ?`
-    )
-      .bind(quote.customer.customerId)
-      .first<{ total: number }>()
+    // The superseded amount is absent from the line, from its subtotal, and
+    // from every other line of the quote.
+    expect(filter.pricing.unitPriceCents).not.toBe(supersededCents)
+    expect(filter.subtotalCents).toBe(1290 * filter.quantity)
+    expect(filter.pricing.explanation).not.toContain("Superseded agreement")
 
-    // Whatever this customer's expired prices are, none of them priced a line.
     for (const line of quote.lines) {
-      expect(line.pricing.unitPriceCents).toBeGreaterThan(0)
+      expect(line.pricing.unitPriceCents).not.toBe(supersededCents)
     }
-    expect(superseded!.total).toBeGreaterThanOrEqual(0)
   })
 
   it("persists the estimate as a graph state with stored amounts", async () => {
@@ -1083,6 +1093,29 @@ describe("delivering the quote", () => {
 
     expect(first.status).toBe(200)
     expect(second.status).toBe(409)
+
+    const rows = await env.DB.prepare(
+      `SELECT COUNT(*) AS total FROM run_deliveries WHERE run_id = ?`
+    )
+      .bind(await runIdOf(run.viewId))
+      .first<{ total: number }>()
+
+    expect(rows!.total).toBe(1)
+  })
+
+  it("delivers once when the same run is delivered concurrently", async () => {
+    const { run, ownerCapability } = await pricedRun()
+
+    // Both requests read "not delivered yet" before either writes.
+    const [first, second] = await Promise.all([
+      deliver(run.viewId, "corebridge-sandbox", ownerCapability),
+      deliver(run.viewId, "generic-erp-webhook", ownerCapability),
+    ])
+
+    const statuses = [first.status, second.status].sort()
+
+    // One delivered, one was told it was already delivered. Neither failed.
+    expect(statuses).toEqual([200, 409])
 
     const rows = await env.DB.prepare(
       `SELECT COUNT(*) AS total FROM run_deliveries WHERE run_id = ?`

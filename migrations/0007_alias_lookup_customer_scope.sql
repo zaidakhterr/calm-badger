@@ -75,6 +75,14 @@ ALTER TABLE catalog_alias_lookup_v2 RENAME TO catalog_alias_lookup;
 CREATE INDEX IF NOT EXISTS catalog_alias_lookup_normalised_idx
   ON catalog_alias_lookup (normalised);
 
+-- What this migration cannot do is bring back an alias the *seed* already
+-- dropped. Seeding is `INSERT OR IGNORE`, so under the old key a second
+-- customer's wording for a product was discarded at import time and was never
+-- a row here to copy. This restores the key, not the lost rows: an existing
+-- deployment has to be reseeded (`pnpm db:seed:remote`, which stays additive)
+-- before those customer-specific aliases exist. A fresh database seeded after
+-- this migration is unaffected.
+
 -- Forget the recorded fingerprint so the next retrieval rebuilds the alias and
 -- full-text indexes from the catalogue.
 DELETE FROM catalog_search_state;
