@@ -1,78 +1,43 @@
 import { useState } from "react"
 import {
   ArrowRightIcon,
-  FileImageIcon,
   FilePdfIcon,
+  ImageSquareIcon,
   PaperclipIcon,
+  WarningCircleIcon,
 } from "@phosphor-icons/react"
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router"
 
 import { Button } from "@/components/ui/button"
-import { createRun } from "@/lib/api"
+import { createRun, fetchScenarios, type Scenario } from "@/lib/api"
 import { readRecentRuns, rememberOwnedRun } from "@/lib/run-store"
 import { cn } from "@/lib/utils"
 
-const scenarios = [
-  {
-    id: "routine-replenishment",
-    name: "Routine replenishment",
-    difficulty: "Clean request with known SKUs and customer details.",
-    sources: "Email · PDF · image",
-    review: "Expected to complete automatically",
-    sender: "Lena Vogt",
-    company: "Northline Property Services",
-    subject: "Replenishment request — August",
-    preview:
-      "Hi team, please quote the attached replenishment list for our Berlin service depot. The six usual items and delivery to the Spandau location, please.",
-  },
-  {
-    id: "messy-forwarded-request",
-    name: "Messy forwarded request",
-    difficulty: "Forwarded thread with incomplete names and mixed sources.",
-    sources: "Forwarded email · PDF · image",
-    review: "One match may require review",
-    sender: "Marta Klein",
-    company: "Bergmann Facility Group",
-    subject: "Fwd: parts for the maintenance round",
-    preview:
-      "Could you price these for the south site? Quantities are in Daniel’s note below. The photo is the replacement fitting we discussed; I’m not sure the old item number is still current.",
-  },
-  {
-    id: "ambiguous-replacement-parts",
-    name: "Ambiguous replacement parts",
-    difficulty: "Near-duplicate products with an archived reference.",
-    sources: "Email · PDF · image",
-    review: "Product confirmation expected",
-    sender: "Jonas Richter",
-    company: "Westmark Industrial Care",
-    subject: "Quote needed: replacement parts",
-    preview:
-      "Please find our replacement request attached. The labels on two units are worn, so I included photos and the measurements from our technician.",
-  },
-] as const
-
-type ScenarioId = (typeof scenarios)[number]["id"]
-
 export const Route = createFileRoute("/")({
+  loader: () => fetchScenarios(),
   component: LandingPage,
+  pendingComponent: LandingPending,
 })
 
 function LandingPage() {
-  const [selectedId, setSelectedId] = useState<ScenarioId>(
-    "messy-forwarded-request"
-  )
+  const scenarios = Route.useLoaderData()
+  const featured =
+    scenarios.find((scenario) => scenario.featured) ?? scenarios[0]
+  const [selectedId, setSelectedId] = useState(featured.id)
   const [isStarting, setIsStarting] = useState(false)
   const [startError, setStartError] = useState<string | null>(null)
   const [recentRuns] = useState(() => readRecentRuns())
   const navigate = useNavigate()
-  const selectedScenario = scenarios.find(({ id }) => id === selectedId)!
+
+  const selected =
+    scenarios.find((scenario) => scenario.id === selectedId) ?? featured
 
   async function handleProcessRfq() {
     setIsStarting(true)
     setStartError(null)
 
     try {
-      const { run, ownerCapability } = await createRun(selectedId)
+      const { run, ownerCapability } = await createRun(selected.id)
 
       // The capability is returned once, so it is stored before navigating.
       rememberOwnedRun({
@@ -115,7 +80,7 @@ function LandingPage() {
               Choose a request
             </h2>
             <p className="mt-1 text-sm text-muted-foreground">
-              Messy forwarded request is selected by default.
+              {featured.name} is selected by default.
             </p>
           </div>
           <span className="hidden text-xs text-muted-foreground sm:block">
@@ -124,96 +89,18 @@ function LandingPage() {
         </div>
 
         <div className="mt-4 grid gap-2.5 sm:grid-cols-3">
-          {scenarios.map((scenario) => {
-            const isSelected = scenario.id === selectedId
-
-            return (
-              <button
-                key={scenario.id}
-                type="button"
-                aria-pressed={isSelected}
-                onClick={() => setSelectedId(scenario.id)}
-                className={cn(
-                  "relative min-h-40 rounded-lg border bg-card p-4 text-left shadow-xs transition-colors outline-none hover:bg-muted/40 focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30",
-                  isSelected && "border-foreground bg-muted/30"
-                )}
-              >
-                <span
-                  aria-hidden="true"
-                  className={cn(
-                    "absolute top-4 right-4 size-3 rounded-full border",
-                    isSelected && "border-[3px] border-foreground"
-                  )}
-                />
-                <span className="block pr-5 text-[13px] leading-4 font-medium">
-                  {scenario.name}
-                </span>
-                <span className="mt-2 block text-xs leading-5 text-muted-foreground">
-                  {scenario.difficulty}
-                </span>
-                <span className="mt-4 block text-[11px] text-muted-foreground">
-                  {scenario.sources}
-                </span>
-                <span className="mt-1 block text-[11px] text-muted-foreground">
-                  {scenario.review}
-                </span>
-              </button>
-            )
-          })}
+          {scenarios.map((scenario) => (
+            <ScenarioCard
+              key={scenario.id}
+              scenario={scenario}
+              isSelected={scenario.id === selected.id}
+              onSelect={() => setSelectedId(scenario.id)}
+            />
+          ))}
         </div>
       </section>
 
-      <section
-        className="mt-6 overflow-hidden rounded-lg border bg-card shadow-xs"
-        aria-labelledby="source-preview-heading"
-      >
-        <div className="flex items-center justify-between gap-4 border-b px-4 py-3">
-          <div>
-            <h2 id="source-preview-heading" className="text-[13px] font-medium">
-              Source preview
-            </h2>
-            <p className="mt-0.5 text-xs text-muted-foreground">
-              Forwarded email and two attachments
-            </p>
-          </div>
-          <PaperclipIcon className="size-4 text-muted-foreground" aria-hidden />
-        </div>
-
-        <div className="p-4 sm:p-5">
-          <dl className="grid grid-cols-[4rem_1fr] gap-x-3 gap-y-1 text-xs">
-            <dt className="text-muted-foreground">From</dt>
-            <dd>
-              {selectedScenario.sender} · {selectedScenario.company}
-            </dd>
-            <dt className="text-muted-foreground">Subject</dt>
-            <dd className="font-medium">{selectedScenario.subject}</dd>
-          </dl>
-
-          <div className="mt-5 border-l-2 pl-4 text-sm leading-6 text-foreground/85">
-            <p>Hello,</p>
-            <p className="mt-2">{selectedScenario.preview}</p>
-            <p className="mt-2">Thanks,</p>
-            <p>{selectedScenario.sender.split(" ")[0]}</p>
-          </div>
-
-          <div className="mt-5 flex flex-wrap gap-2">
-            <span className="inline-flex h-8 items-center gap-2 rounded-md border bg-background px-2.5 text-xs">
-              <FilePdfIcon
-                className="size-4 text-muted-foreground"
-                aria-hidden
-              />
-              requested-items.pdf
-            </span>
-            <span className="inline-flex h-8 items-center gap-2 rounded-md border bg-background px-2.5 text-xs">
-              <FileImageIcon
-                className="size-4 text-muted-foreground"
-                aria-hidden
-              />
-              fitting-reference.jpg
-            </span>
-          </div>
-        </div>
-      </section>
+      <SourcePreview scenario={selected} />
 
       <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:items-center sm:justify-between">
         <Button variant="ghost" size="lg" type="button" disabled>
@@ -270,6 +157,190 @@ function LandingPage() {
           </ul>
         </section>
       ) : null}
+    </main>
+  )
+}
+
+function ScenarioCard({
+  scenario,
+  isSelected,
+  onSelect,
+}: {
+  scenario: Scenario
+  isSelected: boolean
+  onSelect: () => void
+}) {
+  return (
+    <button
+      type="button"
+      aria-pressed={isSelected}
+      onClick={onSelect}
+      className={cn(
+        "relative min-h-40 rounded-lg border bg-card p-4 text-left shadow-xs transition-colors outline-none hover:bg-muted/40 focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30",
+        isSelected && "border-foreground bg-muted/30"
+      )}
+    >
+      <span
+        aria-hidden="true"
+        className={cn(
+          "absolute top-4 right-4 size-3 rounded-full border",
+          isSelected && "border-[3px] border-foreground"
+        )}
+      />
+      <span className="block pr-5 text-[13px] leading-4 font-medium">
+        {scenario.name}
+      </span>
+      {scenario.featured ? (
+        <span className="mt-2 inline-flex h-5 items-center rounded-md border border-workflow-active/20 bg-workflow-active-soft px-1.5 text-[11px] font-medium text-workflow-active">
+          Featured
+        </span>
+      ) : null}
+      <span className="mt-2 block text-xs leading-5 text-muted-foreground">
+        {scenario.difficulty.summary}
+      </span>
+      <span className="mt-4 block text-[11px] text-muted-foreground">
+        {scenario.sources}
+      </span>
+      <span className="mt-1 block text-[11px] text-muted-foreground">
+        Difficulty {scenario.difficulty.level.toLowerCase()} ·{" "}
+        {scenario.difficulty.expectedReview}
+      </span>
+    </button>
+  )
+}
+
+function SourcePreview({ scenario }: { scenario: Scenario }) {
+  return (
+    <section
+      className="mt-6 overflow-hidden rounded-lg border bg-card shadow-xs"
+      aria-labelledby="source-preview-heading"
+    >
+      <div className="flex items-center justify-between gap-4 border-b px-4 py-3">
+        <div>
+          <h2 id="source-preview-heading" className="text-[13px] font-medium">
+            Source preview
+          </h2>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            {scenario.email.forwarded
+              ? "Forwarded email, inline photo, and PDF attachment"
+              : "Email, inline photo, and PDF attachment"}
+          </p>
+        </div>
+        <PaperclipIcon className="size-4 text-muted-foreground" aria-hidden />
+      </div>
+
+      <div className="p-4 sm:p-5">
+        <dl className="grid grid-cols-[4.5rem_1fr] gap-x-3 gap-y-1 text-xs">
+          <dt className="text-muted-foreground">From</dt>
+          <dd>
+            {scenario.email.from.name} · {scenario.email.from.company}
+            <span className="block font-mono text-[11px] text-muted-foreground">
+              {scenario.email.from.email}
+            </span>
+          </dd>
+          <dt className="text-muted-foreground">To</dt>
+          <dd className="font-mono text-[11px] text-muted-foreground">
+            {scenario.email.to}
+          </dd>
+          <dt className="text-muted-foreground">Subject</dt>
+          <dd className="font-medium">{scenario.email.subject}</dd>
+        </dl>
+
+        {scenario.email.forwarded ? (
+          <div className="mt-4 rounded-md border bg-muted/30 px-3 py-2 text-[11px] leading-5 text-muted-foreground">
+            Forwarded from {scenario.email.forwarded.from} ·{" "}
+            {scenario.email.forwarded.date} · {scenario.email.forwarded.subject}
+          </div>
+        ) : null}
+
+        <div className="mt-4 border-l-2 pl-4 text-sm leading-6 text-foreground/85">
+          {scenario.email.body.map((paragraph) => (
+            <p key={paragraph} className="mt-2 first:mt-0">
+              {paragraph}
+            </p>
+          ))}
+          <div className="mt-3 text-xs leading-5 text-muted-foreground">
+            {scenario.email.signature.map((line) => (
+              <p key={line}>{line}</p>
+            ))}
+          </div>
+        </div>
+
+        <figure className="mt-5">
+          <img
+            src={scenario.inlineImage.url}
+            alt={scenario.inlineImage.caption}
+            width={520}
+            height={200}
+            loading="lazy"
+            className="w-full max-w-md rounded-md border bg-background"
+          />
+          <figcaption className="mt-1.5 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+            <ImageSquareIcon className="size-3.5" aria-hidden />
+            {scenario.inlineImage.filename} · {scenario.inlineImage.title}
+          </figcaption>
+        </figure>
+
+        <a
+          href={scenario.pdfAttachment.url}
+          target="_blank"
+          rel="noreferrer"
+          className="mt-4 inline-flex h-8 items-center gap-2 rounded-md border bg-background px-2.5 text-xs hover:bg-muted/40"
+        >
+          <FilePdfIcon className="size-4 text-muted-foreground" aria-hidden />
+          {scenario.pdfAttachment.filename}
+          <span className="text-muted-foreground">
+            {scenario.pdfAttachment.caption}
+          </span>
+        </a>
+
+        <div className="mt-5">
+          <h3 className="text-[13px] leading-4 font-medium">
+            Requested lines ({scenario.requestedItems.length})
+          </h3>
+          <ul className="mt-2 divide-y rounded-md border">
+            {scenario.requestedItems.map((item) => (
+              <li
+                key={item.position}
+                className="flex min-h-10 items-start gap-3 px-3 py-2 text-xs"
+              >
+                <span className="mt-0.5 w-3 shrink-0 text-muted-foreground">
+                  {item.position}
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block font-mono text-[11px]">
+                    {item.reference}
+                  </span>
+                  <span className="block text-[11px] text-muted-foreground">
+                    {item.description} · {item.note}
+                  </span>
+                </span>
+                <span className="shrink-0 text-right whitespace-nowrap">
+                  {item.quantity} {item.unit}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+
+        <div className="mt-4 flex gap-2.5 rounded-md border bg-muted/30 p-3 text-xs leading-5 text-muted-foreground">
+          <WarningCircleIcon className="mt-0.5 size-4 shrink-0" aria-hidden />
+          <p>
+            <span className="font-medium text-foreground">
+              Difficulty {scenario.difficulty.level.toLowerCase()}.
+            </span>{" "}
+            {scenario.difficulty.summary} {scenario.difficulty.expectedReview}
+          </p>
+        </div>
+      </div>
+    </section>
+  )
+}
+
+function LandingPending() {
+  return (
+    <main className="mx-auto w-full max-w-3xl px-4 py-10 sm:px-6">
+      <p className="text-sm text-muted-foreground">Loading requests…</p>
     </main>
   )
 }

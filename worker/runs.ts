@@ -8,13 +8,10 @@
  * mutation endpoints.
  */
 
-export const SCENARIO_IDS = [
-  "routine-replenishment",
-  "messy-forwarded-request",
-  "ambiguous-replacement-parts",
-] as const
+import { SCENARIO_IDS, isScenarioId, type ScenarioId } from "./scenarios"
 
-export type ScenarioId = (typeof SCENARIO_IDS)[number]
+export { SCENARIO_IDS, isScenarioId }
+export type { ScenarioId }
 
 export type RunStepStatus =
   "waiting" | "active" | "complete" | "review_required" | "error"
@@ -121,13 +118,6 @@ type StepRow = {
   summary: string
   started_at: string | null
   completed_at: string | null
-}
-
-export function isScenarioId(value: unknown): value is ScenarioId {
-  return (
-    typeof value === "string" &&
-    (SCENARIO_IDS as readonly string[]).includes(value)
-  )
 }
 
 function randomToken(byteLength: number): string {

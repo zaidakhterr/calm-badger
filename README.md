@@ -10,6 +10,7 @@ pnpm install
 cp .dev.vars.example .dev.vars
 pnpm cf:types
 pnpm db:migrate:local
+pnpm db:seed:local
 pnpm dev:worker
 ```
 
@@ -30,6 +31,42 @@ The application currently exposes two typed TanStack Router routes:
 
 The UI baseline is generated from shadcn preset `b1D0ekIC` (Mira, Neutral,
 Inter, Phosphor icons, and the Base UI primitive layer).
+
+## Synthetic dataset and curated scenarios
+
+Everything the demo quotes against is invented and generated from one fixed
+seed in `worker/catalog/dataset.ts`: 250 industrial and facilities products, 25
+customers with two to four contacts and one to three locations, and 150
+historical orders. The data is deliberately messy, because that is what makes
+retrieval and matching a real problem: trade aliases, typographical variants,
+superseded item numbers, near-duplicate products that differ in one dimension,
+archived products with successors, customer pricing tiers, quantity breaks, and
+customer-specific historical prices.
+
+```bash
+pnpm seed:build     # rerender seed/catalog.sql from the generator
+pnpm assets:build   # rerender the scenario PDF and image attachments
+pnpm data:check     # verify both are current, importable, and additive
+```
+
+`seed/catalog.sql` is generated, and importing it is additive: every statement
+is an `INSERT OR IGNORE` into a `catalog_` table, so reseeding a running
+deployment adds missing rows and cannot remove or overwrite anything a demo has
+accumulated. Deployment never seeds automatically; seeding is an explicit
+command.
+
+`GET /api/scenarios` serves the three curated requests — Routine replenishment,
+Messy forwarded request (featured and selected by default), and Ambiguous
+replacement parts. Each one carries a forwarded-email body, an inline
+photograph, a PDF item list under `public/scenarios/`, six requested lines, and
+a plain statement of what makes it easy or hard.
+
+The expected outcome of each scenario — customer, extracted fields, and the
+catalogue product behind every requested line — lives in
+`test/fixtures/gold-scenarios.ts`, deliberately outside `worker/` so no runtime
+path can read an answer instead of producing one. Those fixtures are evaluation
+material; the deterministic tests only assert that every expectation is
+resolvable in the generated catalogue.
 
 ## Runs, sharing, and owner authority
 
@@ -114,6 +151,7 @@ external state:
 pnpm typecheck
 pnpm lint
 pnpm wizard:check
+pnpm data:check
 pnpm test
 pnpm build
 ```

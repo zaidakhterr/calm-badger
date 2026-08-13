@@ -31,6 +31,48 @@ export type Viewer = {
 
 export type RunView = { run: Run; viewer: Viewer }
 
+export type RequestedItem = {
+  position: number
+  reference: string
+  description: string
+  quantity: number
+  unit: string
+  note: string
+}
+
+export type ScenarioAttachment = {
+  kind: "pdf" | "image"
+  filename: string
+  url: string
+  title: string
+  caption: string
+}
+
+/** The curated source material the landing page shows before processing. */
+export type Scenario = {
+  id: string
+  name: string
+  featured: boolean
+  sources: string
+  difficulty: {
+    level: "Low" | "Medium" | "High"
+    summary: string
+    expectedReview: string
+  }
+  email: {
+    from: { name: string; email: string; company: string }
+    to: string
+    subject: string
+    receivedAt: string
+    forwarded: { from: string; date: string; subject: string } | null
+    body: string[]
+    signature: string[]
+  }
+  inlineImage: ScenarioAttachment
+  pdfAttachment: ScenarioAttachment
+  requestedItems: RequestedItem[]
+}
+
 export class RunNotFoundError extends Error {
   constructor() {
     super("This run is unavailable or has expired")
@@ -45,6 +87,15 @@ async function readError(response: Response): Promise<string> {
   } catch {
     return "The request failed"
   }
+}
+
+export async function fetchScenarios(): Promise<Scenario[]> {
+  const response = await fetch("/api/scenarios")
+
+  if (!response.ok) throw new Error(await readError(response))
+
+  const body = (await response.json()) as { scenarios: Scenario[] }
+  return body.scenarios
 }
 
 export async function createRun(scenarioId: string): Promise<{

@@ -6,6 +6,7 @@ import {
   isScenarioId,
   loadRun,
 } from "./runs"
+import { scenarioPreviews } from "./scenarios"
 
 export { RfqWorkflow } from "./workflow"
 
@@ -74,6 +75,19 @@ async function routeRequest(
     }
 
     return healthResponse(env)
+  }
+
+  if (url.pathname === "/api/scenarios") {
+    if (request.method !== "GET") {
+      return methodNotAllowed("GET")
+    }
+
+    // Curated source material only. Expected outcomes are test fixtures and are
+    // never served to a client.
+    return Response.json(
+      { scenarios: scenarioPreviews() },
+      { headers: jsonHeaders }
+    )
   }
 
   if (url.pathname === "/api/runs") {
