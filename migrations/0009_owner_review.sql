@@ -26,7 +26,8 @@
 -- Learned aliases deliberately outlive `Start over`: they are workspace memory
 -- rather than run artifacts, which is what lets a later run in the same browser
 -- benefit from an earlier correction. They carry no run reference for that
--- reason, and `created_at` is what a retention sweep can prune them by.
+-- reason. Migration 0011 adds the source run's retention deadline so uploaded
+-- wording cannot gain a longer lifetime merely because it was approved.
 
 ALTER TABLE runs ADD COLUMN workspace_hash TEXT;
 

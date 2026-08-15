@@ -4,6 +4,7 @@ import {
   CheckIcon,
   CircleIcon,
   CircleNotchIcon,
+  CopySimpleIcon,
   DownloadSimpleIcon,
   FilePdfIcon,
   ImageSquareIcon,
@@ -51,6 +52,7 @@ import {
   type QuoteLine,
   type RunStep,
   type RunView,
+  RunNotFoundError,
   type StructureEvidence,
   type ValidatedLine,
   resetRun,
@@ -78,8 +80,9 @@ const EVIDENCE_STEPS = [
   BUILD_ESTIMATE_STEP,
 ]
 const POLL_INTERVAL_MS = 1000
-/** A bound on live polling; the server, not the client, owns step state. */
-const POLL_LIMIT_MS = 90_000
+const SLOW_POLL_INTERVAL_MS = 5000
+/** Long provider work keeps updating, but backs off after the expected demo window. */
+const SLOW_POLL_AFTER_MS = 90_000
 
 type RunSnapshot = RunView & {
   documents: DocumentEvidence | null
@@ -160,6 +163,8 @@ function RunPage() {
   const [openSteps, setOpenSteps] = useState<Record<string, boolean>>({})
   const [isResetting, setIsResetting] = useState(false)
   const [resetError, setResetError] = useState<string | null>(null)
+  const [pollingNotice, setPollingNotice] = useState<string | null>(null)
+  const [isUnavailable, setIsUnavailable] = useState(false)
 
   const { run, viewer } = snapshot
   const completed = run.steps.filter(
@@ -174,25 +179,59 @@ function RunPage() {
       (step) => step.status !== "active" && step.status !== "waiting"
     )
 
-  // Step state lives on the server; this only re-reads it while work is in
-  // flight, and gives up rather than polling a stalled run forever.
+  // Step state lives on the server. Keep re-reading it until the persisted run
+  // settles: a multi-document provider call can legitimately take longer than
+  // the usual demo window, and its eventual completion/error must still appear
+  // without requiring a reload. Slow work backs off to reduce read traffic.
   useEffect(() => {
-    if (isSettled) return
+    if (isSettled || isUnavailable) return
 
+    let cancelled = false
+    let timer: number | undefined
     const startedAt = Date.now()
-    const timer = setInterval(() => {
-      if (Date.now() - startedAt > POLL_LIMIT_MS) {
-        clearInterval(timer)
-        return
+
+    const schedule = () => {
+      const interval =
+        Date.now() - startedAt > SLOW_POLL_AFTER_MS
+          ? SLOW_POLL_INTERVAL_MS
+          : POLL_INTERVAL_MS
+      timer = window.setTimeout(poll, interval)
+    }
+
+    const poll = async () => {
+      try {
+        const next = await readRunSnapshot(viewId)
+        if (cancelled) return
+
+        setSnapshot(next)
+        setPollingNotice(
+          Date.now() - startedAt > SLOW_POLL_AFTER_MS
+            ? "This run is taking longer than usual. It is still processing, and this page will keep updating."
+            : null
+        )
+      } catch (error) {
+        if (cancelled) return
+
+        if (error instanceof RunNotFoundError) {
+          setIsUnavailable(true)
+          return
+        }
+
+        setPollingNotice(
+          "Updates were interrupted. This page will keep trying while the server-owned run continues."
+        )
       }
 
-      readRunSnapshot(viewId)
-        .then(setSnapshot)
-        .catch(() => clearInterval(timer))
-    }, POLL_INTERVAL_MS)
+      if (!cancelled) schedule()
+    }
 
-    return () => clearInterval(timer)
-  }, [isSettled, viewId])
+    schedule()
+
+    return () => {
+      cancelled = true
+      if (timer !== undefined) window.clearTimeout(timer)
+    }
+  }, [isSettled, isUnavailable, viewId])
 
   /**
    * Start over is a real deletion, not a navigation: the server drops the run's
@@ -220,6 +259,11 @@ function RunPage() {
   const canReset = viewer.canMutate
 
   useEffect(() => {
+    if (isUnavailable) {
+      publishHeader(null)
+      return
+    }
+
     publishHeader({
       status: headerStatus,
       startOver: canReset
@@ -232,7 +276,16 @@ function RunPage() {
     })
 
     return () => publishHeader(null)
-  }, [publishHeader, headerStatus, canReset, isResetting, handleStartOver])
+  }, [
+    publishHeader,
+    headerStatus,
+    canReset,
+    isResetting,
+    handleStartOver,
+    isUnavailable,
+  ])
+
+  if (isUnavailable) return <RunUnavailable />
 
   return (
     <main className="mx-auto w-full max-w-3xl px-4 py-6 sm:px-6 sm:py-8">
@@ -261,6 +314,12 @@ function RunPage() {
             : "You are viewing a shared run. Anyone holding this URL can view it; approval and reset controls stay with the browser that started the run."}
         </p>
       </div>
+
+      {!isSettled && pollingNotice ? (
+        <p className="mt-3 rounded-md border border-workflow-review/30 bg-workflow-review-soft px-3 py-2 text-[13px] leading-5 text-workflow-review">
+          {pollingNotice}
+        </p>
+      ) : null}
 
       <ol className="mt-6" aria-label="RFQ workflow progress">
         {run.steps.map((step, index) => {
@@ -712,9 +771,7 @@ function StructureEvidencePanel({ evidence }: { evidence: StructureEvidence }) {
             Original model output
             {evidence.repaired ? " (repaired before validation)" : ""}
           </summary>
-          <pre className="max-h-64 overflow-auto border-t px-3 py-2 font-mono text-[11px] leading-5 whitespace-pre-wrap">
-            {evidence.originalOutput}
-          </pre>
+          <CopyableCode value={evidence.originalOutput} />
         </details>
       ) : null}
 
@@ -1203,9 +1260,7 @@ function MatchLineRow({ line }: { line: MatchLine }) {
             Original model output
             {line.repaired ? " (repaired before validation)" : ""}
           </summary>
-          <pre className="max-h-64 overflow-auto border-t px-3 py-2 font-mono text-[11px] leading-5 whitespace-pre-wrap">
-            {line.originalOutput}
-          </pre>
+          <CopyableCode value={line.originalOutput} />
         </details>
       ) : null}
     </li>
@@ -1305,9 +1360,10 @@ function EstimateEvidencePanel({
         <summary className="cursor-pointer px-3 py-2 text-[13px]">
           Canonical quote
         </summary>
-        <pre className="max-h-72 overflow-auto border-t px-3 py-2 font-mono text-[11px] leading-5 whitespace-pre-wrap">
-          {JSON.stringify(quote, null, 2)}
-        </pre>
+        <CopyableCode
+          value={JSON.stringify(quote, null, 2)}
+          codeClassName="max-h-72"
+        />
       </details>
     </div>
   )
@@ -1937,9 +1993,7 @@ function DeliveryPanel({
           <summary className="cursor-pointer px-3 py-2 text-[13px]">
             {selected?.name} payload · {selected?.payloadFormat} · not sent yet
           </summary>
-          <pre className="max-h-72 overflow-auto border-t px-3 py-2 font-mono text-[11px] leading-5 whitespace-pre-wrap">
-            {preview}
-          </pre>
+          <CopyableCode value={preview} codeClassName="max-h-72" />
         </details>
       ) : null}
     </div>
@@ -1995,19 +2049,77 @@ function DeliveredPanel({
         <summary className="cursor-pointer px-3 py-2 text-[13px]">
           Transformed payload
         </summary>
-        <pre className="max-h-72 overflow-auto border-t px-3 py-2 font-mono text-[11px] leading-5 whitespace-pre-wrap">
-          {JSON.stringify(delivered.payload, null, 2)}
-        </pre>
+        <CopyableCode
+          value={JSON.stringify(delivered.payload, null, 2)}
+          codeClassName="max-h-72"
+        />
       </details>
 
       <details className="rounded-md border bg-background">
         <summary className="cursor-pointer px-3 py-2 text-[13px]">
           Adapter receipt
         </summary>
-        <pre className="max-h-64 overflow-auto border-t px-3 py-2 font-mono text-[11px] leading-5 whitespace-pre-wrap">
-          {JSON.stringify(delivered.receipt, null, 2)}
-        </pre>
+        <CopyableCode value={JSON.stringify(delivered.receipt, null, 2)} />
       </details>
+    </div>
+  )
+}
+
+/** Raw and structured evidence stays selectable and can be copied verbatim. */
+function CopyableCode({
+  value,
+  className,
+  codeClassName,
+}: {
+  value: string
+  className?: string
+  codeClassName?: string
+}) {
+  const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "error">(
+    "idle"
+  )
+
+  const copy = async () => {
+    try {
+      if (!navigator.clipboard) throw new Error("Clipboard unavailable")
+      await navigator.clipboard.writeText(value)
+      setCopyStatus("copied")
+    } catch {
+      setCopyStatus("error")
+    }
+
+    window.setTimeout(() => setCopyStatus("idle"), 2_000)
+  }
+
+  const label =
+    copyStatus === "copied"
+      ? "Copied"
+      : copyStatus === "error"
+        ? "Copy failed"
+        : "Copy"
+
+  return (
+    <div className={cn("border-t", className)}>
+      <div className="flex justify-end border-b bg-muted/20 px-1.5 py-1">
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          onClick={() => void copy()}
+          aria-label="Copy evidence to clipboard"
+        >
+          <CopySimpleIcon data-icon="inline-start" />
+          <span aria-live="polite">{label}</span>
+        </Button>
+      </div>
+      <pre
+        className={cn(
+          "max-h-64 overflow-auto px-3 py-2 font-mono text-[11px] leading-5 whitespace-pre-wrap",
+          codeClassName
+        )}
+      >
+        {value}
+      </pre>
     </div>
   )
 }
@@ -2113,9 +2225,10 @@ function SourceEvidenceCard({ source }: { source: EvidenceSource }) {
                 ? ` · ${page.regions.length} image ${page.regions.length === 1 ? "region" : "regions"}`
                 : ""}
             </p>
-            <pre className="mt-1.5 max-h-64 overflow-auto rounded-md border bg-muted/30 p-3 font-mono text-[11px] leading-5 whitespace-pre-wrap">
-              {page.markdown}
-            </pre>
+            <CopyableCode
+              value={page.markdown}
+              className="mt-1.5 rounded-md border bg-muted/30"
+            />
             {page.regions.length > 0 ? (
               <p className="mt-1 text-[11px] text-muted-foreground">
                 Regions:{" "}
@@ -2132,9 +2245,9 @@ function SourceEvidenceCard({ source }: { source: EvidenceSource }) {
             <summary className="cursor-pointer px-3 py-2 text-[13px]">
               Sanitized provider response
             </summary>
-            <pre className="max-h-64 overflow-auto border-t px-3 py-2 font-mono text-[11px] leading-5">
-              {JSON.stringify(source.sanitizedResponse, null, 2)}
-            </pre>
+            <CopyableCode
+              value={JSON.stringify(source.sanitizedResponse, null, 2)}
+            />
           </details>
         ) : null}
       </div>

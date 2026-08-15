@@ -1,6 +1,9 @@
 import { env, exports } from "cloudflare:workers"
 import { describe, expect, it } from "vitest"
 
+import { normaliseText } from "../worker/catalog/retrieval"
+import { settleReview } from "../worker/review"
+
 const base = "https://example.test"
 
 type Run = {
@@ -219,6 +222,51 @@ async function runIdOf(viewId: string): Promise<string> {
     .first<{ id: string }>()
 
   return row!.id
+}
+
+function environmentThatFailsBatches(): Env {
+  const database: D1Database = {
+    prepare: (query) => env.DB.prepare(query),
+    batch: <T = unknown>(
+      statements: D1PreparedStatement[]
+    ): Promise<D1Result<T>[]> => {
+      void statements
+      return Promise.reject(new Error("Forced approval-effects failure"))
+    },
+    exec: (query) => env.DB.exec(query),
+    withSession: (constraintOrBookmark) =>
+      env.DB.withSession(constraintOrBookmark),
+    dump: () => env.DB.dump(),
+  }
+
+  return { ...env, DB: database }
+}
+
+function environmentThatExpiresBeforeBatch(runId: string): Env {
+  let intercepted = false
+  const database: D1Database = {
+    prepare: (query) => env.DB.prepare(query),
+    batch: async <T = unknown>(
+      statements: D1PreparedStatement[]
+    ): Promise<D1Result<T>[]> => {
+      if (!intercepted) {
+        intercepted = true
+        await env.DB.prepare(
+          `UPDATE run_reviews SET expires_at = ? WHERE run_id = ?`
+        )
+          .bind(new Date(Date.now() - 1_000).toISOString(), runId)
+          .run()
+      }
+
+      return env.DB.batch<T>(statements)
+    },
+    exec: (query) => env.DB.exec(query),
+    withSession: (constraintOrBookmark) =>
+      env.DB.withSession(constraintOrBookmark),
+    dump: () => env.DB.dump(),
+  }
+
+  return { ...env, DB: database }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -758,6 +806,64 @@ describe("repeated, premature, and rejected decisions", () => {
     expect((await readRun(run.viewId)).workflowState).toBe("estimate_built")
   })
 
+  it("keeps approval retryable when applying its effects fails", async () => {
+    const { run, ownerCapability, review } = await pausedRun()
+    const runId = await runIdOf(run.viewId)
+
+    await decide(run.viewId, ownerCapability, straightforwardDecisions(review))
+
+    await expect(
+      settleReview(environmentThatFailsBatches(), runId, "approve")
+    ).rejects.toThrow("Forced approval-effects failure")
+
+    expect((await readReview(run.viewId)).state).toBe("pending")
+    expect((await readRun(run.viewId)).workflowState).toBe("awaiting_review")
+
+    const retried = await settle(run.viewId, ownerCapability, "approve")
+    expect(retried.status).toBe(200)
+
+    const repaired = await readRun(run.viewId)
+    expect(["review_approved", "estimate_built"]).toContain(
+      repaired.workflowState
+    )
+    expect(
+      repaired.steps.find((step) => step.key === "review-required")!.status
+    ).toBe("complete")
+    expect((await readReview(run.viewId)).state).toBe("approved")
+  })
+
+  it("repairs an older approved row whose effects never completed", async () => {
+    const { run, ownerCapability, review } = await pausedRun()
+    const runId = await runIdOf(run.viewId)
+
+    await decide(run.viewId, ownerCapability, straightforwardDecisions(review))
+    await env.DB.prepare(
+      `UPDATE run_reviews
+          SET state = 'approved', decided_at = ?, summary = ?
+        WHERE run_id = ?`
+    )
+      .bind(
+        new Date().toISOString(),
+        "Approval committed by an older deployment.",
+        runId
+      )
+      .run()
+
+    const repaired = await settle(run.viewId, ownerCapability, "approve")
+    expect(repaired.status).toBe(200)
+
+    const repairedRun = await readRun(run.viewId)
+    expect(["review_approved", "estimate_built"]).toContain(
+      repairedRun.workflowState
+    )
+    expect(
+      repairedRun.steps.find((step) => step.key === "review-required")!.status
+    ).toBe("complete")
+
+    const repeated = await settle(run.viewId, ownerCapability, "approve")
+    expect(repeated.status).toBe(409)
+  })
+
   it("stops the run where it stands when the owner rejects it", async () => {
     const { run, ownerCapability, review } = await pausedRun()
 
@@ -831,6 +937,23 @@ describe("repeated, premature, and rejected decisions", () => {
 /* -------------------------------------------------------------------------- */
 
 describe("an expired review", () => {
+  it("checks the deadline again inside the transition transaction", async () => {
+    const { run, ownerCapability, review } = await pausedRun()
+    const runId = await runIdOf(run.viewId)
+
+    await decide(run.viewId, ownerCapability, straightforwardDecisions(review))
+
+    const outcome = await settleReview(
+      environmentThatExpiresBeforeBatch(runId),
+      runId,
+      "approve"
+    )
+
+    expect(outcome).toMatchObject({ state: "closed" })
+    expect((await readReview(run.viewId)).state).toBe("expired")
+    expect((await readRun(run.viewId)).workflowState).toBe("review_expired")
+  })
+
   it("refuses a decision made after the window closed", async () => {
     const { run, ownerCapability, review } = await pausedRun()
 
@@ -907,6 +1030,63 @@ describe("an expired review", () => {
 /* -------------------------------------------------------------------------- */
 
 describe("what an approved correction teaches", () => {
+  it("replaces an older SKU for the same workspace phrase", async () => {
+    const workspace = "workspace-replacement-0123456789"
+    const { run, ownerCapability, review } = await pausedRun(workspace)
+    const runId = await runIdOf(run.viewId)
+    const product = review.items.find((item) => item.kind === "product")!
+    const chosen = product.proposal.sku ?? product.alternatives[0].value
+    const normalised = normaliseText(product.sourcePhrase)
+
+    await decide(run.viewId, ownerCapability, straightforwardDecisions(review))
+
+    const scope = await env.DB.prepare(
+      `SELECT r.workspace_hash AS workspace_hash,
+              customer.customer_id AS customer_id
+         FROM runs r
+         JOIN run_customer_resolution customer ON customer.run_id = r.id
+        WHERE r.id = ?`
+    )
+      .bind(runId)
+      .first<{ workspace_hash: string; customer_id: string }>()
+    const older = await env.DB.prepare(
+      `SELECT sku FROM catalog_products
+        WHERE status = 'active' AND sku <> ? ORDER BY sku ASC LIMIT 1`
+    )
+      .bind(chosen)
+      .first<{ sku: string }>()
+
+    await env.DB.prepare(
+      `INSERT INTO workspace_product_aliases
+         (workspace_hash, customer_id, normalised, alias, sku, created_at,
+          expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    )
+      .bind(
+        scope!.workspace_hash,
+        scope!.customer_id,
+        normalised,
+        product.sourcePhrase,
+        older!.sku,
+        new Date().toISOString(),
+        new Date(Date.now() + 60_000).toISOString()
+      )
+      .run()
+
+    expect((await settle(run.viewId, ownerCapability, "approve")).status).toBe(
+      200
+    )
+
+    const learned = await env.DB.prepare(
+      `SELECT sku FROM workspace_product_aliases
+        WHERE workspace_hash = ? AND customer_id = ? AND normalised = ?`
+    )
+      .bind(scope!.workspace_hash, scope!.customer_id, normalised)
+      .all<{ sku: string }>()
+
+    expect(learned.results).toEqual([{ sku: chosen }])
+  })
+
   it("remembers wording inside the owner's workspace and nowhere else", async () => {
     const workspace = "workspace-alpha-0123456789"
     const other = "workspace-beta-9876543210"

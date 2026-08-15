@@ -225,7 +225,7 @@ export async function createRun(
   ]
 
   await env.DB.batch(statements)
-  await storeSources(env, runId, sources, now)
+  await storeSources(env, runId, sources, now, input.kind)
 
   const instance = await env.RFQ_WORKFLOW.create({ params: { runId } })
   await env.DB.prepare(

@@ -12,6 +12,7 @@
  */
 
 import {
+  OcrPageLimitError,
   OcrProviderError,
   type OcrDocument,
   type OcrPage,
@@ -46,7 +47,10 @@ type MistralOcrResponse = {
   usage_info?: { pages_processed?: unknown; doc_size_bytes?: unknown } | null
 }
 
-export function createMistralOcrProvider(env: Env): OcrProvider {
+export function createMistralOcrProvider(
+  env: Env,
+  requestFetch: typeof fetch = fetch
+): OcrProvider {
   const model = env.MISTRAL_OCR_MODEL
 
   return {
@@ -67,12 +71,16 @@ export function createMistralOcrProvider(env: Env): OcrProvider {
         request.mediaType === "application/pdf"
           ? { type: "document_url", document_url: dataUri }
           : { type: "image_url", image_url: dataUri }
+      const pageProbe =
+        request.mediaType === "application/pdf"
+          ? mistralPageProbe(request.maxPages)
+          : undefined
 
       const startedAt = Date.now()
       let response: Response
 
       try {
-        response = await fetch(OCR_ENDPOINT, {
+        response = await requestFetch(OCR_ENDPOINT, {
           method: "POST",
           headers: {
             authorization: `Bearer ${apiKey}`,
@@ -81,7 +89,13 @@ export function createMistralOcrProvider(env: Env): OcrProvider {
           body: JSON.stringify({
             model,
             document,
+            // Mistral page numbers are zero-based. Selecting one page beyond
+            // the remaining allowance is a bounded probe: an over-limit PDF
+            // returns that extra page and can be rejected instead of silently
+            // truncating, while provider work stays capped at allowance + 1.
+            ...(pageProbe ? { pages: pageProbe } : {}),
             include_image_base64: false,
+            include_blocks: false,
           }),
           signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         })
@@ -114,6 +128,10 @@ export function createMistralOcrProvider(env: Env): OcrProvider {
         )
       }
 
+      if (exceedsPageBudget(body, request.maxPages)) {
+        throw new OcrPageLimitError(PROVIDER, request.runPageLimit)
+      }
+
       const pages = readPages(body)
       if (pages.length === 0) {
         throw new OcrProviderError(
@@ -138,6 +156,35 @@ export function createMistralOcrProvider(env: Env): OcrProvider {
       }
     },
   }
+}
+
+/**
+ * Current Mistral OCR accepts a compact string of zero-based pages/ranges. The
+ * last index is deliberately the one-page probe beyond the accepted count.
+ */
+export function mistralPageProbe(maxPages: number): string {
+  const accepted = Math.max(1, Math.trunc(maxPages))
+  return `0-${accepted}`
+}
+
+function exceedsPageBudget(
+  body: MistralOcrResponse,
+  maxPages: number
+): boolean {
+  const pages = Array.isArray(body.pages) ? body.pages : []
+  const processed = readInteger(body.usage_info?.pages_processed)
+
+  if (pages.length > maxPages || (processed !== null && processed > maxPages)) {
+    return true
+  }
+
+  // The probe is the zero-based index equal to maxPages. Treat its presence as
+  // overflow even if a malformed usage object under-reports the page count.
+  return pages.some((entry) => {
+    const page = (entry ?? {}) as MistralOcrPage
+    const index = readInteger(page.index)
+    return index !== null && index >= maxPages
+  })
 }
 
 function readPages(body: MistralOcrResponse): OcrPage[] {

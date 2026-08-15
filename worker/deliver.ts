@@ -62,6 +62,10 @@ export async function deliverRun(
   const existing = await loadDelivery(env, runId)
 
   if (existing) {
+    // Repair a delivery written by an older build that failed before closing
+    // the graph. The updates are idempotent, so an ordinary repeat is cheap.
+    await finalizeStoredDelivery(env, runId, existing)
+
     return {
       state: "already_delivered",
       delivery: {
@@ -82,21 +86,40 @@ export async function deliverRun(
   // see no delivery. The single-row primary key is the authority, so the
   // insert itself decides which request delivered, and the loser reports what
   // was delivered rather than failing.
-  const insert = await env.DB.prepare(
-    `INSERT INTO run_deliveries (
-       run_id, adapter, external_estimate_id, payload, receipt, delivered_at
-     ) VALUES (?, ?, ?, ?, ?, ?)
-     ON CONFLICT (run_id) DO NOTHING`
-  )
-    .bind(
+  // D1 batches are transactions: the delivery row and all three graph/run
+  // transitions commit together, or none of them do. The EXISTS guards make a
+  // concurrent loser a no-op when it proposed a different adapter.
+  const [insert] = await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO run_deliveries (
+         run_id, adapter, external_estimate_id, payload, receipt, delivered_at
+       )
+       SELECT ?, ?, ?, ?, ?, ?
+        WHERE EXISTS (
+          SELECT 1
+            FROM runs r
+            JOIN run_quotes q ON q.run_id = r.id
+           WHERE r.id = ? AND r.status = 'active'
+             AND r.workflow_state = 'estimate_built'
+        )
+       ON CONFLICT (run_id) DO NOTHING`
+    ).bind(
       runId,
       adapter,
       delivery.receipt.externalEstimateId,
       JSON.stringify(delivery.payload),
       JSON.stringify(delivery.receipt),
-      deliveredAt
-    )
-    .run()
+      deliveredAt,
+      runId
+    ),
+    ...deliveryCompletionStatements(env, runId, {
+      adapter,
+      adapterName: delivery.adapter.name,
+      externalEstimateId: delivery.receipt.externalEstimateId,
+      deliveredAt,
+      guardStoredDelivery: true,
+    }),
+  ])
 
   if (insert.meta.changes !== 1) {
     // Another request won the race. The only way the row is gone again is a
@@ -115,42 +138,6 @@ export async function deliverRun(
       : { state: "not_priced" }
   }
 
-  await env.DB.batch([
-    env.DB.prepare(
-      `UPDATE run_steps
-          SET status = 'complete', summary = ?,
-              started_at = COALESCE(started_at, ?),
-              completed_at = ?, updated_at = ?
-        WHERE run_id = ? AND step_key = ?`
-    ).bind(
-      `Transformed the canonical quote for ${delivery.adapter.name} (simulated).`,
-      deliveredAt,
-      deliveredAt,
-      deliveredAt,
-      runId,
-      DELIVER_STEP_KEY
-    ),
-    env.DB.prepare(
-      `UPDATE run_steps
-          SET status = 'complete', summary = ?,
-              started_at = COALESCE(started_at, ?),
-              completed_at = ?, updated_at = ?
-        WHERE run_id = ? AND step_key = ?`
-    ).bind(
-      `Simulated external estimate ${delivery.receipt.externalEstimateId} accepted by ${delivery.adapter.name}.`,
-      deliveredAt,
-      deliveredAt,
-      deliveredAt,
-      runId,
-      DELIVERED_STEP_KEY
-    ),
-    env.DB.prepare(
-      `UPDATE runs SET status = 'complete', workflow_state = 'delivered',
-              updated_at = ?
-        WHERE id = ?`
-    ).bind(deliveredAt, runId),
-  ])
-
   console.log(
     JSON.stringify({
       event: "run_delivered",
@@ -162,6 +149,91 @@ export async function deliverRun(
   )
 
   return { state: "delivered", delivery }
+}
+
+type DeliveryCompletion = {
+  adapter: AdapterId
+  adapterName: string
+  externalEstimateId: string
+  deliveredAt: string
+  guardStoredDelivery: boolean
+}
+
+/** The graph/run half of delivery, reusable to repair legacy partial writes. */
+function deliveryCompletionStatements(
+  env: Env,
+  runId: string,
+  completion: DeliveryCompletion
+): D1PreparedStatement[] {
+  const guard = completion.guardStoredDelivery
+    ? `AND EXISTS (
+         SELECT 1 FROM run_deliveries
+          WHERE run_id = ? AND adapter = ? AND external_estimate_id = ?
+            AND delivered_at = ?
+       )`
+    : ""
+  const guardBindings = completion.guardStoredDelivery
+    ? [
+        runId,
+        completion.adapter,
+        completion.externalEstimateId,
+        completion.deliveredAt,
+      ]
+    : []
+
+  return [
+    env.DB.prepare(
+      `UPDATE run_steps
+          SET status = 'complete', summary = ?,
+              started_at = COALESCE(started_at, ?),
+              completed_at = ?, updated_at = ?
+        WHERE run_id = ? AND step_key = ? ${guard}`
+    ).bind(
+      `Transformed the canonical quote for ${completion.adapterName} (simulated).`,
+      completion.deliveredAt,
+      completion.deliveredAt,
+      completion.deliveredAt,
+      runId,
+      DELIVER_STEP_KEY,
+      ...guardBindings
+    ),
+    env.DB.prepare(
+      `UPDATE run_steps
+          SET status = 'complete', summary = ?,
+              started_at = COALESCE(started_at, ?),
+              completed_at = ?, updated_at = ?
+        WHERE run_id = ? AND step_key = ? ${guard}`
+    ).bind(
+      `Simulated external estimate ${completion.externalEstimateId} accepted by ${completion.adapterName}.`,
+      completion.deliveredAt,
+      completion.deliveredAt,
+      completion.deliveredAt,
+      runId,
+      DELIVERED_STEP_KEY,
+      ...guardBindings
+    ),
+    env.DB.prepare(
+      `UPDATE runs SET status = 'complete', workflow_state = 'delivered',
+              updated_at = ?
+        WHERE id = ? ${guard}`
+    ).bind(completion.deliveredAt, runId, ...guardBindings),
+  ]
+}
+
+async function finalizeStoredDelivery(
+  env: Env,
+  runId: string,
+  delivery: StoredDelivery
+): Promise<void> {
+  await env.DB.batch(
+    deliveryCompletionStatements(env, runId, {
+      adapter: delivery.adapter,
+      adapterName: ADAPTERS[delivery.adapter].name,
+      externalEstimateId: delivery.externalEstimateId,
+      deliveredAt: delivery.deliveredAt,
+      guardStoredDelivery: false,
+    })
+  )
 }
 
 export async function loadDelivery(

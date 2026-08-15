@@ -548,6 +548,7 @@ async function findAlias(
              FROM workspace_product_aliases w
              JOIN catalog_products p ON p.sku = w.sku
             WHERE w.workspace_hash = ? AND w.customer_id = ?
+              AND w.expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
               AND w.normalised IN (${placeholders})`
         )
           .bind(scope.workspaceHash, scope.customerId, ...wanted)

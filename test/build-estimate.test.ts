@@ -29,6 +29,7 @@ import {
   VAT_RATE_BP,
 } from "../worker/pricing"
 import { QUOTE_SCHEMA, type CanonicalQuote } from "../worker/quote"
+import { deliverRun } from "../worker/deliver"
 
 const base = "https://example.test"
 
@@ -1030,6 +1031,52 @@ describe("delivering the quote", () => {
     expect(settled.steps.every((step) => step.status !== "active")).toBe(true)
   })
 
+  it("rolls back the delivery row when graph completion fails", async () => {
+    const { run, ownerCapability } = await pricedRun()
+    const runId = await runIdOf(run.viewId)
+
+    await env.DB.prepare(
+      `CREATE TRIGGER force_delivery_completion_failure
+       BEFORE UPDATE OF workflow_state ON runs
+       WHEN NEW.workflow_state = 'delivered'
+       BEGIN
+         SELECT RAISE(ABORT, 'forced delivery completion failure');
+       END`
+    ).run()
+
+    try {
+      const failed = await deliver(
+        run.viewId,
+        "corebridge-sandbox",
+        ownerCapability
+      )
+
+      expect(failed.status).toBe(500)
+    } finally {
+      await env.DB.exec(
+        `DROP TRIGGER IF EXISTS force_delivery_completion_failure`
+      )
+    }
+
+    const storedAfterFailure = await env.DB.prepare(
+      `SELECT COUNT(*) AS total FROM run_deliveries WHERE run_id = ?`
+    )
+      .bind(runId)
+      .first<{ total: number }>()
+
+    expect(storedAfterFailure!.total).toBe(0)
+    expect((await readRun(run.viewId)).workflowState).toBe("estimate_built")
+
+    const retry = await deliver(
+      run.viewId,
+      "corebridge-sandbox",
+      ownerCapability
+    )
+
+    expect(retry.status).toBe(200)
+    expect((await readRun(run.viewId)).workflowState).toBe("delivered")
+  })
+
   it("shows the delivered payload and identifier to a shared viewer", async () => {
     const { run, ownerCapability } = await pricedRun()
     await deliver(run.viewId, "corebridge-sandbox", ownerCapability)
@@ -1124,6 +1171,85 @@ describe("delivering the quote", () => {
       .first<{ total: number }>()
 
     expect(rows!.total).toBe(1)
+  })
+
+  it("keeps same-adapter delivery timestamps tied to the winning row", async () => {
+    const { run, ownerCapability } = await pricedRun()
+    const runId = await runIdOf(run.viewId)
+
+    const responses = await Promise.all([
+      deliver(run.viewId, "corebridge-sandbox", ownerCapability),
+      deliver(run.viewId, "corebridge-sandbox", ownerCapability),
+    ])
+
+    expect(responses.map((response) => response.status).sort()).toEqual([
+      200, 409,
+    ])
+
+    const times = await env.DB.prepare(
+      `SELECT delivery.delivered_at AS delivered_at,
+              deliver_step.completed_at AS deliver_completed_at,
+              delivered_step.completed_at AS delivered_completed_at,
+              run.updated_at AS run_updated_at
+         FROM run_deliveries delivery
+         JOIN runs run ON run.id = delivery.run_id
+         JOIN run_steps deliver_step
+           ON deliver_step.run_id = delivery.run_id
+          AND deliver_step.step_key = 'deliver'
+         JOIN run_steps delivered_step
+           ON delivered_step.run_id = delivery.run_id
+          AND delivered_step.step_key = 'delivered'
+        WHERE delivery.run_id = ?`
+    )
+      .bind(runId)
+      .first<{
+        delivered_at: string
+        deliver_completed_at: string
+        delivered_completed_at: string
+        run_updated_at: string
+      }>()
+
+    expect(times).toMatchObject({
+      deliver_completed_at: times!.delivered_at,
+      delivered_completed_at: times!.delivered_at,
+      run_updated_at: times!.delivered_at,
+    })
+  })
+
+  it("does not persist a delivery after the run disappears", async () => {
+    const { run } = await pricedRun()
+    const runId = await runIdOf(run.viewId)
+    let intercepted = false
+    const database: D1Database = {
+      prepare: (query) => env.DB.prepare(query),
+      batch: async <T = unknown>(statements: D1PreparedStatement[]) => {
+        if (!intercepted) {
+          intercepted = true
+          await env.DB.prepare(`DELETE FROM runs WHERE id = ?`)
+            .bind(runId)
+            .run()
+        }
+        return env.DB.batch<T>(statements)
+      },
+      exec: (query) => env.DB.exec(query),
+      withSession: (constraintOrBookmark) =>
+        env.DB.withSession(constraintOrBookmark),
+      dump: () => env.DB.dump(),
+    }
+
+    const outcome = await deliverRun(
+      { ...env, DB: database },
+      runId,
+      "corebridge-sandbox"
+    )
+
+    expect(outcome.state).toBe("not_priced")
+    const deliveries = await env.DB.prepare(
+      `SELECT COUNT(*) AS total FROM run_deliveries WHERE run_id = ?`
+    )
+      .bind(runId)
+      .first<{ total: number }>()
+    expect(deliveries!.total).toBe(0)
   })
 
   it("removes the quote and the delivery when the run is reset", async () => {

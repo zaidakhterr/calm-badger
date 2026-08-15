@@ -4,6 +4,7 @@ import { beforeAll, describe, expect, it } from "vitest"
 import { REFERENCE_EVALUATION } from "../worker/evaluation-report"
 import {
   evaluateReferenceWorkflows,
+  sameReference,
   summarize,
   type EvaluationReport,
 } from "./fixtures/reference-evaluation"
@@ -62,6 +63,14 @@ beforeAll(async () => {
 }, 600_000)
 
 describe("the three reference workflows", () => {
+  it("compares source wording without accepting identifier prefixes", () => {
+    expect(sameReference("NX-FLT-1120", "nx-flt-1120")).toBe(true)
+    expect(
+      sameReference("OLD ITEM NR 45-221-B (PUMP SEAL)", "old item nr 45-221-B")
+    ).toBe(true)
+    expect(sameReference("NX-FLT-11200", "NX-FLT-1120")).toBe(false)
+  })
+
   it("reports identity, extraction, retrieval, selection, and review per scenario", () => {
     expect(report.scenarios.map((scenario) => scenario.scenarioId)).toEqual([
       "routine-replenishment",
@@ -147,6 +156,18 @@ describe("the deterministic evaluation", () => {
     expect(report.totals.customerCorrect).toBe(3)
     expect(report.totals.extractionComplete).toBe(3)
     expect(report.totals.quantityCorrect).toBe(report.totals.lines)
+    expect(
+      report.scenarios.every(
+        (scenario) => scenario.extraction.allReferencesCorrect
+      )
+    ).toBe(true)
+    expect(
+      report.scenarios.every(
+        (scenario) =>
+          scenario.extraction.referencesCorrect ===
+          scenario.extraction.referencesInGold
+      )
+    ).toBe(true)
     expect(report.totals.shortlistHits).toBe(report.totals.lines)
     expect(report.totals.topThreeHits).toBe(report.totals.lines)
     expect(report.totals.priced).toBe(3)

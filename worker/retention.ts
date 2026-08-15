@@ -29,27 +29,13 @@
 import { deleteRun } from "./runs"
 import { deleteStoredSources } from "./sources"
 import { pruneRateLimitWindows } from "./rate-limit"
-
-const DAY_MS = 24 * 60 * 60 * 1000
-
-export const CURATED_RETENTION_MS = 7 * DAY_MS
-export const CUSTOM_RETENTION_MS = DAY_MS
-
-/**
- * Workspace aliases are not run artifacts: they are the wording one browser
- * confirmed, and the point of learning them is that a later run benefits, so
- * they deliberately outlive `Start over` and the run they came from. Neither
- * the specification nor the design document fixes their lifetime, so this is a
- * decision rather than a quoted number: thirty days, long enough to be memory
- * and short enough to be bounded.
- */
-export const WORKSPACE_ALIAS_RETENTION_MS = 30 * DAY_MS
+import { CURATED_RETENTION_MS, CUSTOM_RETENTION_MS } from "./retention-policy"
 
 /** How many runs one sweep will purge before deferring the rest. */
 export const SWEEP_RUN_LIMIT = 50
 
 /** Sweep reports older than this are pruned by the sweep itself. */
-const SWEEP_HISTORY_MS = 30 * DAY_MS
+const SWEEP_HISTORY_MS = 30 * CUSTOM_RETENTION_MS
 
 export type SweepReport = {
   id: string
@@ -252,12 +238,12 @@ async function recordPurgeFailure(
 
 /** Bounded workspace memory: aliases older than the window are forgotten. */
 async function pruneWorkspaceAliases(env: Env, now: Date): Promise<number> {
-  const cutoff = new Date(
-    now.getTime() - WORKSPACE_ALIAS_RETENTION_MS
-  ).toISOString()
+  const cutoff = now.toISOString()
 
   const result = await env.DB.prepare(
-    `DELETE FROM workspace_product_aliases WHERE created_at <= ?`
+    `DELETE FROM workspace_product_aliases
+      WHERE expires_at <= ?
+         OR expires_at IS NULL`
   )
     .bind(cutoff)
     .run()

@@ -16,6 +16,8 @@ import { findScenario, type Scenario } from "./scenarios"
 export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 export const MAX_UPLOAD_FILES = 6
 export const MAX_EMAIL_BODY_CHARS = 20_000
+/** Paid OCR pages allowed across all PDF and image sources in one run. */
+export const MAX_OCR_PAGES_PER_RUN = 20
 
 export const SUPPORTED_UPLOAD_TYPES = [
   "application/pdf",
@@ -26,6 +28,7 @@ export const SUPPORTED_UPLOAD_TYPES = [
 export type UploadMediaType = (typeof SUPPORTED_UPLOAD_TYPES)[number]
 
 export type SourceKind = "email_body" | "inline_image" | "attachment"
+export type SourceRetentionClass = "custom" | "curated"
 
 export type PreparedSource = {
   kind: SourceKind
@@ -61,7 +64,7 @@ export function isSupportedUploadType(value: string): value is UploadMediaType {
 }
 
 export function describeUploadLimits(): string {
-  return `Attach PDF, JPEG, or PNG files only, up to ${MAX_UPLOAD_FILES} files and ${MAX_UPLOAD_BYTES / (1024 * 1024)} MB combined.`
+  return `Attach PDF, JPEG, or PNG files only, up to ${MAX_UPLOAD_FILES} files, ${MAX_UPLOAD_BYTES / (1024 * 1024)} MB, and ${MAX_OCR_PAGES_PER_RUN} PDF or image pages combined.`
 }
 
 /**
@@ -211,51 +214,65 @@ export async function storeSources(
   env: Env,
   runId: string,
   sources: PreparedSource[],
-  now: string
+  now: string,
+  retentionClass: SourceRetentionClass
 ): Promise<StoredSource[]> {
   const stored: StoredSource[] = []
+  const writtenKeys: string[] = []
 
-  for (const [position, source] of sources.entries()) {
-    const id = crypto.randomUUID()
-    const storageKey = `runs/${runId}/sources/${id}`
+  try {
+    for (const [position, source] of sources.entries()) {
+      const id = crypto.randomUUID()
+      const storageKey = `runs/${retentionClass}/${runId}/sources/${id}`
 
-    await env.ARTIFACTS.put(storageKey, source.bytes, {
-      httpMetadata: { contentType: source.mediaType },
-    })
+      await env.ARTIFACTS.put(storageKey, source.bytes, {
+        httpMetadata: { contentType: source.mediaType },
+      })
+      writtenKeys.push(storageKey)
 
-    stored.push({
-      id,
-      position,
-      kind: source.kind,
-      label: source.label,
-      mediaType: source.mediaType,
-      byteSize: source.bytes.byteLength,
-      storageKey,
-    })
-  }
+      stored.push({
+        id,
+        position,
+        kind: source.kind,
+        label: source.label,
+        mediaType: source.mediaType,
+        byteSize: source.bytes.byteLength,
+        storageKey,
+      })
+    }
 
-  await env.DB.batch(
-    stored.map((source) =>
-      env.DB.prepare(
-        `INSERT INTO run_sources (
-           id, run_id, position, kind, label, media_type, byte_size,
-           storage_key, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      ).bind(
-        source.id,
-        runId,
-        source.position,
-        source.kind,
-        source.label,
-        source.mediaType,
-        source.byteSize,
-        source.storageKey,
-        now
+    await env.DB.batch(
+      stored.map((source) =>
+        env.DB.prepare(
+          `INSERT INTO run_sources (
+             id, run_id, position, kind, label, media_type, byte_size,
+             storage_key, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).bind(
+          source.id,
+          runId,
+          source.position,
+          source.kind,
+          source.label,
+          source.mediaType,
+          source.byteSize,
+          source.storageKey,
+          now
+        )
       )
     )
-  )
 
-  return stored
+    return stored
+  } catch (error) {
+    // R2 and D1 cannot share a transaction. Compensate synchronously so a
+    // failed later put or failed metadata batch cannot leave undiscoverable
+    // private objects waiting for the bucket lifecycle. Cleanup failures must
+    // not replace the operation that actually made source storage fail.
+    await Promise.allSettled(
+      writtenKeys.map((storageKey) => env.ARTIFACTS.delete(storageKey))
+    )
+    throw error
+  }
 }
 
 export async function loadSources(

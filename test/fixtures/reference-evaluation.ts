@@ -45,6 +45,8 @@ export type LineOutcome = {
   position: number
   /** The request's own wording, as the run extracted it. */
   reference: string | null
+  /** The extracted wording still represents the source line in the gold RFQ. */
+  referenceCorrect: boolean
   quantity: number | null
   goldSku: string
   goldDecision: GoldDecision
@@ -78,6 +80,9 @@ export type ScenarioEvaluation = {
     sources: string[]
     sourcesInGold: string[]
     sourcesCovered: boolean
+    referencesCorrect: number
+    referencesInGold: number
+    allReferencesCorrect: boolean
     complete: boolean
   }
   resolution: {
@@ -470,9 +475,12 @@ async function evaluateScenario(
       (line) => line.position === goldLine.position
     )
 
+    const reference = structuredLine?.reference ?? matched?.reference ?? null
+
     return {
       position: goldLine.position,
-      reference: structuredLine?.reference ?? matched?.reference ?? null,
+      reference,
+      referenceCorrect: sameReference(reference, goldLine.sourceReference),
       quantity: structuredLine?.quantity ?? quoteLine?.quantity ?? null,
       goldSku: goldLine.expectedSku,
       goldDecision: goldLine.decision,
@@ -515,6 +523,15 @@ async function evaluateScenario(
             : ", and the run did not ask")
       )
     }
+
+    if (!line.referenceCorrect) {
+      const expected = gold.matches.find(
+        (goldLine) => goldLine.position === line.position
+      )?.sourceReference
+      notes.push(
+        `line ${line.position} was extracted as ${JSON.stringify(line.reference)} rather than the source wording ${JSON.stringify(expected)}`
+      )
+    }
   }
 
   const observedSources = [...new Set(documents.sources.map(sourceKind))].sort()
@@ -529,6 +546,8 @@ async function evaluateScenario(
   )
   const lineCount = structured.validated?.lineItems.length ?? 0
   const lineCountCorrect = lineCount === gold.extraction.lineItemCount
+  const referencesCorrect = lines.filter((line) => line.referenceCorrect).length
+  const allReferencesCorrect = referencesCorrect === gold.matches.length
 
   if (!lineCountCorrect) {
     notes.push(
@@ -580,7 +599,14 @@ async function evaluateScenario(
       sources: observedSources,
       sourcesInGold: [...gold.extraction.sourcesUsed],
       sourcesCovered,
-      complete: lineCountCorrect && deliveryLocationCarried && sourcesCovered,
+      referencesCorrect,
+      referencesInGold: gold.matches.length,
+      allReferencesCorrect,
+      complete:
+        lineCountCorrect &&
+        deliveryLocationCarried &&
+        sourcesCovered &&
+        allReferencesCorrect,
     },
     resolution,
     retrieval: {
@@ -890,6 +916,28 @@ function mentions(value: string | null, hint: string): boolean {
   if (words.length === 0) return haystack.length > 0
 
   return words.some((word) => haystack.includes(word))
+}
+
+/** Ignore presentation differences; any added wording must start/end on a token. */
+export function sameReference(value: string | null, expected: string): boolean {
+  if (value === null) return false
+
+  const normalize = (text: string) =>
+    text
+      .normalize("NFKC")
+      .toLocaleLowerCase("en")
+      .replace(/[^a-z0-9]+/g, " ")
+      .trim()
+
+  const observed = normalize(value)
+  const source = normalize(expected)
+
+  return (
+    observed === source ||
+    observed.startsWith(`${source} `) ||
+    observed.endsWith(` ${source}`) ||
+    observed.includes(` ${source} `)
+  )
 }
 
 function sumCosts(values: (number | null)[]): number | null {

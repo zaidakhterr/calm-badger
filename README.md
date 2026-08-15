@@ -240,9 +240,11 @@ pnpm data:check     # verify both are current, importable, and additive
 `seed/catalog.sql` is generated, and importing it is additive: every statement
 is an `INSERT OR IGNORE` into a `catalog_` table, so reseeding a running
 deployment adds missing rows and cannot remove or overwrite anything a demo has
-accumulated. Deployment never seeds automatically; seeding is an explicit
-command, and the setup wizard imports the foundation and catalogue seeds
-together as one confirmed step.
+accumulated. After migrations, deployment checks the remote product and customer
+counts. It imports the foundation and catalogue seeds only when both are zero,
+then verifies the deterministic minimum of 250 products and 25 customers. A
+partial or unexpectedly small catalogue stops deployment without importing seed
+data. The setup wizard still imports both seeds together as one confirmed step.
 
 `GET /api/scenarios` serves the three curated requests — Routine replenishment,
 Messy forwarded request (featured and selected by default), and Ambiguous
@@ -258,9 +260,9 @@ material; the deterministic tests only assert that every expectation is
 resolvable in the generated catalogue.
 
 Visitors may also upload their own email text with PDF, JPEG, or PNG
-attachments, subject to a MIME allowlist and a combined 10 MB limit. The
-interface asks for synthetic or non-confidential documents only, because this
-is a public demo.
+attachments, subject to a MIME allowlist, a combined 10 MB limit, and at most
+20 PDF or image pages per run. The interface asks for synthetic or
+non-confidential documents only, because this is a public demo.
 
 ## Security boundaries
 
@@ -292,8 +294,10 @@ Other boundaries:
   friendly message afterwards. The Worker hashes the IP address with a rotating
   secret (`RATE_LIMIT_SALT`) and persists no raw IP. There is no login and no
   CAPTCHA; the point is to protect the provider keys without adding friction.
-- **Uploads** — MIME allowlist plus a combined 10 MB limit, rejected before any
-  processing.
+- **Uploads** — MIME allowlist plus a combined 10 MB transport limit, rejected
+  before any processing. Paid OCR is capped at 20 PDF or image pages per run;
+  an over-limit document ends with an actionable message instead of being
+  processed without a bound or silently truncated.
 - **Secrets** — provider keys exist only as encrypted Cloudflare Worker secrets
   and, locally, in the git-ignored `.dev.vars`. They are never in
   `wrangler.jsonc`, never in the repository, and never sent to GitHub. CI
@@ -315,9 +319,12 @@ A public demo should forget.
   D1 rows that point at them, in bounded batches, resuming an interrupted
   cleanup on the next schedule. A run with a live pending review is deferred
   rather than swept out from under the person deciding it.
-- An **R2 lifecycle rule** on the `runs/` prefix is the safety net beneath all
-  of it, for bytes whose D1 row is already gone. It is an account-side bucket
-  setting rather than Worker configuration, so the setup wizard adds it.
+- **R2 lifecycle rules** are the safety net beneath all of it, for bytes whose
+  D1 row is already gone: `runs/custom/` expires after one day and
+  `runs/curated/` after eight days. The broad eight-day `runs/` rule remains for
+  legacy keys created before retention-class prefixes existed; the earlier
+  custom rule wins where prefixes overlap. These are account-side bucket
+  settings rather than Worker configuration, so the setup wizard adds them.
 
 An expired run returns a plain expired-or-not-found state instead of a broken
 graph. `Start over` genuinely deletes the current run's stored artifacts.
@@ -337,9 +344,9 @@ enumerated bucket. No RFQ or customer or product content, no filenames, no
 prices, no prompts, no model output, no raw errors, no free text of any kind
 can be attached to an event.
 
-Set `ANALYTICS_PROVIDER=none` to disable measurement entirely. A local checkout
-that sets `APP_ENV` in `.dev.vars` keeps its own traffic out of the deployed
-project.
+Set `ANALYTICS_PROVIDER=none` to disable measurement entirely. The committed
+`.dev.vars.example` sets `APP_ENV=development`, which keeps local traffic out of
+the deployed project after it is copied to `.dev.vars`.
 
 ## Local development
 
@@ -352,8 +359,9 @@ pnpm db:seed:local
 pnpm dev:worker
 ```
 
-`.dev.vars.example` lists exactly the four secrets the Worker reads and holds no
-values. `.dev.vars` is git-ignored; keep real keys only there.
+`.dev.vars.example` sets the non-secret local environment mode and lists exactly
+the four secrets the Worker reads with empty values. `.dev.vars` is git-ignored;
+keep real keys only there.
 
 `pnpm dev:worker` builds the React client and starts one local Cloudflare Worker
 with emulated D1, R2, and Workflow bindings, while OCR and language-model calls
@@ -499,9 +507,12 @@ evaluation **first**, and only if both pass does it apply additive D1 migrations
 and deploy through the official Wrangler action. A failing check or a drifted
 evaluation summary stops the deployment before anything external is touched.
 
-Deployment applies migrations. **It never seeds**, so demo data and accumulated
-feedback survive every deploy; seeding is an explicit command, and the seed
-itself is `INSERT OR IGNORE` and cannot overwrite a row even when it is run.
+Deployment applies migrations, then verifies catalogue readiness. A newly
+migrated database with zero products and zero customers receives the idempotent
+foundation and catalogue seeds; a ready database receives no seed writes. If
+either table is partially populated or below the deterministic 250-product,
+25-customer baseline, deployment fails loudly instead of masking the partial
+state. The seed uses `INSERT OR IGNORE` and cannot overwrite an existing row.
 Live provider evaluation is never part of CI: it costs money and would make
 automated deployment non-deterministic.
 

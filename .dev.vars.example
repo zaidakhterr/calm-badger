@@ -1,4 +1,7 @@
 # Copy to .dev.vars for local development. Never commit real values.
+# This override keeps local traffic out of the production analytics project.
+APP_ENV=development
+
 MISTRAL_API_KEY=
 OPENROUTER_API_KEY=
 POSTHOG_API_KEY=

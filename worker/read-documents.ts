@@ -15,12 +15,17 @@
 
 import {
   estimateOcrCostUsd,
+  OcrPageLimitError,
   OcrProviderError,
   selectOcrProvider,
   type OcrDocument,
   type OcrPage,
 } from "./providers/ocr"
-import { loadSources, type StoredSource } from "./sources"
+import {
+  loadSources,
+  MAX_OCR_PAGES_PER_RUN,
+  type StoredSource,
+} from "./sources"
 
 export const READ_DOCUMENTS_STEP_KEY = "read-documents"
 
@@ -103,13 +108,29 @@ async function readAllSources(
   const provider = selectOcrProvider(env)
   const evidence: SourceEvidence[] = []
   const pageRows: { source: StoredSource; page: OcrPage }[] = []
+  let ocrPagesUsed = 0
 
   for (const source of sources) {
     try {
-      const read = await readSource(env, provider, source)
+      const read = await readSource(
+        env,
+        provider,
+        source,
+        MAX_OCR_PAGES_PER_RUN - ocrPagesUsed
+      )
 
       for (const page of read.document.pages) {
         pageRows.push({ source, page })
+      }
+
+      if (read.evidence.reader === "ocr-provider") {
+        // Treat a returned page as consumed even if usage metadata under-reports
+        // it. The provider contract separately rejects either measure above the
+        // allowance, so the aggregate can never silently drift past the cap.
+        ocrPagesUsed += Math.max(
+          read.document.pages.length,
+          read.document.usage.pagesProcessed
+        )
       }
 
       evidence.push(read.evidence)
@@ -185,7 +206,8 @@ async function readAllSources(
 async function readSource(
   env: Env,
   provider: ReturnType<typeof selectOcrProvider>,
-  source: StoredSource
+  source: StoredSource,
+  maxPages: number
 ): Promise<{ document: OcrDocument; evidence: SourceEvidence }> {
   const object = await env.ARTIFACTS.get(source.storageKey)
 
@@ -235,13 +257,26 @@ async function readSource(
     }
   }
 
+  if (maxPages < 1) {
+    throw new OcrPageLimitError(provider.name, MAX_OCR_PAGES_PER_RUN)
+  }
+
   const document = await provider.read({
     sourceId: source.id,
     label: source.label,
     mediaType: source.mediaType as
       "application/pdf" | "image/jpeg" | "image/png",
     bytes,
+    maxPages,
+    runPageLimit: MAX_OCR_PAGES_PER_RUN,
   })
+
+  if (
+    document.pages.length > maxPages ||
+    document.usage.pagesProcessed > maxPages
+  ) {
+    throw new OcrPageLimitError(provider.name, MAX_OCR_PAGES_PER_RUN)
+  }
 
   return {
     document,

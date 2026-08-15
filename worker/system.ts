@@ -194,7 +194,7 @@ export async function loadSystemDetails(env: Env): Promise<SystemDetails> {
         "Curated sample runs: deleted seven days after they start.",
         "Custom uploads and everything derived from them: deleted twenty-four hours after they start.",
         "A run still inside a live review window is left until that window closes, then removed on the next sweep.",
-        "Wording confirmed in this browser's workspace is kept for thirty days; it belongs to the workspace rather than to a run, which is why Start over does not remove it.",
+        "Wording confirmed in this browser's workspace inherits its source run's deadline: seven days for a curated scenario and twenty-four hours for a custom upload. Start over removes the run immediately but leaves that short-lived browser memory until its deadline.",
         "A storage lifecycle rule on the run prefix expires any orphaned object as a safety net beneath the cleanup job.",
         "Durable workflow instances carry only a run identifier and a state name, and are terminated when a run is deleted, so what the platform keeps about a finished instance contains no request content.",
         "Measurement is cookieless, EU-hosted, and server-side: page paths are bucketed, view identifiers and query strings are never sent, and no RFQ, customer, filename, product, price, prompt, or model output is measured.",

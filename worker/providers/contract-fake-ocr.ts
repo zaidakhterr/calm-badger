@@ -17,6 +17,7 @@
  */
 
 import {
+  OcrPageLimitError,
   OcrProviderError,
   type OcrDocument,
   type OcrPage,
@@ -84,6 +85,14 @@ export function createContractFakeOcrProvider(env: Env): OcrProvider {
 function readPdfPages(request: OcrRequest): OcrPage[] {
   const raw = decodeLatin1(request.bytes)
   const lines: string[] = []
+  const pageCount = Math.max(
+    1,
+    Array.from(raw.matchAll(/\/Type\s*\/Page\b/g)).length
+  )
+
+  if (pageCount > request.maxPages) {
+    throw new OcrPageLimitError(PROVIDER, request.runPageLimit)
+  }
 
   for (const match of raw.matchAll(/\(((?:\\.|[^()\\])*)\)\s*Tj/g)) {
     lines.push(
@@ -99,16 +108,14 @@ function readPdfPages(request: OcrRequest): OcrPage[] {
     ? lines.join("\n")
     : `Document ${request.label} contained no readable text layer (${contentFingerprint(request.bytes)}).`
 
-  return [
-    {
-      pageNumber: 1,
-      markdown,
-      width: mediaBox ? Number.parseInt(mediaBox[1], 10) : null,
-      height: mediaBox ? Number.parseInt(mediaBox[2], 10) : null,
-      dpi: 72,
-      regions: [],
-    },
-  ]
+  return Array.from({ length: pageCount }, (_, index) => ({
+    pageNumber: index + 1,
+    markdown,
+    width: mediaBox ? Number.parseInt(mediaBox[1], 10) : null,
+    height: mediaBox ? Number.parseInt(mediaBox[2], 10) : null,
+    dpi: 72,
+    regions: [],
+  }))
 }
 
 function describeImage(request: OcrRequest): OcrPage {

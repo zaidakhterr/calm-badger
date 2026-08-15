@@ -302,10 +302,24 @@ async function createRunResponse(
   env: Env,
   ctx: ExecutionContext
 ): Promise<Response> {
-  const contentType = request.headers.get("content-type") ?? ""
-  const kind = contentType.includes("multipart/form-data")
-    ? "custom"
-    : "curated"
+  const media = readRunRequestMedia(request)
+
+  if (!media) {
+    return Response.json(
+      {
+        error: "Run requests must use application/json or multipart/form-data.",
+      },
+      {
+        status: 415,
+        headers: {
+          ...jsonHeaders,
+          "accept-post": "application/json, multipart/form-data",
+        },
+      }
+    )
+  }
+
+  const { kind } = media
 
   // Counted before the body is read: processing is what costs money, so the
   // limit applies before an upload is buffered and long before a provider is
@@ -346,10 +360,16 @@ async function createRunResponse(
     )
   }
 
-  const input =
-    kind === "custom"
-      ? await readCustomInput(request)
-      : await readCuratedInput(request)
+  // Both supported representations are buffered through a hard ceiling before
+  // either JSON.parse or the platform multipart parser sees a byte. A missing
+  // or dishonest Content-Length therefore cannot turn either path into an
+  // unbounded allocation.
+  const body = await readBoundedBody(request, media.maxBytes)
+  const input = body.ok
+    ? kind === "custom"
+      ? await readCustomInput(body.bytes, media.contentType)
+      : readCuratedInput(request, body.bytes)
+    : rejectedRunBody(kind, body.reason)
 
   if (input.ok) {
     // The anonymous workspace this browser learns in. It is optional, opaque,
@@ -420,11 +440,71 @@ type InputResult =
  * open-ended body from being buffered before that policy can be applied. The
  * headroom above the 10 MB upload limit is for multipart framing.
  */
-const MAX_REQUEST_BYTES = Math.ceil(MAX_UPLOAD_BYTES * 1.1)
+const MAX_MULTIPART_REQUEST_BYTES = Math.ceil(MAX_UPLOAD_BYTES * 1.1)
+const MAX_JSON_REQUEST_BYTES = 16 * 1024
 
-/** The body, or `null` once it exceeds the ceiling. Nothing else is read. */
-async function readBoundedBody(request: Request): Promise<Uint8Array | null> {
-  if (!request.body) return new Uint8Array(0)
+type RunRequestMedia =
+  | {
+      kind: "curated"
+      contentType: string
+      maxBytes: typeof MAX_JSON_REQUEST_BYTES
+    }
+  | {
+      kind: "custom"
+      contentType: string
+      maxBytes: typeof MAX_MULTIPART_REQUEST_BYTES
+    }
+
+/**
+ * HTTP media type tokens are case-insensitive. Parameters are preserved for
+ * the multipart boundary, while the essence is normalized for the platform
+ * parser that receives the already-bounded body.
+ */
+function readRunRequestMedia(request: Request): RunRequestMedia | null {
+  const raw = request.headers.get("content-type")?.trim()
+  if (!raw) return null
+
+  const separator = raw.indexOf(";")
+  const essence = (separator === -1 ? raw : raw.slice(0, separator))
+    .trim()
+    .toLowerCase()
+  const parameters = separator === -1 ? "" : raw.slice(separator)
+
+  if (essence === "application/json") {
+    return {
+      kind: "curated",
+      contentType: `application/json${parameters}`,
+      maxBytes: MAX_JSON_REQUEST_BYTES,
+    }
+  }
+
+  if (essence === "multipart/form-data") {
+    return {
+      kind: "custom",
+      contentType: `multipart/form-data${parameters}`,
+      maxBytes: MAX_MULTIPART_REQUEST_BYTES,
+    }
+  }
+
+  return null
+}
+
+type BoundedBody =
+  | { ok: true; bytes: Uint8Array }
+  | { ok: false; reason: "too_large" | "unreadable" }
+
+/** The body, abandoned as soon as it exceeds the representation's ceiling. */
+async function readBoundedBody(
+  request: Request,
+  maxBytes: number
+): Promise<BoundedBody> {
+  const declaredLength = request.headers.get("content-length")?.trim() ?? ""
+
+  if (/^\d+$/.test(declaredLength) && Number(declaredLength) > maxBytes) {
+    return { ok: false, reason: "too_large" }
+  }
+
+  if (!request.body) return { ok: true, bytes: new Uint8Array(0) }
 
   const reader = request.body.getReader()
   const chunks: Uint8Array[] = []
@@ -438,15 +518,15 @@ async function readBoundedBody(request: Request): Promise<Uint8Array | null> {
 
       total += value.byteLength
 
-      if (total > MAX_REQUEST_BYTES) {
+      if (total > maxBytes) {
         await reader.cancel()
-        return null
+        return { ok: false, reason: "too_large" }
       }
 
       chunks.push(value)
     }
   } catch {
-    return null
+    return { ok: false, reason: "unreadable" }
   }
 
   const body = new Uint8Array(total)
@@ -456,7 +536,32 @@ async function readBoundedBody(request: Request): Promise<Uint8Array | null> {
     offset += chunk.byteLength
   }
 
-  return body
+  return { ok: true, bytes: body }
+}
+
+function rejectedRunBody(
+  kind: RunRequestMedia["kind"],
+  reason: "too_large" | "unreadable"
+): InputResult {
+  if (reason === "unreadable") {
+    return {
+      ok: false,
+      error: "The submitted request could not be read",
+      reasonCode: "unreadable_body",
+    }
+  }
+
+  return kind === "custom"
+    ? {
+        ok: false,
+        error: `The request is larger than the ${MAX_UPLOAD_BYTES / (1024 * 1024)} MB upload limit`,
+        reasonCode: "upload_too_large",
+      }
+    : {
+        ok: false,
+        error: "The JSON run request is too large",
+        reasonCode: "json_too_large",
+      }
 }
 
 /** The rotating hash used as a distinct id before a run exists. */
@@ -482,8 +587,14 @@ function readWorkspaceId(request: Request): string | null {
     : null
 }
 
-async function readCuratedInput(request: Request): Promise<InputResult> {
-  const payload = await readJsonBody(request)
+function readCuratedInput(request: Request, bytes: Uint8Array): InputResult {
+  const payload = (() => {
+    try {
+      return JSON.parse(new TextDecoder().decode(bytes)) as unknown
+    } catch {
+      return null
+    }
+  })()
   const scenarioId = (payload as { scenarioId?: unknown } | null)?.scenarioId
 
   if (!isScenarioId(scenarioId)) {
@@ -504,40 +615,16 @@ async function readCuratedInput(request: Request): Promise<InputResult> {
  * Custom submissions are validated before anything is stored, so an
  * unsupported type or an oversized upload cannot reach a paid provider.
  */
-async function readCustomInput(request: Request): Promise<InputResult> {
-  const declaredLength = Number.parseInt(
-    request.headers.get("content-length") ?? "",
-    10
-  )
-
-  if (Number.isFinite(declaredLength) && declaredLength > MAX_REQUEST_BYTES) {
-    return {
-      ok: false,
-      error: `The request is larger than the ${MAX_UPLOAD_BYTES / (1024 * 1024)} MB upload limit`,
-      reasonCode: "upload_too_large",
-    }
-  }
-
-  // A declared length is a claim, and a chunked request makes no claim at all.
-  // The body is therefore read through a cap rather than buffered whole: an
-  // unbounded or dishonest upload is abandoned at the limit instead of being
-  // held in the isolate's memory.
-  const bytes = await readBoundedBody(request)
-
-  if (!bytes) {
-    return {
-      ok: false,
-      error: `The request is larger than the ${MAX_UPLOAD_BYTES / (1024 * 1024)} MB upload limit`,
-      reasonCode: "upload_too_large",
-    }
-  }
-
+async function readCustomInput(
+  bytes: Uint8Array,
+  contentType: string
+): Promise<InputResult> {
   let form: FormData
 
   try {
     form = await new Request("https://upload.invalid/", {
       method: "POST",
-      headers: { "content-type": request.headers.get("content-type") ?? "" },
+      headers: { "content-type": contentType },
       body: bytes.buffer.slice(
         bytes.byteOffset,
         bytes.byteOffset + bytes.byteLength

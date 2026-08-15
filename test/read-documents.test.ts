@@ -10,8 +10,21 @@
 import { env, exports } from "cloudflare:workers"
 import { describe, expect, it } from "vitest"
 
-import { estimateOcrCostUsd, selectOcrProvider } from "../worker/providers/ocr"
+import {
+  estimateOcrCostUsd,
+  OcrPageLimitError,
+  selectOcrProvider,
+} from "../worker/providers/ocr"
+import {
+  createMistralOcrProvider,
+  mistralPageProbe,
+} from "../worker/providers/mistral-ocr"
 import { readDocuments } from "../worker/read-documents"
+import {
+  MAX_OCR_PAGES_PER_RUN,
+  storeSources,
+  type PreparedSource,
+} from "../worker/sources"
 
 const base = "https://example.test"
 
@@ -106,6 +119,19 @@ function pdfFile(name: string, lines: string[]): File {
   return new File([body], name, { type: "application/pdf" })
 }
 
+/** Small enough to evade a byte cap while declaring many distinct PDF pages. */
+function compactManyPagePdf(name: string, pageCount: number): File {
+  const pages = Array.from(
+    { length: pageCount },
+    (_, index) =>
+      `${index + 1} 0 obj\n<< /Type /Page /MediaBox [0 0 10 10] >>\nendobj`
+  ).join("\n")
+
+  return new File([`%PDF-1.4\n${pages}\ntrailer\n<< >>\n%%EOF\n`], name, {
+    type: "application/pdf",
+  })
+}
+
 function pngFile(name: string): File {
   const bytes = new Uint8Array(64)
   bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0)
@@ -174,7 +200,9 @@ describe("reading the sources of a curated request", () => {
 
     for (const source of sources.results) {
       expect(source.byte_size).toBeGreaterThan(0)
-      expect(source.storage_key).toMatch(/^runs\/[0-9a-f-]+\/sources\//)
+      expect(source.storage_key).toMatch(
+        /^runs\/curated\/[0-9a-f-]+\/sources\//
+      )
       const object = await env.ARTIFACTS.get(source.storage_key)
       expect(object).not.toBeNull()
     }
@@ -351,6 +379,50 @@ describe("submitting a custom request", () => {
     expect(evidence.sources[0].pages[0].markdown).toContain("north depot")
     expect(evidence.sources[1].pages[0].markdown).toContain("PANEL FILTER")
     expect(evidence.sources[2].pages[0].width).toBe(320)
+
+    const keys = await env.DB.prepare(
+      `SELECT storage_key FROM run_sources
+        WHERE run_id = (SELECT id FROM runs WHERE view_id = ?)`
+    )
+      .bind(run.viewId)
+      .all<{ storage_key: string }>()
+    expect(
+      keys.results.every(({ storage_key }) =>
+        storage_key.startsWith("runs/custom/")
+      )
+    ).toBe(true)
+  })
+
+  it("stops compact PDFs whose combined pages exceed the run budget", async () => {
+    const form = new FormData()
+    form.set("emailBody", "Please quote the compact attached list.")
+    const pagesPerFile = Math.floor(MAX_OCR_PAGES_PER_RUN / 2) + 1
+    form.append("files", compactManyPagePdf("many-pages-a.pdf", pagesPerFile))
+    form.append("files", compactManyPagePdf("many-pages-b.pdf", pagesPerFile))
+
+    const { status, body } = await submitCustomRun(form)
+    expect(status).toBe(201)
+
+    const run = body.run!
+    const step = await waitForStep(run.viewId, "read-documents", [
+      "error",
+      "complete",
+    ])
+    expect(step.status).toBe("error")
+    expect(step.summary).toContain(`at most ${MAX_OCR_PAGES_PER_RUN}`)
+    expect(step.summary).toMatch(/remove or split/i)
+
+    const evidence = await readEvidence(run.viewId)
+    expect(evidence.state).toBe("error")
+    expect(evidence.message).toBe(step.summary)
+
+    const pages = await env.DB.prepare(
+      `SELECT COUNT(*) AS total FROM run_source_pages
+        WHERE run_id = (SELECT id FROM runs WHERE view_id = ?)`
+    )
+      .bind(run.viewId)
+      .first<{ total: number }>()
+    expect(pages?.total).toBe(0)
   })
 
   it("rejects an unsupported media type before a run is created", async () => {
@@ -512,6 +584,55 @@ describe("selecting the OCR provider", () => {
     expect(provider.name).toBe("contract-fake")
   })
 
+  it("uses Mistral's zero-based page selector with one bounded probe page", () => {
+    expect(mistralPageProbe(MAX_OCR_PAGES_PER_RUN)).toBe(
+      `0-${MAX_OCR_PAGES_PER_RUN}`
+    )
+  })
+
+  it("rejects Mistral's probe page even when usage under-reports it", async () => {
+    const requestBodies: unknown[] = []
+    const requestFetch = ((_input: RequestInfo | URL, init?: RequestInit) => {
+      if (typeof init?.body !== "string") {
+        throw new Error("Expected a JSON request body")
+      }
+      requestBodies.push(JSON.parse(init.body) as unknown)
+      return Promise.resolve(
+        Response.json({
+          model: "mistral-ocr-test",
+          pages: Array.from(
+            { length: MAX_OCR_PAGES_PER_RUN + 1 },
+            (_, index) => ({ index, markdown: `page ${index + 1}` })
+          ),
+          // Deliberately malformed: the returned probe page must remain the
+          // hard cap even if provider usage metadata claims less work.
+          usage_info: { pages_processed: 1, doc_size_bytes: 4 },
+        })
+      )
+    }) as typeof fetch
+    const provider = createMistralOcrProvider(
+      envWith({ MISTRAL_API_KEY: "test-key" }),
+      requestFetch
+    )
+
+    await expect(
+      provider.read({
+        sourceId: "source-id",
+        label: "many-pages.pdf",
+        mediaType: "application/pdf",
+        bytes: new TextEncoder().encode("%PDF").buffer,
+        maxPages: MAX_OCR_PAGES_PER_RUN,
+        runPageLimit: MAX_OCR_PAGES_PER_RUN,
+      })
+    ).rejects.toBeInstanceOf(OcrPageLimitError)
+    expect(requestBodies).toHaveLength(1)
+    expect(requestBodies[0]).toMatchObject({
+      pages: `0-${MAX_OCR_PAGES_PER_RUN}`,
+      include_image_base64: false,
+      include_blocks: false,
+    })
+  })
+
   it("reports an unknown cost rather than zero when the page price is misconfigured", () => {
     expect(estimateOcrCostUsd(env, 2)).toBeGreaterThan(0)
     expect(
@@ -561,6 +682,88 @@ describe("resetting a run", () => {
     ).first<{ sources: number; pages: number; evidence: number }>()
 
     expect(remaining).toEqual({ sources: 0, pages: 0, evidence: 0 })
+  })
+})
+
+describe("storing source artifacts", () => {
+  const prepared: PreparedSource[] = [
+    {
+      kind: "email_body",
+      label: "Email body",
+      mediaType: "text/plain",
+      bytes: new TextEncoder().encode("Please quote").buffer,
+    },
+    {
+      kind: "inline_image",
+      label: "photo.png",
+      mediaType: "image/png",
+      bytes: new Uint8Array([0x89, 0x50, 0x4e, 0x47]).buffer,
+    },
+  ]
+
+  it("deletes earlier R2 writes when a later write fails", async () => {
+    const failure = new Error("second put failed")
+    const objects = new Set<string>()
+    let puts = 0
+    const artifacts = {
+      put(key: string) {
+        puts += 1
+        if (puts === 2) return Promise.reject(failure)
+        objects.add(key)
+        return Promise.resolve()
+      },
+      delete(key: string) {
+        objects.delete(key)
+        return Promise.resolve()
+      },
+    } as unknown as R2Bucket
+    const database = {
+      batch() {
+        throw new Error("D1 must not be reached")
+      },
+    } as unknown as D1Database
+
+    await expect(
+      storeSources(
+        { ...env, ARTIFACTS: artifacts, DB: database },
+        "run-id",
+        prepared,
+        new Date().toISOString(),
+        "custom"
+      )
+    ).rejects.toBe(failure)
+    expect(objects.size).toBe(0)
+  })
+
+  it("deletes every R2 write and preserves a D1 batch failure", async () => {
+    const failure = new Error("metadata batch failed")
+    const objects = new Set<string>()
+    const artifacts = {
+      put(key: string) {
+        objects.add(key)
+        return Promise.resolve()
+      },
+      delete(key: string) {
+        objects.delete(key)
+        return Promise.resolve()
+      },
+    } as unknown as R2Bucket
+    const statement = { bind: () => statement }
+    const database = {
+      prepare: () => statement,
+      batch: () => Promise.reject(failure),
+    } as unknown as D1Database
+
+    await expect(
+      storeSources(
+        { ...env, ARTIFACTS: artifacts, DB: database },
+        "run-id",
+        prepared,
+        new Date().toISOString(),
+        "curated"
+      )
+    ).rejects.toBe(failure)
+    expect(objects.size).toBe(0)
   })
 })
 

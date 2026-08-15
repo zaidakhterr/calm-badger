@@ -48,16 +48,22 @@ jobs:
       - name: Evaluate reference fixtures
         run: node scripts/run-evaluation.mjs --check
 
-      # Additive only. Deployment applies migrations; it never imports seed
-      # data, so accumulated demo state survives every deploy. Seeding is an
-      # explicit `pnpm db:seed:remote` (or one confirmed wizard step), and the
-      # seed itself is `INSERT OR IGNORE`, so even that cannot overwrite rows.
+      # Additive only. Migrations run before the catalogue-readiness gate below.
       - name: Apply additive D1 migrations
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           command: d1 migrations apply DB --remote
+
+      # A fresh migrated database has zero products and zero customers. Only
+      # that exact state is seeded. A partial or unexpectedly small catalogue
+      # stops deployment, while an established database receives no writes.
+      - name: Verify or initialize D1 catalogue
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: pnpm db:seed:remote:if-empty
 
       - name: Deploy Worker
         uses: cloudflare/wrangler-action@v3

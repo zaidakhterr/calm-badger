@@ -299,20 +299,35 @@ describe("retention windows", () => {
     })
   })
 
-  it("prunes bounded workspace memory and spent rate-limit counters", async () => {
+  it("prunes expired workspace memory and spent rate-limit counters", async () => {
     const now = new Date()
 
     await env.DB.batch([
       env.DB.prepare(
         `INSERT OR REPLACE INTO workspace_product_aliases
-           (workspace_hash, customer_id, normalised, alias, sku, created_at)
-         VALUES ('hash-old', 'CUST-1', 'old wording', 'old wording', 'SKU-1', ?)`
-      ).bind(new Date(now.getTime() - 40 * DAY_MS).toISOString()),
+           (workspace_hash, customer_id, normalised, alias, sku, created_at,
+            expires_at)
+         VALUES ('hash-old', 'CUST-1', 'old wording', 'old wording', 'SKU-1', ?, ?)`
+      ).bind(
+        new Date(now.getTime() - 2 * DAY_MS).toISOString(),
+        new Date(now.getTime() - HOUR_MS).toISOString()
+      ),
       env.DB.prepare(
         `INSERT OR REPLACE INTO workspace_product_aliases
-           (workspace_hash, customer_id, normalised, alias, sku, created_at)
-         VALUES ('hash-new', 'CUST-1', 'new wording', 'new wording', 'SKU-1', ?)`
-      ).bind(new Date(now.getTime() - 2 * DAY_MS).toISOString()),
+           (workspace_hash, customer_id, normalised, alias, sku, created_at,
+            expires_at)
+         VALUES ('hash-new', 'CUST-1', 'new wording', 'new wording', 'SKU-1', ?, ?)`
+      ).bind(
+        new Date(now.getTime() - 2 * DAY_MS).toISOString(),
+        new Date(now.getTime() + 5 * DAY_MS).toISOString()
+      ),
+      env.DB.prepare(
+        `INSERT OR REPLACE INTO workspace_product_aliases
+           (workspace_hash, customer_id, normalised, alias, sku, created_at,
+            expires_at)
+         VALUES ('hash-legacy', 'CUST-1', 'unknown origin', 'unknown origin',
+                 'SKU-1', ?, NULL)`
+      ).bind(now.toISOString()),
       env.DB.prepare(
         `INSERT OR REPLACE INTO rate_limit_windows
            (bucket_hash, window_start, window_end, hits)
@@ -325,15 +340,15 @@ describe("retention windows", () => {
 
     const report = await runRetentionSweep(env, { now })
 
-    expect(report.aliasesPruned).toBe(1)
+    expect(report.aliasesPruned).toBe(2)
     expect(report.rateWindowsPruned).toBeGreaterThanOrEqual(1)
 
     const remaining = await env.DB.prepare(
       `SELECT workspace_hash FROM workspace_product_aliases
-        WHERE workspace_hash IN ('hash-old', 'hash-new')`
+        WHERE workspace_hash IN ('hash-old', 'hash-new', 'hash-legacy')`
     ).all<{ workspace_hash: string }>()
 
-    // Workspace memory outlives the run it came from, but not indefinitely.
+    // Workspace memory may outlive Start over, but never its source deadline.
     expect(remaining.results.map((row) => row.workspace_hash)).toEqual([
       "hash-new",
     ])

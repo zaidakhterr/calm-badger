@@ -426,6 +426,7 @@ put_worker_secret() {
 if [[ "${1:-}" == "--check" ]]; then
   validate_slug "quiet-harbor" || die "Internal slug validation failed."
   [[ -f wrangler.jsonc && -f package.json && -f .dev.vars.example ]] || die "Required project files are missing."
+  grep -qx 'APP_ENV=development' .dev.vars.example || die "The local environment template must disable production analytics."
   [[ -f seed/foundation.sql && -f seed/catalog.sql ]] || die "The seed files the wizard imports are missing."
   printf 'Wizard static self-check passed.\n'
   exit 0
@@ -503,17 +504,26 @@ else
     cf_wrangler r2 bucket create "$BUCKET_NAME" --location weur --update-config --binding ARTIFACTS
   fi
 
-  # The safety net under the daily cleanup job: a lifecycle rule expires any
-  # object left under the run prefix, whichever way its database row was lost.
-  # Eight days is deliberately one day past the longest retention window, so the
-  # application still owns deletion and this only catches what it missed.
+  # Safety nets under application cleanup. New keys carry their retention class,
+  # so custom bytes cannot outlive their 24-hour promise even if the Worker is
+  # terminated between R2 and D1. The broad 8-day legacy rule remains for keys
+  # written before that split (`runs/<run-id>/...`). When rules overlap,
+  # Cloudflare applies the earlier expiration to the custom prefix.
   # Lifecycle rules are bucket settings rather than Worker configuration, which
   # is why they are provisioned here and not in wrangler.jsonc.
-  if cf_wrangler r2 bucket lifecycle list "$BUCKET_NAME" 2>/dev/null | grep -q "expire-run-artifacts"; then
-    note "Keeping the existing R2 lifecycle rule expire-run-artifacts."
-  else
-    cf_wrangler r2 bucket lifecycle add "$BUCKET_NAME" expire-run-artifacts "runs/" --expire-days 8 --force
-  fi
+  LIFECYCLE_RULES=$(cf_wrangler r2 bucket lifecycle list "$BUCKET_NAME" 2>/dev/null || true)
+  ensure_lifecycle_rule() {
+    local rule_id="$1" prefix="$2" days="$3"
+    if printf '%s' "$LIFECYCLE_RULES" | grep -q "$rule_id"; then
+      note "Keeping the existing R2 lifecycle rule $rule_id."
+    else
+      cf_wrangler r2 bucket lifecycle add "$BUCKET_NAME" "$rule_id" "$prefix" --expire-days "$days" --force
+    fi
+  }
+
+  ensure_lifecycle_rule expire-custom-run-artifacts "runs/custom/" 1
+  ensure_lifecycle_rule expire-curated-run-artifacts "runs/curated/" 8
+  ensure_lifecycle_rule expire-run-artifacts "runs/" 8
 fi
 configure_wrangler "$INFRA_SLUG" "$D1_DATABASE_ID"
 write_to_file "$SETUP_STATE_FILE" D1_DATABASE_ID "$D1_DATABASE_ID"
@@ -581,6 +591,7 @@ capture_secret "$DEV_VARS_FILE" POSTHOG_API_KEY "Paste the PostHog project API k
 POSTHOG_API_KEY=$(saved_value "$DEV_VARS_FILE" POSTHOG_API_KEY)
 
 stage "Local and encrypted Worker secrets" 3
+write_to_file "$DEV_VARS_FILE" APP_ENV "development"
 RATE_LIMIT_SALT=$(saved_value "$DEV_VARS_FILE" RATE_LIMIT_SALT || true)
 if [[ -z "$RATE_LIMIT_SALT" ]]; then
   RATE_LIMIT_SALT=$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')

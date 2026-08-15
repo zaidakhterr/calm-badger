@@ -173,6 +173,95 @@ describe("processing limits", () => {
     expect(reset.status).toBe(200)
   })
 
+  it("requires a supported run media type and matches it case-insensitively", async () => {
+    const upperJson = await exports.default.fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: {
+        "content-type": "APPLICATION/JSON; CHARSET=UTF-8",
+        "cf-connecting-ip": "203.0.113.70",
+      },
+      body: JSON.stringify({ scenarioId: "routine-replenishment" }),
+    })
+    expect(upperJson.status).toBe(201)
+
+    const form = new FormData()
+    form.set("emailBody", "Please quote the attached request.")
+    const encodedForm = new Request(`${base}/api/runs`, {
+      method: "POST",
+      body: form,
+    })
+    const multipartType = encodedForm.headers.get("content-type")!
+    const upperMultipart = await exports.default.fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: {
+        "content-type": multipartType.replace(
+          "multipart/form-data",
+          "MULTIPART/FORM-DATA"
+        ),
+        "cf-connecting-ip": "203.0.113.71",
+      },
+      body: await encodedForm.arrayBuffer(),
+    })
+    expect(upperMultipart.status).toBe(201)
+
+    for (const contentType of [
+      null,
+      "text/plain",
+      "application/json-patch+json",
+    ]) {
+      const headers = new Headers({
+        "cf-connecting-ip": "203.0.113.72",
+      })
+      if (contentType) headers.set("content-type", contentType)
+
+      const response = await exports.default.fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers,
+        body: new TextEncoder().encode(
+          JSON.stringify({ scenarioId: "routine-replenishment" })
+        ),
+      })
+      expect(response.status).toBe(415)
+      expect(response.headers.get("accept-post")).toBe(
+        "application/json, multipart/form-data"
+      )
+    }
+  })
+
+  it("abandons an oversized JSON stream before parsing or storage", async () => {
+    const before = await env.DB.prepare(
+      `SELECT COUNT(*) AS runs FROM runs`
+    ).first<{ runs: number }>()
+    const oversized = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (let chunk = 0; chunk < 32; chunk++) {
+          controller.enqueue(new Uint8Array(1024).fill(0x20))
+        }
+        controller.close()
+      },
+    })
+
+    const response = await exports.default.fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "cf-connecting-ip": "203.0.113.73",
+      },
+      body: oversized,
+      // @ts-expect-error a streamed request body needs duplex in this runtime
+      duplex: "half",
+    })
+
+    expect(response.status).toBe(400)
+    await expect(response.json<{ error: string }>()).resolves.toEqual({
+      error: "The JSON run request is too large",
+    })
+    const after = await env.DB.prepare(
+      `SELECT COUNT(*) AS runs FROM runs`
+    ).first<{ runs: number }>()
+    expect(after?.runs).toBe(before?.runs)
+  })
+
   it("refuses an oversized upload before it is buffered or stored", async () => {
     const before = await env.DB.prepare(
       `SELECT (SELECT COUNT(*) FROM runs) AS runs,

@@ -19,6 +19,10 @@ export type OcrRequest = {
   label: string
   mediaType: "application/pdf" | "image/jpeg" | "image/png"
   bytes: ArrayBuffer
+  /** Pages this source may consume from the run's remaining OCR allowance. */
+  maxPages: number
+  /** Public total, carried so every provider can explain the same boundary. */
+  runPageLimit: number
 }
 
 /** An image region located on a page, without the image bytes themselves. */
@@ -73,6 +77,20 @@ export class OcrProviderError extends Error {
     this.name = "OcrProviderError"
     this.provider = provider
     this.status = status
+  }
+}
+
+/** A safe, actionable terminal result for a document over the public budget. */
+export class OcrPageLimitError extends OcrProviderError {
+  readonly limit: number
+
+  constructor(provider: string, limit: number) {
+    super(
+      provider,
+      `This public demo can read at most ${limit} PDF or image pages in one run. Remove or split the attachments and start a new run.`
+    )
+    this.name = "OcrPageLimitError"
+    this.limit = limit
   }
 }
 
