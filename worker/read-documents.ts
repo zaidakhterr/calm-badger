@@ -13,6 +13,8 @@
  * by the same outer boundary, so the step can never be abandoned mid-flight.
  */
 
+import { z } from "zod"
+
 import { readConfig } from "./env"
 import {
   estimateOcrCostUsd,
@@ -32,23 +34,65 @@ import {
 export const READ_DOCUMENTS_STEP_KEY = "read-documents"
 
 /** The one kind of evidence this step attaches. */
-const DOCUMENTS_EVIDENCE_KIND = "documents"
+export const DOCUMENTS_EVIDENCE_KIND = "documents"
 
-type SourceEvidence = {
-  sourceId: string
-  label: string
-  kind: string
-  mediaType: string
-  byteSize: number
+/**
+ * What this step read from one source.
+ *
+ * Identity is required: without a `sourceId` the entry cannot be attached to a
+ * source at all, and the reader, the counts, and the labels are what the entry
+ * is. The measurements around them — how long the provider took, what it cost,
+ * what it answered — default rather than fail, so evidence written by an
+ * earlier build still renders instead of blanking the whole step. An absent
+ * measurement reads as `null`, never as zero: "not recorded" and "nothing" are
+ * different facts, exactly as they are for the estimated cost.
+ */
+const SOURCE_EVIDENCE_SCHEMA = z.object({
+  sourceId: z.string(),
+  label: z.string(),
+  kind: z.string(),
+  mediaType: z.string(),
+  byteSize: z.number(),
   /** How the text was obtained: the email body needs no provider. */
-  reader: "email-body" | "ocr-provider"
-  pageCount: number
-  pagesProcessed: number
-  latencyMs: number
+  reader: z.enum(["email-body", "ocr-provider"]),
+  pageCount: z.number(),
+  pagesProcessed: z.number(),
+  latencyMs: z.number().nullable().catch(null),
   /** `null` when the configured page price is missing or malformed. */
-  estimatedCostUsd: number | null
-  sanitizedResponse: unknown
-}
+  estimatedCostUsd: z.number().nullable().catch(null),
+  /** Provider evidence as the provider seam sanitized it, or nothing. */
+  sanitizedResponse: z.unknown().default(null),
+})
+
+/** The run-wide arithmetic over the sources, absent or unreadable as `null`. */
+const DOCUMENTS_TOTALS_SCHEMA = z.object({
+  sourceCount: z.number(),
+  pageCount: z.number(),
+  pagesProcessed: z.number(),
+  providerLatencyMs: z.number(),
+  /** `null` when one source was uncosted; never a silently understated total. */
+  estimatedCostUsd: z.number().nullable(),
+  elapsedMs: z.number(),
+})
+
+/**
+ * The evidence this step writes, and therefore owns. The projection in
+ * `evidence.ts` parses stored rows with this schema rather than guessing at
+ * their shape, so writer and reader cannot drift apart without the build
+ * saying so.
+ */
+export const DOCUMENTS_EVIDENCE_SCHEMA = z.object({
+  provider: z.string(),
+  model: z.string(),
+  state: z.enum(["complete", "error"]),
+  message: z.string().nullable(),
+  sources: z.array(SOURCE_EVIDENCE_SCHEMA),
+  totals: DOCUMENTS_TOTALS_SCHEMA.nullable().catch(null),
+})
+
+export type DocumentsEvidence = z.infer<typeof DOCUMENTS_EVIDENCE_SCHEMA>
+
+type SourceEvidence = DocumentsEvidence["sources"][number]
 
 export type ReadDocumentsOutcome =
   | {
@@ -167,7 +211,7 @@ async function readAllSources(
         message,
         sources: evidence,
         totals: totalsOf(evidence, Date.now() - startedAt),
-      })
+      } satisfies DocumentsEvidence)
 
       await recorder.fail(message)
 
@@ -185,7 +229,7 @@ async function readAllSources(
     message: null,
     sources: evidence,
     totals: totalsOf(evidence, elapsedMs),
-  })
+  } satisfies DocumentsEvidence)
 
   await recorder.complete(
     `Read ${sources.length} ${sources.length === 1 ? "source" : "sources"} ` +
@@ -318,7 +362,7 @@ function totalsOf(sources: SourceEvidence[], elapsedMs: number) {
       0
     ),
     providerLatencyMs: sources.reduce(
-      (total, source) => total + source.latencyMs,
+      (total, source) => total + (source.latencyMs ?? 0),
       0
     ),
     // One uncosted source makes the whole total unknown rather than
