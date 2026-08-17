@@ -458,6 +458,91 @@ describe("completing a step", () => {
   })
 })
 
+describe("handing the completion statements to a caller's own batch", () => {
+  const DELIVERED_AT = "2026-03-04T05:06:07.000Z"
+
+  it("writes what `complete` writes when the caller sends the batch", async () => {
+    const runId = await seedRun()
+
+    await env.DB.batch(
+      createRunStepRecorder(env, runId, "delivered").completeStatements(
+        "Simulated external estimate ERP-SIM-1 accepted."
+      )
+    )
+
+    const step = await readStep(runId, "delivered")
+    expect(step.status).toBe("complete")
+    expect(step.summary).toBe("Simulated external estimate ERP-SIM-1 accepted.")
+    expect(step.completed_at).not.toBeNull()
+
+    const run = await readRun(runId)
+    expect(run.status).toBe("complete")
+    expect(run.workflow_state).toBe("delivered")
+  })
+
+  it("pins every timestamp to the moment the caller supplies", async () => {
+    const runId = await seedRun()
+
+    await env.DB.batch([
+      ...createRunStepRecorder(env, runId, "deliver").completeStatements(
+        "Canonical quote transformed for simulated webhook delivery.",
+        { at: DELIVERED_AT }
+      ),
+      ...createRunStepRecorder(env, runId, "delivered").completeStatements(
+        "Simulated external estimate ERP-SIM-1 accepted.",
+        { at: DELIVERED_AT }
+      ),
+    ])
+
+    // One moment across both steps and the run, which is what lets delivery
+    // tie its graph to the stored `delivered_at`.
+    for (const stepKey of ["deliver", "delivered"] as RunStepKey[]) {
+      const step = await readStep(runId, stepKey)
+      expect(step.started_at).toBe(DELIVERED_AT)
+      expect(step.completed_at).toBe(DELIVERED_AT)
+      expect(step.updated_at).toBe(DELIVERED_AT)
+    }
+
+    expect((await readRun(runId)).updated_at).toBe(DELIVERED_AT)
+  })
+
+  it("emits no run statement where the row writes nothing to the run", async () => {
+    const runId = await seedRun()
+    const recorder = createRunStepRecorder(env, runId, "deliver")
+
+    // `deliver` is the one row whose state belongs to a sibling step, so it is
+    // a single statement; `delivered` carries the step and the run.
+    expect(recorder.completeStatements("Transformed.")).toHaveLength(1)
+    expect(
+      createRunStepRecorder(env, runId, "delivered").completeStatements(
+        "Accepted."
+      )
+    ).toHaveLength(2)
+  })
+
+  it("refuses a bad summary or an undefined outcome before composing", async () => {
+    const runId = await seedRun()
+
+    expect(() =>
+      createRunStepRecorder(env, runId, "read-documents").completeStatements(
+        null
+      )
+    ).toThrow(/must supply a summary/)
+
+    expect(() =>
+      createRunStepRecorder(env, runId, "rfq-received").completeStatements(
+        "Overwritten."
+      )
+    ).toThrow(/keeps the summary it was created with/)
+
+    expect(() =>
+      createRunStepRecorder(env, runId, "review-required").completeStatements(
+        "Done."
+      )
+    ).toThrow(/No workflow state is defined/)
+  })
+})
+
 describe("holding a step", () => {
   it("says why pricing waits without leaving the waiting state", async () => {
     const runId = await seedRun()

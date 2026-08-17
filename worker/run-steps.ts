@@ -43,6 +43,14 @@ export type RunStepKey =
 export type CompleteVariant =
   "resolved" | "unresolved" | "approved" | "rejected" | "expired"
 
+/**
+ * `at` pins every timestamp the completion writes, for a caller that already
+ * has the moment the work happened and must bind the same one across several
+ * statements (delivery ties its two steps and the run to `delivered_at`).
+ * Omitted, the recorder takes the current time, as every other method does.
+ */
+export type CompleteOptions = { variant?: CompleteVariant; at?: string }
+
 /** The shape of one `complete` row: what it writes to the step and the run. */
 type CompleteRow = {
   /** The status the step lands in. `rejected` and `expired` are endings, not successes. */
@@ -245,10 +253,17 @@ export type RunStepRecorder = {
    * The step ends. `summary` is `null` only for steps whose row preserves the
    * existing sentence (`rfq-received`), and required everywhere else.
    */
-  complete(
+  complete(summary: string | null, options?: CompleteOptions): Promise<void>
+  /**
+   * The statements `complete` would issue, unsent. For the one caller that
+   * cannot afford a batch of its own: delivery commits its `run_deliveries`
+   * insert and both step completions together or not at all, in a request
+   * handler that is never retried.
+   */
+  completeStatements(
     summary: string | null,
-    options?: { variant?: CompleteVariant }
-  ): Promise<void>
+    options?: CompleteOptions
+  ): D1PreparedStatement[]
   /** The step errored, and so did the run. No opt-out. */
   fail(message: string): Promise<void>
   /** Upserts this step's evidence of `kind`, stringifying the payload. */
@@ -318,6 +333,57 @@ export function createRunStepRecorder(
         WHERE run_id = ? AND step_key = ? AND status = 'waiting'`
     ).bind(summary, now, runId, targetStepKey)
 
+  const completeStatements = (
+    summary: string | null,
+    options?: CompleteOptions
+  ): D1PreparedStatement[] => {
+    const variant = options?.variant ?? DEFAULT_VARIANT
+    const row = COMPLETE_ROWS[stepKey]?.[variant]
+    if (!row) throw unknownOutcome(stepKey, `complete:${variant}`)
+
+    if (row.setSummary && summary === null) {
+      throw new Error(
+        `The ${stepKey} step must supply a summary when it completes`
+      )
+    }
+    if (!row.setSummary && summary !== null) {
+      throw new Error(
+        `The ${stepKey} step keeps the summary it was created with`
+      )
+    }
+
+    const now = options?.at ?? new Date().toISOString()
+
+    const assignments = [
+      `status = '${row.stepStatus}'`,
+      row.setSummary ? "summary = ?" : null,
+      row.startedAt === "coalesce"
+        ? "started_at = COALESCE(started_at, ?)"
+        : null,
+      row.completedAt === "coalesce"
+        ? "completed_at = COALESCE(completed_at, ?)"
+        : "completed_at = ?",
+      "updated_at = ?",
+    ].filter((assignment) => assignment !== null)
+
+    const bindings = [
+      ...(row.setSummary ? [summary as string] : []),
+      ...(row.startedAt === "coalesce" ? [now] : []),
+      now,
+      now,
+      runId,
+      stepKey,
+    ]
+
+    return [
+      env.DB.prepare(
+        `UPDATE run_steps SET ${assignments.join(", ")}
+            WHERE run_id = ? AND step_key = ?`
+      ).bind(...bindings),
+      runsUpdate(now, row.workflowState, row.runStatus),
+    ].filter((statement) => statement !== null)
+  }
+
   return {
     stepKey,
 
@@ -354,54 +420,12 @@ export function createRunStepRecorder(
 
     async complete(
       summary: string | null,
-      options?: { variant?: CompleteVariant }
+      options?: CompleteOptions
     ): Promise<void> {
-      const variant = options?.variant ?? DEFAULT_VARIANT
-      const row = COMPLETE_ROWS[stepKey]?.[variant]
-      if (!row) throw unknownOutcome(stepKey, `complete:${variant}`)
-
-      if (row.setSummary && summary === null) {
-        throw new Error(
-          `The ${stepKey} step must supply a summary when it completes`
-        )
-      }
-      if (!row.setSummary && summary !== null) {
-        throw new Error(
-          `The ${stepKey} step keeps the summary it was created with`
-        )
-      }
-
-      const now = new Date().toISOString()
-
-      const assignments = [
-        `status = '${row.stepStatus}'`,
-        row.setSummary ? "summary = ?" : null,
-        row.startedAt === "coalesce"
-          ? "started_at = COALESCE(started_at, ?)"
-          : null,
-        row.completedAt === "coalesce"
-          ? "completed_at = COALESCE(completed_at, ?)"
-          : "completed_at = ?",
-        "updated_at = ?",
-      ].filter((assignment) => assignment !== null)
-
-      const bindings = [
-        ...(row.setSummary ? [summary as string] : []),
-        ...(row.startedAt === "coalesce" ? [now] : []),
-        now,
-        now,
-        runId,
-        stepKey,
-      ]
-
-      await write([
-        env.DB.prepare(
-          `UPDATE run_steps SET ${assignments.join(", ")}
-            WHERE run_id = ? AND step_key = ?`
-        ).bind(...bindings),
-        runsUpdate(now, row.workflowState, row.runStatus),
-      ])
+      await write(completeStatements(summary, options))
     },
+
+    completeStatements,
 
     async fail(message: string): Promise<void> {
       const now = new Date().toISOString()
