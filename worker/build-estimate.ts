@@ -16,8 +16,11 @@
 
 import { formatAmount, ROUNDING_NOTE, VAT_RATE_BP } from "./pricing"
 import { assembleQuote, type CanonicalQuote } from "./quote"
+import { createRunStepRecorder, type RunStepRecorder } from "./run-steps"
 
 export const BUILD_ESTIMATE_STEP_KEY = "build-estimate"
+
+const ESTIMATE_EVIDENCE_KIND = "estimate"
 
 export type BuildEstimateOutcome =
   | {
@@ -45,8 +48,10 @@ export async function buildEstimate(
   runId: string,
   options: BuildEstimateOptions = { reviewed: false }
 ): Promise<BuildEstimateOutcome> {
+  const step = createRunStepRecorder(env, runId, BUILD_ESTIMATE_STEP_KEY)
+
   try {
-    return await build(env, runId, options)
+    return await build(env, runId, options, step)
   } catch (error) {
     const message = "The estimate could not be built."
 
@@ -61,7 +66,7 @@ export async function buildEstimate(
     )
 
     try {
-      await failStep(env, runId, message)
+      await step.fail(message)
     } catch {
       // Nowhere left to record the failure; returning still stops the workflow.
     }
@@ -73,7 +78,8 @@ export async function buildEstimate(
 async function build(
   env: Env,
   runId: string,
-  options: BuildEstimateOptions
+  options: BuildEstimateOptions,
+  step: RunStepRecorder
 ): Promise<BuildEstimateOutcome> {
   const startedAt = Date.now()
   const assembly = await assembleQuote(env, runId)
@@ -84,7 +90,7 @@ async function build(
       // would be waiting for nobody, so this ends as a terminal state.
       const message = `The approved corrections still leave this run unpriceable. ${assembly.reason}`
 
-      await failStep(env, runId, message)
+      await step.fail(message)
 
       console.error(
         JSON.stringify({
@@ -97,7 +103,12 @@ async function build(
       return { state: "error", message }
     }
 
-    await holdStep(env, runId, assembly.reason)
+    // The run needs a human, so the node keeps its `waiting` state and simply
+    // says why. The run itself stays active with no active step, which is the
+    // same posture every earlier step uses when it stops short.
+    await step.hold(
+      `Waiting for owner review before pricing. ${assembly.reason}`
+    )
 
     console.log(
       JSON.stringify({
@@ -114,7 +125,7 @@ async function build(
   const elapsedMs = Date.now() - startedAt
 
   await persistQuote(env, runId, quote)
-  await persistEvidence(env, runId, {
+  await step.attachEvidence(ESTIMATE_EVIDENCE_KIND, {
     state: "complete",
     message: null,
     quote,
@@ -129,7 +140,17 @@ async function build(
     },
   })
 
-  await completeStep(env, runId, quote)
+  const lineCount = quote.totals.lineCount
+
+  await step.complete(
+    `Priced ${lineCount} ${lineCount === 1 ? "line" : "lines"} to €${formatAmount(quote.totals.totalCents)} including VAT.`
+  )
+  // Delivery is the next node to wake up; give it a sentence that says what it
+  // is waiting for now that a quote exists.
+  await step.setWaitingSummary(
+    "deliver",
+    "Ready to send through the simulated Generic ERP Webhook."
+  )
 
   console.log(
     JSON.stringify({
@@ -225,115 +246,6 @@ async function persistQuote(
       quote.totals.totalCents,
       JSON.stringify(quote),
       new Date().toISOString()
-    )
-    .run()
-}
-
-/**
- * The run needs a human, so the node keeps its `waiting` state and simply says
- * why. The run itself stays active with no active step, which is the same
- * posture every earlier step uses when it stops short.
- */
-async function holdStep(
-  env: Env,
-  runId: string,
-  reason: string
-): Promise<void> {
-  const now = new Date().toISOString()
-
-  await env.DB.batch([
-    env.DB.prepare(
-      `UPDATE run_steps SET summary = ?, updated_at = ?
-        WHERE run_id = ? AND step_key = ? AND status = 'waiting'`
-    ).bind(
-      `Waiting for owner review before pricing. ${reason}`,
-      now,
-      runId,
-      BUILD_ESTIMATE_STEP_KEY
-    ),
-    env.DB.prepare(
-      `UPDATE runs SET workflow_state = 'awaiting_review', updated_at = ?
-        WHERE id = ?`
-    ).bind(now, runId),
-  ])
-}
-
-async function completeStep(
-  env: Env,
-  runId: string,
-  quote: CanonicalQuote
-): Promise<void> {
-  const now = new Date().toISOString()
-  const lineCount = quote.totals.lineCount
-
-  await env.DB.batch([
-    env.DB.prepare(
-      `UPDATE run_steps
-          SET status = 'complete', summary = ?,
-              started_at = COALESCE(started_at, ?),
-              completed_at = ?, updated_at = ?
-        WHERE run_id = ? AND step_key = ?`
-    ).bind(
-      `Priced ${lineCount} ${lineCount === 1 ? "line" : "lines"} to €${formatAmount(quote.totals.totalCents)} including VAT.`,
-      now,
-      now,
-      now,
-      runId,
-      BUILD_ESTIMATE_STEP_KEY
-    ),
-    env.DB.prepare(
-      `UPDATE run_steps
-          SET summary = 'Choose a simulated external system to deliver the quote to.',
-              updated_at = ?
-        WHERE run_id = ? AND step_key = 'deliver' AND status = 'waiting'`
-    ).bind(now, runId),
-    env.DB.prepare(
-      `UPDATE runs SET workflow_state = 'estimate_built', updated_at = ?
-        WHERE id = ?`
-    ).bind(now, runId),
-  ])
-}
-
-async function failStep(
-  env: Env,
-  runId: string,
-  message: string
-): Promise<void> {
-  const now = new Date().toISOString()
-
-  await env.DB.batch([
-    env.DB.prepare(
-      `UPDATE run_steps
-          SET status = 'error', summary = ?, completed_at = ?, updated_at = ?
-        WHERE run_id = ? AND step_key = ?`
-    ).bind(message, now, now, runId, BUILD_ESTIMATE_STEP_KEY),
-    env.DB.prepare(
-      `UPDATE runs SET status = 'error', workflow_state = 'failed', updated_at = ?
-        WHERE id = ?`
-    ).bind(now, runId),
-  ])
-}
-
-async function persistEvidence(
-  env: Env,
-  runId: string,
-  payload: unknown
-): Promise<void> {
-  const now = new Date().toISOString()
-
-  await env.DB.prepare(
-    `INSERT INTO run_step_evidence (id, run_id, step_key, kind, payload, created_at)
-     VALUES (?, ?, ?, 'estimate', ?, ?)
-     ON CONFLICT (run_id, step_key, kind) DO UPDATE SET
-       payload = excluded.payload,
-       created_at = excluded.created_at`
-  )
-    .bind(
-      crypto.randomUUID(),
-      runId,
-      BUILD_ESTIMATE_STEP_KEY,
-      JSON.stringify(payload),
-      now
     )
     .run()
 }
