@@ -28,10 +28,15 @@ export const Route = createFileRoute("/catalogue/$section")({
   errorComponent: CatalogueError,
 })
 
-const SECTION_COPY: Record<
-  CatalogueSection,
-  { title: string; shortTitle: string; description: string; searchHint: string }
-> = {
+/** What each table is called and how its search box describes itself. */
+type SectionCopy = {
+  title: string
+  shortTitle: string
+  description: string
+  searchHint: string
+}
+
+const SECTION_COPY = {
   products: {
     title: "Products",
     shortTitle: "Products",
@@ -60,7 +65,7 @@ const SECTION_COPY: Record<
       "Seeded shorthand, misspellings, superseded references, and customer-specific wording used during deterministic lookup.",
     searchHint: "Search alias, kind, SKU, product, or customer",
   },
-}
+} satisfies Record<CatalogueSection, SectionCopy>
 
 function CataloguePage() {
   const catalogue = Route.useLoaderData()

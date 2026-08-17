@@ -1,7 +1,15 @@
 /* eslint-disable react-refresh/only-export-components */
 import * as React from "react"
+import { z } from "zod"
 
-type Theme = "dark" | "light" | "system"
+/**
+ * The three settings this control offers. A stored value is whatever the last
+ * build wrote, or whatever another tab wrote, so it is parsed rather than
+ * trusted: anything else reads as the default and never as a broken theme.
+ */
+const THEME_SCHEMA = z.enum(["dark", "light", "system"])
+
+type Theme = z.infer<typeof THEME_SCHEMA>
 type ResolvedTheme = "dark" | "light"
 
 type ThemeProviderProps = {
@@ -17,18 +25,15 @@ type ThemeProviderState = {
 }
 
 const COLOR_SCHEME_QUERY = "(prefers-color-scheme: dark)"
-const THEME_VALUES: Theme[] = ["dark", "light", "system"]
 
 const ThemeProviderContext = React.createContext<
   ThemeProviderState | undefined
 >(undefined)
 
-function isTheme(value: string | null): value is Theme {
-  if (value === null) {
-    return false
-  }
-
-  return THEME_VALUES.includes(value as Theme)
+/** A stored setting, or the default this provider was given. */
+function readTheme(value: string | null, fallback: Theme): Theme {
+  const stored = THEME_SCHEMA.safeParse(value)
+  return stored.success ? stored.data : fallback
 }
 
 function getSystemTheme(): ResolvedTheme {
@@ -84,14 +89,9 @@ export function ThemeProvider({
   disableTransitionOnChange = true,
   ...props
 }: ThemeProviderProps) {
-  const [theme, setThemeState] = React.useState<Theme>(() => {
-    const storedTheme = localStorage.getItem(storageKey)
-    if (isTheme(storedTheme)) {
-      return storedTheme
-    }
-
-    return defaultTheme
-  })
+  const [theme, setThemeState] = React.useState<Theme>(() =>
+    readTheme(localStorage.getItem(storageKey), defaultTheme)
+  )
 
   const setTheme = React.useCallback(
     (nextTheme: Theme) => {
@@ -189,12 +189,7 @@ export function ThemeProvider({
         return
       }
 
-      if (isTheme(event.newValue)) {
-        setThemeState(event.newValue)
-        return
-      }
-
-      setThemeState(defaultTheme)
+      setThemeState(readTheme(event.newValue, defaultTheme))
     }
 
     window.addEventListener("storage", handleStorageChange)

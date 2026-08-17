@@ -284,12 +284,10 @@ function describeUploadProblem(files: File[]): string | null {
     return `Attach at most ${UPLOAD_LIMITS.maxFiles} files to one request.`
   }
 
-  const unsupported = files.find(
-    (file) =>
-      !(UPLOAD_LIMITS.accept as readonly string[]).includes(
-        file.type.split(";")[0].trim().toLowerCase()
-      )
-  )
+  const unsupported = files.find((file) => {
+    const announced = file.type.split(";")[0].trim().toLowerCase()
+    return !UPLOAD_LIMITS.accept.some((accepted) => accepted === announced)
+  })
 
   if (unsupported) {
     return `${unsupported.name} is not a PDF, JPEG, or PNG file.`
