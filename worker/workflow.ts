@@ -211,7 +211,7 @@ export class RfqWorkflow extends WorkflowEntrypoint<Env, RfqWorkflowParams> {
  * missing throws, and a durable step that throws is retried rather than
  * recorded as an applied outcome.
  */
-async function applyReviewOutcome(
+export async function applyReviewOutcome(
   env: Env,
   runId: string
 ): Promise<ReviewOutcome["state"] | "pending"> {

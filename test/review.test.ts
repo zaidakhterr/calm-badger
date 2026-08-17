@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest"
 import { normaliseText } from "../worker/catalog/retrieval"
 import { loadReviewOutcome, settleReview } from "../worker/review"
 import { retentionDeadline } from "../worker/retention-policy"
+import { applyReviewOutcome } from "../worker/workflow"
 
 const base = "https://example.test"
 
@@ -628,6 +629,63 @@ describe("approving a review", () => {
     expect(
       quote.lines.find((line) => line.position === quantity.position)!.quantity
     ).toBe(7)
+  })
+
+  it("leaves a half-applied outcome retryable rather than marking it applied", async () => {
+    const { run, ownerCapability, review } = await pausedRun()
+    const runId = await runIdOf(run.viewId)
+    const product = review.items.find((item) => item.kind === "product")!
+
+    await decide(run.viewId, ownerCapability, straightforwardDecisions(review))
+
+    // Claimed through the module, not the HTTP route: the doorbell would wake
+    // the hibernating instance, and this test owns the apply step instead.
+    expect(await settleReview(env, runId, "approve")).toMatchObject({
+      state: "settled",
+    })
+
+    // One correction now points at a line that does not exist, so the step
+    // that owns it throws part-way through the outcome.
+    await env.DB.prepare(
+      `UPDATE run_review_items SET position = 99
+        WHERE run_id = ? AND id = ?`
+    )
+      .bind(runId, product.id)
+      .run()
+
+    await expect(applyReviewOutcome(env, runId)).rejects.toThrow(
+      `No line match at position 99 for run ${runId}.`
+    )
+
+    // The completion is the "applied" marker and it is written last, so a
+    // throwing apply leaves nothing claiming the outcome landed: the node is
+    // still the pending one, the run has not moved, and the approval the
+    // owner won is still there to be applied again.
+    const stalled = await readRun(run.viewId)
+
+    expect(
+      stalled.steps.find((step) => step.key === "review-required")!.status
+    ).toBe("review_required")
+    expect(stalled.workflowState).toBe("awaiting_review")
+    expect((await readReview(run.viewId)).state).toBe("approved")
+
+    await env.DB.prepare(
+      `UPDATE run_review_items SET position = ?
+        WHERE run_id = ? AND id = ?`
+    )
+      .bind(product.position, runId, product.id)
+      .run()
+
+    // A retry of the same durable step converges: every apply is an UPSERT or
+    // an UPDATE to the same values, including the ones that already landed.
+    expect(await applyReviewOutcome(env, runId)).toBe("approved")
+
+    const applied = await readRun(run.viewId)
+
+    expect(
+      applied.steps.find((step) => step.key === "review-required")!.status
+    ).toBe("complete")
+    expect(applied.workflowState).toBe("review_approved")
   })
 
   it("prices a product the owner found by searching the whole catalogue", async () => {

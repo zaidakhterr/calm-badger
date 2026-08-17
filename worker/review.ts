@@ -763,15 +763,6 @@ function effectiveState(review: ReviewRow): ReviewState {
   return Date.parse(review.expires_at) <= Date.now() ? "expired" : "pending"
 }
 
-/** What the workflow reads when it wakes up. The event itself proves nothing. */
-export async function readReviewState(
-  env: Env,
-  runId: string
-): Promise<ReviewState> {
-  const review = await loadReviewRow(env, runId)
-  return review ? effectiveState(review) : "not_required"
-}
-
 /* -------------------------------------------------------------------------- */
 /* The outcome, as a value                                                    */
 /* -------------------------------------------------------------------------- */
@@ -869,8 +860,8 @@ export async function loadReviewOutcome(
 
 /**
  * An item becomes a decision only when it is resolved and carries the value
- * its kind needs. Anything else is silently dropped, exactly as the guarded
- * effect statements no-op on such a row today.
+ * its kind needs. Anything else is silently dropped rather than handed on: an
+ * item without its value has nothing for an owning step to apply.
  */
 function resolvedDecisionOf(
   item: ItemRow,
