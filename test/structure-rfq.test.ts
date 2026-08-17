@@ -14,7 +14,7 @@ import { env, exports } from "cloudflare:workers"
 import { describe, expect, it, vi } from "vitest"
 
 import { readConfig } from "../worker/env"
-import { loadStructureEvidence } from "../worker/evidence"
+import { loadCustomerEvidence, loadStructureEvidence } from "../worker/evidence"
 import {
   estimateExtractionCostUsd,
   selectExtractionProvider,
@@ -1088,6 +1088,114 @@ describe("reading stored structure evidence a different build wrote", () => {
         runId,
         step: "structure-rfq",
         kind: "structure",
+      })
+    )
+  })
+})
+
+describe("reading stored customer evidence a different build wrote", () => {
+  it("still projects a payload written before the score and inputs existed", async () => {
+    const runId = await seedRun()
+
+    // No `confidence`, `inputs`, or `metrics`: an earlier build did not record
+    // them. The decision and the signals behind it are all still there.
+    await storeEvidence(
+      runId,
+      "resolve-customer",
+      "customer",
+      JSON.stringify({
+        state: "resolved",
+        method: "deterministic-catalog-lookup",
+        message: null,
+        resolution: {
+          customerId: "CUST-1002",
+          name: "Northline Property Services",
+          tier: "standard",
+          contact: null,
+          location: null,
+        },
+        signals: [
+          {
+            kind: "contact_email",
+            detail: "Lena Vogt is a known contact at this address.",
+            weight: 0.6,
+          },
+        ],
+        candidates: [
+          {
+            customerId: "CUST-1002",
+            name: "Northline Property Services",
+            score: 0.6,
+            signals: ["contact_email"],
+          },
+        ],
+      })
+    )
+
+    const evidence = await loadCustomerEvidence(env, runId)
+
+    expect(evidence.state).toBe("resolved")
+    expect(evidence.method).toBe("deterministic-catalog-lookup")
+    expect(evidence.resolution!.customerId).toBe("CUST-1002")
+    expect(evidence.resolution!.contact).toBeNull()
+    expect(evidence.signals).toHaveLength(1)
+    expect(evidence.candidates[0].score).toBe(0.6)
+    // Not recorded reads as unknown, never as zero.
+    expect(evidence.confidence).toBeNull()
+    expect(evidence.inputs).toBeNull()
+    expect(evidence.metrics).toBeNull()
+  })
+
+  it("projects an error and logs one line when the resolution names no customer", async () => {
+    const runId = await seedRun()
+
+    await storeEvidence(
+      runId,
+      "resolve-customer",
+      "customer",
+      JSON.stringify({
+        state: "resolved",
+        method: "deterministic-catalog-lookup",
+        message: null,
+        resolution: {
+          name: "Northline Property Services",
+          tier: "standard",
+          contact: null,
+          location: null,
+        },
+        confidence: { label: "High", score: 0.85, heuristic: "One signal." },
+        signals: [],
+        candidates: [],
+        inputs: {
+          contactEmail: null,
+          companyName: "Northline Property Services",
+          deliveryLocation: null,
+          referenceCount: 0,
+        },
+        metrics: { elapsedMs: 3 },
+      })
+    )
+
+    const logged = await captureErrors(async () => {
+      const evidence = await loadCustomerEvidence(env, runId)
+
+      expect(evidence.state).toBe("error")
+      expect(evidence.message).toBe(
+        "The stored evidence for this step could not be read."
+      )
+      expect(evidence.resolution).toBeNull()
+      expect(evidence.method).toBeNull()
+      expect(evidence.signals).toEqual([])
+    })
+
+    expect(logged).toHaveLength(1)
+    // Identifiers only: no field name, no stored value, nothing to leak.
+    expect(logged[0]).toBe(
+      JSON.stringify({
+        event: "evidence_payload_invalid",
+        runId,
+        step: "resolve-customer",
+        kind: "customer",
       })
     )
   })

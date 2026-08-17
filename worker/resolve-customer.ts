@@ -12,13 +12,89 @@
  * showing, not a gap to fill.
  */
 
-import { labelFor, type Confidence } from "./rfq-extraction"
+import { z } from "zod"
+
+import { CONFIDENCE_SCHEMA, labelFor, type Confidence } from "./rfq-extraction"
 import { createRunStepRecorder, type RunStepRecorder } from "./run-steps"
 
 export const RESOLVE_CUSTOMER_STEP_KEY = "resolve-customer"
 
 /** The one kind of evidence this step records. */
-const CUSTOMER_EVIDENCE_KIND = "customer"
+export const CUSTOMER_EVIDENCE_KIND = "customer"
+
+/**
+ * The catalogue identity this run was resolved to, with the desk and address
+ * the winning signals pointed at. Every field names a record, so none of them
+ * defaults: an identity missing its customer id is not an identity.
+ */
+const RESOLUTION_SCHEMA = z.object({
+  customerId: z.string(),
+  name: z.string(),
+  tier: z.string(),
+  contact: z
+    .object({
+      id: z.string(),
+      name: z.string(),
+      role: z.string(),
+      email: z.string(),
+    })
+    .nullable(),
+  location: z
+    .object({
+      id: z.string(),
+      label: z.string(),
+      city: z.string(),
+      country: z.string(),
+    })
+    .nullable(),
+})
+
+/**
+ * The evidence this step writes, and therefore owns. The projection in
+ * `evidence.ts` parses stored rows with this schema rather than guessing at
+ * their shape, so writer and reader cannot drift apart without the build
+ * saying so.
+ *
+ * The decision and the reasoning behind it are required: which of the two
+ * endings this run reached, how it was decided, and every signal that was
+ * weighed. What is only shown alongside them — the score, the inputs it was
+ * read from, the elapsed time — defaults to `null`, so evidence written by an
+ * earlier build still renders instead of blanking the whole step.
+ */
+export const CUSTOMER_EVIDENCE_SCHEMA = z.object({
+  state: z.enum(["resolved", "unresolved"]),
+  method: z.string(),
+  message: z.string().nullable(),
+  resolution: RESOLUTION_SCHEMA.nullable(),
+  confidence: CONFIDENCE_SCHEMA.nullable().catch(null),
+  signals: z.array(
+    z.object({
+      kind: z.string(),
+      detail: z.string(),
+      weight: z.number(),
+    })
+  ),
+  candidates: z.array(
+    z.object({
+      customerId: z.string(),
+      name: z.string(),
+      score: z.number(),
+      signals: z.array(z.string()),
+    })
+  ),
+  inputs: z
+    .object({
+      contactEmail: z.string().nullable(),
+      companyName: z.string().nullable(),
+      deliveryLocation: z.string().nullable(),
+      referenceCount: z.number(),
+    })
+    .nullable()
+    .catch(null),
+  metrics: z.object({ elapsedMs: z.number() }).nullable().catch(null),
+})
+
+export type CustomerEvidence = z.infer<typeof CUSTOMER_EVIDENCE_SCHEMA>
 
 /** Fixed weights. They are demo judgement, stated openly in the evidence. */
 const WEIGHTS = {
@@ -157,7 +233,7 @@ async function resolve(
       referenceCount: references.length,
     },
     metrics: { elapsedMs },
-  })
+  } satisfies CustomerEvidence)
 
   // Two endings, one step: an unresolved run continues, so it is a completion
   // with its own variant rather than a failure.

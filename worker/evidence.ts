@@ -32,7 +32,11 @@ import {
   READ_DOCUMENTS_STEP_KEY,
   type DocumentsEvidence,
 } from "./read-documents"
-import { RESOLVE_CUSTOMER_STEP_KEY } from "./resolve-customer"
+import {
+  CUSTOMER_EVIDENCE_KIND,
+  CUSTOMER_EVIDENCE_SCHEMA,
+  RESOLVE_CUSTOMER_STEP_KEY,
+} from "./resolve-customer"
 import { RETRIEVE_CANDIDATES_STEP_KEY } from "./retrieve-candidates"
 import { STORED_OCR_REGIONS_SCHEMA } from "./providers/ocr"
 import type { CanonicalQuote } from "./quote"
@@ -357,7 +361,8 @@ export async function loadStructureEvidence(
 
 export type CustomerEvidenceProjection = {
   stepKey: string
-  state: "pending" | "resolved" | "unresolved"
+  /** `error` only ever means the stored row could not be read. */
+  state: "pending" | "resolved" | "unresolved" | "error"
   message: string | null
   method: string | null
   resolution: {
@@ -398,91 +403,30 @@ export async function loadCustomerEvidence(
   env: Env,
   runId: string
 ): Promise<CustomerEvidenceProjection> {
-  const stored = await readStoredEvidence(
+  const stored = await readOwnedEvidence(
     env,
     runId,
     RESOLVE_CUSTOMER_STEP_KEY,
-    "customer"
+    CUSTOMER_EVIDENCE_KIND,
+    CUSTOMER_EVIDENCE_SCHEMA
   )
-  const inputs = stored?.inputs ? asRecord(stored.inputs) : null
+
+  const customer = stored.outcome === "read" ? stored.value : null
+  const unreadable = stored.outcome === "unreadable"
 
   return {
     stepKey: RESOLVE_CUSTOMER_STEP_KEY,
-    state:
-      stored?.state === "resolved" || stored?.state === "unresolved"
-        ? stored.state
-        : "pending",
-    message: readText(stored?.message),
-    method: readText(stored?.method),
-    resolution: readResolution(stored?.resolution),
-    confidence: readConfidence(stored?.confidence),
-    signals: (Array.isArray(stored?.signals) ? stored.signals : []).map(
-      (entry) => {
-        const signal = asRecord(entry)
-
-        return {
-          kind: readText(signal.kind) ?? "",
-          detail: readText(signal.detail) ?? "",
-          weight: readNumber(signal.weight) ?? 0,
-        }
-      }
-    ),
-    candidates: (Array.isArray(stored?.candidates)
-      ? stored.candidates
-      : []
-    ).map((entry) => {
-      const candidate = asRecord(entry)
-
-      return {
-        customerId: readText(candidate.customerId) ?? "",
-        name: readText(candidate.name) ?? "",
-        score: readNumber(candidate.score) ?? 0,
-        signals: readStrings(candidate.signals),
-      }
-    }),
-    inputs: inputs
-      ? {
-          contactEmail: readText(inputs.contactEmail),
-          companyName: readText(inputs.companyName),
-          deliveryLocation: readText(inputs.deliveryLocation),
-          referenceCount: readNumber(inputs.referenceCount) ?? 0,
-        }
-      : null,
-    metrics: stored?.metrics
-      ? { elapsedMs: readNumber(asRecord(stored.metrics).elapsedMs) ?? 0 }
-      : null,
-  }
-}
-
-function readResolution(
-  value: unknown
-): CustomerEvidenceProjection["resolution"] {
-  if (typeof value !== "object" || value === null) return null
-
-  const resolution = value as Record<string, unknown>
-  const contact = resolution.contact ? asRecord(resolution.contact) : null
-  const location = resolution.location ? asRecord(resolution.location) : null
-
-  return {
-    customerId: readText(resolution.customerId) ?? "",
-    name: readText(resolution.name) ?? "",
-    tier: readText(resolution.tier) ?? "",
-    contact: contact
-      ? {
-          id: readText(contact.id) ?? "",
-          name: readText(contact.name) ?? "",
-          role: readText(contact.role) ?? "",
-          email: readText(contact.email) ?? "",
-        }
-      : null,
-    location: location
-      ? {
-          id: readText(location.id) ?? "",
-          label: readText(location.label) ?? "",
-          city: readText(location.city) ?? "",
-          country: readText(location.country) ?? "",
-        }
-      : null,
+    state: unreadable ? "error" : (customer?.state ?? "pending"),
+    message: unreadable
+      ? UNREADABLE_EVIDENCE_MESSAGE
+      : (customer?.message ?? null),
+    method: customer?.method ?? null,
+    resolution: customer?.resolution ?? null,
+    confidence: customer?.confidence ?? null,
+    signals: customer?.signals ?? [],
+    candidates: customer?.candidates ?? [],
+    inputs: customer?.inputs ?? null,
+    metrics: customer?.metrics ?? null,
   }
 }
 
