@@ -34,11 +34,14 @@ import {
   rfqExtractionSchema,
   scoreExtraction,
   validateAgainstSchema,
-  type Confidence,
   type ValidatedRfq,
 } from "./rfq-extraction"
+import { createRunStepRecorder, type RunStepRecorder } from "./run-steps"
 
 export const STRUCTURE_RFQ_STEP_KEY = "structure-rfq"
+
+/** The one kind of evidence this step attaches. */
+const STRUCTURE_EVIDENCE_KIND = "structure"
 
 /** Model text is stored for inspection, but never unbounded. */
 const MAX_STORED_OUTPUT_CHARS = 12_000
@@ -56,8 +59,10 @@ export async function structureRfq(
   env: Env,
   runId: string
 ): Promise<StructureRfqOutcome> {
+  const recorder = createRunStepRecorder(env, runId, STRUCTURE_RFQ_STEP_KEY)
+
   try {
-    return await structure(env, runId)
+    return await structure(env, runId, recorder)
   } catch (error) {
     const message = "The request could not be structured."
 
@@ -72,7 +77,7 @@ export async function structureRfq(
     )
 
     try {
-      await failStep(env, runId, message)
+      await recorder.fail(message)
     } catch {
       // The database itself is unreachable, so there is nowhere left to record
       // the failure. Returning still stops the workflow rather than retrying.
@@ -84,18 +89,19 @@ export async function structureRfq(
 
 async function structure(
   env: Env,
-  runId: string
+  runId: string,
+  recorder: RunStepRecorder
 ): Promise<StructureRfqOutcome> {
   const documents = await loadDocuments(env, runId)
 
   if (documents.length === 0) {
     const message = "No document text was available to structure."
-    await failStep(env, runId, message)
+    await recorder.fail(message)
     return { state: "error", message }
   }
 
   const startedAt = Date.now()
-  await beginStep(env, runId)
+  await recorder.begin("Extracting customer, source, deadline, and line items…")
 
   const provider = selectExtractionProvider(env)
   let result: ExtractionResult
@@ -126,7 +132,7 @@ async function structure(
       })
     )
 
-    await persistEvidence(env, runId, {
+    await recorder.attachEvidence(STRUCTURE_EVIDENCE_KIND, {
       provider: provider.name,
       model: provider.model,
       state: "error",
@@ -143,7 +149,7 @@ async function structure(
       reportedCostUsd: null,
     })
 
-    await failStep(env, runId, message)
+    await recorder.fail(message)
     return { state: "error", message }
   }
 
@@ -159,7 +165,7 @@ async function structure(
   const parsed = parseModelOutput(result.text)
 
   if (parsed.state === "irreparable") {
-    return await stopWithValidationFailure(env, runId, {
+    return await stopWithValidationFailure(runId, recorder, {
       ...shared,
       message: `${parsed.reason} One repair attempt was made.`,
       issues: [],
@@ -172,7 +178,7 @@ async function structure(
   const checked = validateAgainstSchema(parsed.value)
 
   if (checked.state === "invalid") {
-    return await stopWithValidationFailure(env, runId, {
+    return await stopWithValidationFailure(runId, recorder, {
       ...shared,
       message: "The model output did not match the required RFQ schema.",
       issues: checked.issues,
@@ -188,7 +194,7 @@ async function structure(
   const elapsedMs = Date.now() - startedAt
 
   await persistRfq(env, runId, validated)
-  await persistEvidence(env, runId, {
+  await recorder.attachEvidence(STRUCTURE_EVIDENCE_KIND, {
     provider: provider.name,
     model: result.model,
     state: "complete",
@@ -208,7 +214,17 @@ async function structure(
     (line) => line.state === "review_required"
   ).length
 
-  await completeStep(env, runId, validated, confidence, reviewCount)
+  const total = validated.lineItems.length
+
+  await recorder.complete(
+    total === 0
+      ? `No line items could be read from the request. Confidence ${confidence.label}.`
+      : `Validated ${total} ${total === 1 ? "line" : "lines"}` +
+          (reviewCount > 0
+            ? `, ${reviewCount} needing review. `
+            : " with no business-rule failures. ") +
+          `Confidence ${confidence.label} (${confidence.score.toFixed(2)}).`
+  )
 
   console.log(
     JSON.stringify({
@@ -237,8 +253,8 @@ async function structure(
  * canonical was produced, so the run stops here with what is known.
  */
 async function stopWithValidationFailure(
-  env: Env,
   runId: string,
+  recorder: RunStepRecorder,
   detail: {
     provider: string
     model: string
@@ -264,7 +280,7 @@ async function stopWithValidationFailure(
     })
   )
 
-  await persistEvidence(env, runId, {
+  await recorder.attachEvidence(STRUCTURE_EVIDENCE_KIND, {
     provider: detail.provider,
     model: detail.model,
     state: "error",
@@ -280,7 +296,7 @@ async function stopWithValidationFailure(
     reportedCostUsd: detail.reportedCostUsd,
   })
 
-  await failStep(env, runId, detail.message)
+  await recorder.fail(detail.message)
 
   return { state: "error", message: detail.message }
 }
@@ -409,104 +425,4 @@ async function persistRfq(
       )
     ),
   ])
-}
-
-async function beginStep(env: Env, runId: string): Promise<void> {
-  const now = new Date().toISOString()
-
-  await env.DB.batch([
-    env.DB.prepare(
-      `UPDATE run_steps
-          SET status = 'active',
-              summary = ?,
-              started_at = COALESCE(started_at, ?),
-              updated_at = ?
-        WHERE run_id = ? AND step_key = ?`
-    ).bind(
-      "Extracting customer, source, deadline, and line items…",
-      now,
-      now,
-      runId,
-      STRUCTURE_RFQ_STEP_KEY
-    ),
-    env.DB.prepare(
-      `UPDATE runs SET workflow_state = 'structuring_rfq', updated_at = ?
-        WHERE id = ?`
-    ).bind(now, runId),
-  ])
-}
-
-async function completeStep(
-  env: Env,
-  runId: string,
-  validated: ValidatedRfq,
-  confidence: Confidence,
-  reviewCount: number
-): Promise<void> {
-  const now = new Date().toISOString()
-  const total = validated.lineItems.length
-  const summary =
-    total === 0
-      ? `No line items could be read from the request. Confidence ${confidence.label}.`
-      : `Validated ${total} ${total === 1 ? "line" : "lines"}` +
-        (reviewCount > 0
-          ? `, ${reviewCount} needing review. `
-          : " with no business-rule failures. ") +
-        `Confidence ${confidence.label} (${confidence.score.toFixed(2)}).`
-
-  await env.DB.batch([
-    env.DB.prepare(
-      `UPDATE run_steps
-          SET status = 'complete', summary = ?, completed_at = ?, updated_at = ?
-        WHERE run_id = ? AND step_key = ?`
-    ).bind(summary, now, now, runId, STRUCTURE_RFQ_STEP_KEY),
-    env.DB.prepare(
-      `UPDATE runs SET workflow_state = 'rfq_structured', updated_at = ?
-        WHERE id = ?`
-    ).bind(now, runId),
-  ])
-}
-
-async function failStep(
-  env: Env,
-  runId: string,
-  message: string
-): Promise<void> {
-  const now = new Date().toISOString()
-
-  await env.DB.batch([
-    env.DB.prepare(
-      `UPDATE run_steps
-          SET status = 'error', summary = ?, completed_at = ?, updated_at = ?
-        WHERE run_id = ? AND step_key = ?`
-    ).bind(message, now, now, runId, STRUCTURE_RFQ_STEP_KEY),
-    env.DB.prepare(
-      `UPDATE runs SET status = 'error', workflow_state = 'failed', updated_at = ?
-        WHERE id = ?`
-    ).bind(now, runId),
-  ])
-}
-
-async function persistEvidence(
-  env: Env,
-  runId: string,
-  payload: unknown
-): Promise<void> {
-  const now = new Date().toISOString()
-
-  await env.DB.prepare(
-    `INSERT INTO run_step_evidence (id, run_id, step_key, kind, payload, created_at)
-     VALUES (?, ?, ?, 'structure', ?, ?)
-     ON CONFLICT (run_id, step_key, kind) DO UPDATE SET
-       payload = excluded.payload,
-       created_at = excluded.created_at`
-  )
-    .bind(
-      crypto.randomUUID(),
-      runId,
-      STRUCTURE_RFQ_STEP_KEY,
-      JSON.stringify(payload),
-      now
-    )
-    .run()
 }
