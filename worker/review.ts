@@ -34,9 +34,9 @@
  */
 
 import { normaliseText } from "./catalog/retrieval"
-import { MATCH_PRODUCTS_STEP_KEY } from "./match-products"
 import { retentionDeadline } from "./retention-policy"
 import { MAX_LINE_QUANTITY } from "./rfq-extraction"
+import { createRunStepRecorder } from "./run-steps"
 
 export const REVIEW_STEP_KEY = "review-required"
 export const REVIEW_STEP_TITLE = "Review required"
@@ -128,7 +128,7 @@ export async function openReview(
     )
 
     try {
-      await failStep(env, runId, message)
+      await createRunStepRecorder(env, runId, REVIEW_STEP_KEY).fail(message)
     } catch {
       // Nowhere left to record the failure; returning still stops the workflow.
     }
@@ -208,7 +208,22 @@ async function open(env: Env, runId: string): Promise<ReviewOpening> {
   }
 
   await env.DB.batch(statements)
-  await insertReviewStep(env, runId, summary, now.toISOString())
+
+  // The conditional node goes into the linear graph between the product
+  // decisions it questions and the pricing it blocks; later steps move down by
+  // one so the sequence a reader sees stays strictly top-down.
+  await createRunStepRecorder(
+    env,
+    runId,
+    REVIEW_STEP_KEY
+  ).insertConditionalStep({
+    title: REVIEW_STEP_TITLE,
+    summary,
+    blocks: {
+      stepKey: "build-estimate",
+      summary: `Waiting for owner review before pricing. ${summary}`,
+    },
+  })
 
   console.log(
     JSON.stringify({
@@ -1504,6 +1519,15 @@ function approvalEffectStatements(
     }
   }
 
+  // The two statements below are the one place the run step and the run's
+  // state are written outside the run-step recorder. They stay here because
+  // both properties they carry are lost the moment they move: they are
+  // *composed* into the settlement batch, so they commit with the guarded
+  // claim on `run_reviews` or not at all; and they are *guarded* on that
+  // claim's own result, so a decision that lost the race — or a repair replay,
+  // where the claim matches nothing and the `EXISTS` is the only authority —
+  // writes nothing. The run guard additionally refuses to drag a run that has
+  // already moved past `awaiting_review` back to `review_approved`.
   statements.push(
     env.DB.prepare(
       `UPDATE run_steps
@@ -1535,6 +1559,7 @@ function approvalEffectStatements(
   return statements
 }
 
+/** Guarded and composed for the same reason as the approval effects above. */
 function rejectionEffectStatements(
   env: Env,
   runId: string,
@@ -1586,12 +1611,12 @@ export async function expireReview(env: Env, runId: string): Promise<boolean> {
 
   if (claimed.meta.changes !== 1) return false
 
-  await stopAtReviewStep(
-    env,
-    runId,
+  // A rejected or expired review ends the run where it stands. The later nodes
+  // keep their waiting state — the graph simply stops, as the design requires,
+  // and there is no retry.
+  await createRunStepRecorder(env, runId, REVIEW_STEP_KEY).complete(
     "The review window closed before a decision was made, so this run was never priced.",
-    "review_expired",
-    now
+    { variant: "expired" }
   )
 
   console.log(
@@ -1664,110 +1689,4 @@ export async function searchReviewCustomers(
     .all<CustomerSearchResult>()
 
   return rows.results
-}
-
-/* -------------------------------------------------------------------------- */
-/* The graph node                                                             */
-/* -------------------------------------------------------------------------- */
-
-/**
- * Inserts the conditional node into the linear graph, between the product
- * decisions it questions and the pricing it blocks. Later steps move down by
- * one so the sequence a reader sees stays strictly top-down.
- */
-async function insertReviewStep(
-  env: Env,
-  runId: string,
-  summary: string,
-  now: string
-): Promise<void> {
-  const anchor = await env.DB.prepare(
-    `SELECT position FROM run_steps WHERE run_id = ? AND step_key = ?`
-  )
-    .bind(runId, MATCH_PRODUCTS_STEP_KEY)
-    .first<{ position: number }>()
-
-  const position = (anchor?.position ?? 5) + 1
-
-  await env.DB.batch([
-    env.DB.prepare(
-      `UPDATE run_steps SET position = position + 1, updated_at = ?
-        WHERE run_id = ? AND position >= ?`
-    ).bind(now, runId, position),
-    env.DB.prepare(
-      `INSERT INTO run_steps (
-         id, run_id, step_key, position, title, status, summary,
-         started_at, completed_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, 'review_required', ?, ?, NULL, ?)
-       ON CONFLICT (run_id, step_key) DO UPDATE SET
-         status = 'review_required',
-         summary = excluded.summary,
-         updated_at = excluded.updated_at`
-    ).bind(
-      crypto.randomUUID(),
-      runId,
-      REVIEW_STEP_KEY,
-      position,
-      REVIEW_STEP_TITLE,
-      summary,
-      now,
-      now
-    ),
-    // The node that is actually blocked says so, rather than leaving its
-    // generic waiting copy in place while the graph stops above it.
-    env.DB.prepare(
-      `UPDATE run_steps
-          SET summary = ?, updated_at = ?
-        WHERE run_id = ? AND step_key = 'build-estimate' AND status = 'waiting'`
-    ).bind(`Waiting for owner review before pricing. ${summary}`, now, runId),
-    env.DB.prepare(
-      `UPDATE runs SET workflow_state = 'awaiting_review', updated_at = ?
-        WHERE id = ?`
-    ).bind(now, runId),
-  ])
-}
-
-/**
- * A rejected or expired review ends the run where it stands. The later nodes
- * keep their waiting state — the graph simply stops, as the design requires,
- * and there is no retry.
- */
-async function stopAtReviewStep(
-  env: Env,
-  runId: string,
-  summary: string,
-  workflowState: string,
-  now: string
-): Promise<void> {
-  await env.DB.batch([
-    env.DB.prepare(
-      `UPDATE run_steps
-          SET status = 'error', summary = ?, completed_at = ?, updated_at = ?
-        WHERE run_id = ? AND step_key = ?`
-    ).bind(summary, now, now, runId, REVIEW_STEP_KEY),
-    env.DB.prepare(
-      `UPDATE runs SET status = 'error', workflow_state = ?, updated_at = ?
-        WHERE id = ?`
-    ).bind(workflowState, now, runId),
-  ])
-}
-
-async function failStep(
-  env: Env,
-  runId: string,
-  message: string
-): Promise<void> {
-  const now = new Date().toISOString()
-
-  await env.DB.batch([
-    env.DB.prepare(
-      `UPDATE run_steps
-          SET status = 'error', summary = ?, completed_at = ?, updated_at = ?
-        WHERE run_id = ? AND step_key = ?`
-    ).bind(message, now, now, runId, REVIEW_STEP_KEY),
-    env.DB.prepare(
-      `UPDATE runs SET status = 'error', workflow_state = 'failed', updated_at = ?
-        WHERE id = ?`
-    ).bind(now, runId),
-  ])
 }
