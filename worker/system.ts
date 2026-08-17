@@ -8,7 +8,7 @@
  * not yet built, this says so instead of quoting a number that is not enforced.
  */
 
-import { ADAPTERS, ADAPTER_IDS, DEFAULT_ADAPTER } from "./adapters"
+import { ADAPTERS, DEFAULT_ADAPTER } from "./adapters"
 import { SHORTLIST_SIZE } from "./catalog/retrieval"
 import { REFERENCE_EVALUATION } from "./evaluation-report"
 import { evaluationSection } from "./evaluation-summary"
@@ -157,7 +157,7 @@ export async function loadSystemDetails(env: Env): Promise<SystemDetails> {
       ),
       {
         role: "Delivery",
-        provider: "simulated adapters",
+        provider: "simulated webhook",
         model: null,
         live: false,
         detail:
@@ -207,9 +207,9 @@ export async function loadSystemDetails(env: Env): Promise<SystemDetails> {
     },
     adapterContract: {
       summary:
-        "Both adapters implement one export contract over the provider-neutral canonical quote: transform the document, return a synthetic external identifier and a receipt. The canonical quote is downloadable as JSON before anything is sent.",
+        "The Generic ERP Webhook transforms the provider-neutral canonical quote and returns a synthetic external identifier and receipt. It is the fixed simulated destination, so there is nothing to select. The canonical quote is downloadable as JSON before anything is sent.",
       defaultAdapter: DEFAULT_ADAPTER,
-      adapters: ADAPTER_IDS.map((id) => ({
+      adapters: [DEFAULT_ADAPTER].map((id) => ({
         id,
         name: ADAPTERS[id].name,
         contract: ADAPTERS[id].contract,

@@ -126,6 +126,26 @@ type StepRow = {
   completed_at: string | null
 }
 
+/** Keep step headers destination-neutral, including for deliveries from older builds. */
+function publicStepSummary(step: StepRow): string {
+  if (step.status !== "complete") return step.summary
+
+  if (step.step_key === "deliver") {
+    return "Canonical quote transformed for simulated webhook delivery."
+  }
+
+  if (step.step_key === "delivered") {
+    const externalId = /^Simulated external estimate (\S+) accepted/.exec(
+      step.summary
+    )?.[1]
+    return externalId
+      ? `Simulated external estimate ${externalId} accepted.`
+      : "Simulated external estimate accepted."
+  }
+
+  return step.summary
+}
+
 function randomToken(byteLength: number): string {
   const bytes = crypto.getRandomValues(new Uint8Array(byteLength))
   let binary = ""
@@ -273,7 +293,7 @@ export async function loadRun(
       title: step.title,
       position: step.position,
       status: step.status as RunStepStatus,
-      summary: step.summary,
+      summary: publicStepSummary(step),
       startedAt: step.started_at,
       completedAt: step.completed_at,
     })),

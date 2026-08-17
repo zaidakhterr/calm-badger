@@ -33,7 +33,6 @@ import {
   searchCustomers,
   settleReview,
   submitReviewDecisions,
-  type AdapterId,
   type CatalogSearchResult,
   type CustomerSearchResult,
   type Review,
@@ -103,9 +102,8 @@ async function readRunSnapshot(viewId: string): Promise<RunSnapshot> {
       (entry) => entry.key === key && entry.status !== "waiting"
     )
 
-  // The estimate and the delivery choice are read once matching has finished:
-  // the delivery node offers its adapters while it is still waiting, because
-  // choosing one is what makes it run.
+  // The estimate and fixed delivery destination are read once matching has
+  // finished, so the delivery node can open as soon as the quote exists.
   const priced = started(MATCH_PRODUCTS_STEP)
 
   // The review node only exists when the run needed one; when it does, it is
@@ -370,7 +368,7 @@ function RunPage() {
  * Deliver is the exception the graph's own status cannot express. It still
  * reads `waiting` while it holds the only action left in the flow, so once the
  * quote exists and nothing has been delivered yet, the node opens itself rather
- * than hiding the adapter choice behind "Show evidence".
+ * than hiding the delivery action behind "Show evidence".
  */
 function opensItself(step: RunStep, snapshot: RunSnapshot): boolean {
   if (
@@ -429,9 +427,13 @@ function evidencePanel(
     )
   }
 
-  // Delivery is the one node that offers something while it is still waiting:
-  // the adapter choice and its payload are what a reviewer inspects first.
-  if (step.key === DELIVER_STEP && snapshot.delivery?.quoteAvailable) {
+  // Delivery is the one node that offers an action while it is still waiting.
+  // Once delivered, the terminal node owns the historical delivery evidence.
+  if (
+    step.key === DELIVER_STEP &&
+    snapshot.delivery?.quoteAvailable &&
+    !snapshot.delivery.delivery
+  ) {
     return (
       <DeliveryPanel
         evidence={snapshot.delivery}
@@ -506,6 +508,8 @@ function WorkflowStepRow({
   const isReview = step.status === "review_required"
   const isError = step.status === "error"
   const elapsed = stepDuration(step)
+  const triggerId = `workflow-step-${step.key}-trigger`
+  const panelId = `workflow-step-${step.key}-evidence`
 
   return (
     <li className="grid grid-cols-[1.75rem_1fr] gap-3">
@@ -551,63 +555,80 @@ function WorkflowStepRow({
 
       <article
         className={cn(
-          "mb-3 rounded-lg border bg-card px-4 py-3.5 shadow-xs",
+          "mb-3 overflow-hidden rounded-lg border bg-card shadow-xs",
           isActive && "border-workflow-active/40",
           isReview && "border-workflow-review/40",
           isError && "border-destructive/40"
         )}
       >
-        <div className="flex items-start justify-between gap-4">
-          <div className="min-w-0">
-            <h2 className="text-base leading-5 font-medium">{step.title}</h2>
-            <p className="mt-1.5 text-sm leading-5 text-muted-foreground">
-              {step.summary}
-            </p>
-          </div>
-          <span
-            className={cn(
-              "mt-0.5 inline-flex h-5 shrink-0 items-center rounded-md border px-2 text-[11px] font-medium whitespace-nowrap text-muted-foreground",
-              isComplete &&
-                "border-workflow-complete/30 bg-workflow-complete-soft text-workflow-complete",
-              isActive &&
-                "border-workflow-active/20 bg-workflow-active-soft text-workflow-active",
-              isReview &&
-                "border-workflow-review/30 bg-workflow-review-soft text-workflow-review",
-              isError &&
-                "border-destructive/30 bg-destructive/10 text-destructive"
-            )}
-          >
-            {statusLabel(step.status)}
-          </span>
-        </div>
-
-        {step.completedAt ? (
-          <p className="mt-2 text-[11px] text-muted-foreground">
-            {isError ? "Stopped" : "Completed"} at{" "}
-            {formatTimestamp(step.completedAt)}
-            {elapsed ? ` · took ${elapsed}` : ""}
-          </p>
-        ) : null}
-
-        {onToggle ? (
-          <>
+        <div
+          className={cn("relative px-4 py-3.5", onToggle && "cursor-pointer")}
+        >
+          {onToggle ? (
             <button
+              id={triggerId}
               type="button"
               onClick={onToggle}
               aria-expanded={isOpen}
-              className="mt-2.5 inline-flex h-8 items-center gap-1.5 rounded-md border bg-background px-2.5 text-[13px] leading-4 font-medium outline-none hover:bg-muted/40 focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
-            >
-              {isOpen ? "Hide evidence" : "Show evidence"}
-              <CaretDownIcon
+              aria-controls={panelId}
+              aria-label={`${isOpen ? "Hide" : "Show"} evidence for ${step.title}`}
+              className="absolute inset-0 z-10 rounded-lg transition-colors outline-none hover:bg-muted/30 focus-visible:ring-2 focus-visible:ring-ring/30 focus-visible:ring-inset"
+            />
+          ) : null}
+
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <h2 className="text-base leading-5 font-medium">{step.title}</h2>
+              <p className="mt-1.5 text-sm leading-5 text-muted-foreground">
+                {step.summary}
+              </p>
+            </div>
+            <div className="mt-0.5 flex shrink-0 items-center gap-2">
+              <span
                 className={cn(
-                  "size-3.5 transition-transform",
-                  isOpen && "rotate-180"
+                  "inline-flex h-5 items-center rounded-md border px-2 text-[11px] font-medium whitespace-nowrap text-muted-foreground",
+                  isComplete &&
+                    "border-workflow-complete/30 bg-workflow-complete-soft text-workflow-complete",
+                  isActive &&
+                    "border-workflow-active/20 bg-workflow-active-soft text-workflow-active",
+                  isReview &&
+                    "border-workflow-review/30 bg-workflow-review-soft text-workflow-review",
+                  isError &&
+                    "border-destructive/30 bg-destructive/10 text-destructive"
                 )}
-                aria-hidden
-              />
-            </button>
-            {isOpen ? <div className="mt-3">{children}</div> : null}
-          </>
+              >
+                {statusLabel(step.status)}
+              </span>
+              {onToggle ? (
+                <CaretDownIcon
+                  className={cn(
+                    "size-4 text-muted-foreground transition-transform",
+                    isOpen && "rotate-180"
+                  )}
+                  aria-hidden
+                />
+              ) : null}
+            </div>
+          </div>
+
+          {step.completedAt ? (
+            <p className="mt-2 text-[11px] text-muted-foreground">
+              {isError ? "Stopped" : "Completed"} at{" "}
+              {formatTimestamp(step.completedAt)}
+              {elapsed ? ` · took ${elapsed}` : ""}
+            </p>
+          ) : null}
+        </div>
+
+        {onToggle && isOpen ? (
+          <div
+            id={panelId}
+            role="region"
+            aria-labelledby={triggerId}
+            className="border-t px-4 py-4"
+          >
+            {children}
+          </div>
         ) : null}
       </article>
     </li>
@@ -1405,10 +1426,7 @@ function EstimateLineRow({ line }: { line: QuoteLine }) {
   )
 }
 
-/**
- * Deliver. The adapter is chosen and its payload inspected before anything is
- * delivered, and both adapters are labelled simulated wherever they appear.
- */
+/** Deliver through the fixed simulated webhook, with an optional preview. */
 /**
  * The review node.
  *
@@ -1868,24 +1886,20 @@ function DeliveryPanel({
   canDeliver: boolean
   onDelivered: () => void
 }) {
-  const [adapter, setAdapter] = useState<AdapterId>(evidence.defaultAdapter)
   const [preview, setPreview] = useState<string | null>(null)
   const [isWorking, setIsWorking] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const selected =
-    evidence.adapters.find((entry) => entry.id === adapter) ??
-    evidence.adapters[0]
+  const destination = evidence.adapters[0]
   const delivered = evidence.delivery
 
-  async function handlePreview(next: AdapterId) {
-    setAdapter(next)
+  async function handlePreview() {
     setPreview(null)
     setError(null)
     setIsWorking(true)
 
     try {
-      const result = await fetchAdapterPreview(viewId, next)
+      const result = await fetchAdapterPreview(viewId)
       setPreview(JSON.stringify(result.payload, null, 2))
     } catch (cause) {
       setError(
@@ -1901,7 +1915,7 @@ function DeliveryPanel({
     setIsWorking(true)
 
     try {
-      await deliverQuote(viewId, adapter)
+      await deliverQuote(viewId)
       onDelivered()
     } catch (cause) {
       setError(
@@ -1914,46 +1928,22 @@ function DeliveryPanel({
   return (
     <div className="space-y-4">
       <div>
-        <h3 className="text-[13px] leading-4 font-medium">External system</h3>
-        <ul className="mt-2 space-y-2">
-          {evidence.adapters.map((entry) => {
-            const isSelected = entry.id === (delivered?.adapter ?? adapter)
-
-            return (
-              <li key={entry.id}>
-                <label
-                  className={cn(
-                    "flex cursor-pointer gap-2.5 rounded-md border px-3 py-2 text-[13px]",
-                    isSelected && "border-workflow-active/40 bg-muted/30"
-                  )}
-                >
-                  <input
-                    type="radio"
-                    name="delivery-adapter"
-                    className="mt-1 accent-workflow-active"
-                    value={entry.id}
-                    checked={isSelected}
-                    disabled={delivered !== null || !canDeliver}
-                    onChange={() => void handlePreview(entry.id)}
-                  />
-                  <span className="min-w-0">
-                    <span className="flex flex-wrap items-center gap-1.5">
-                      <span className="font-medium">{entry.name}</span>
-                      <span className="inline-flex h-5 items-center rounded-md border border-workflow-review/30 bg-workflow-review-soft px-2 text-[11px] font-medium text-workflow-review">
-                        Simulated
-                      </span>
-                    </span>
-                    <span className="mt-1 block text-[11px] leading-5 text-muted-foreground">
-                      {entry.contract}
-                    </span>
-                  </span>
-                </label>
-              </li>
-            )
-          })}
-        </ul>
+        <h3 className="text-[13px] leading-4 font-medium">
+          Delivery destination
+        </h3>
+        <div className="mt-2 rounded-md border px-3 py-2 text-[13px]">
+          <span className="flex flex-wrap items-center gap-1.5">
+            <span className="font-medium">{destination?.name}</span>
+            <span className="inline-flex h-5 items-center rounded-md border border-workflow-review/30 bg-workflow-review-soft px-2 text-[11px] font-medium text-workflow-review">
+              Simulated
+            </span>
+          </span>
+          <span className="mt-1 block text-[11px] leading-5 text-muted-foreground">
+            {destination?.contract}
+          </span>
+        </div>
         <p className="mt-1.5 text-[11px] leading-5 text-muted-foreground">
-          {selected?.notice}
+          {destination?.notice}
         </p>
       </div>
 
@@ -1964,7 +1954,7 @@ function DeliveryPanel({
             variant="outline"
             type="button"
             disabled={isWorking}
-            onClick={() => void handlePreview(adapter)}
+            onClick={() => void handlePreview()}
           >
             Inspect payload
           </Button>
@@ -1974,7 +1964,7 @@ function DeliveryPanel({
             disabled={isWorking}
             onClick={() => void handleDeliver()}
           >
-            {isWorking ? "Working…" : `Send to ${selected?.name}`}
+            {isWorking ? "Working…" : "Send via simulated webhook"}
           </Button>
         </div>
       ) : null}
@@ -1982,7 +1972,7 @@ function DeliveryPanel({
       {!canDeliver ? (
         <p className="text-[11px] leading-5 text-muted-foreground">
           Delivery stays with the browser that started this run. A shared viewer
-          sees the adapter contract and, once it happens, the delivered payload.
+          sees the webhook contract and, once it happens, the delivered payload.
         </p>
       ) : null}
 
@@ -1991,7 +1981,8 @@ function DeliveryPanel({
       {preview ? (
         <details className="rounded-md border bg-background" open>
           <summary className="cursor-pointer px-3 py-2 text-[13px]">
-            {selected?.name} payload · {selected?.payloadFormat} · not sent yet
+            {destination?.name} payload · {destination?.payloadFormat} · not
+            sent yet
           </summary>
           <CopyableCode value={preview} codeClassName="max-h-72" />
         </details>
@@ -2023,7 +2014,6 @@ function DeliveredPanel({
             value={delivered.externalEstimateId}
             mono
           />
-          <MetaRow label="Adapter" value={delivered.adapterName} />
           <MetaRow
             label="Accepted"
             value={formatTimestamp(delivered.deliveredAt)}

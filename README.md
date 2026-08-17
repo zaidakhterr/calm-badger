@@ -71,13 +71,12 @@ references to any specific company, customer, or commercial product.
 | Pricing                  | Deterministic | Catalogue and customer rules only. No model is asked for a number                      |
 | Delivery to external ERP | **Simulated** | See below                                                                              |
 
-Delivery is the one place where nothing leaves the system. Both delivery
-adapters — CoreBridge Sandbox and Generic ERP Webhook — are independently
-designed, fictional transformations of the canonical quote. They make no
-network call, hold no credential, are connected to no third party, and return a
-synthetic external estimate ID. They exist to make the adapter boundary
-inspectable, not to claim an integration. Neither name implies any relationship
-with, or endorsement by, any real vendor.
+Delivery is the one place where nothing leaves the system. The Generic ERP
+Webhook is a fixed, fictional transformation of the canonical quote, so there
+is no destination choice in the workflow. It makes no network call, holds no
+credential, is connected to no third party, and returns a synthetic external
+estimate ID. It exists to make the adapter boundary inspectable, not to claim an
+integration or vendor relationship.
 
 The confidence figure the interface shows is a **demo heuristic**: a
 winner-strength and winner-gap threshold over rerank scores, labelled High,
@@ -145,7 +144,7 @@ changes; titles do not, so the graph does not jump while work proceeds.
 7. **Review required** — appears in the main sequence only when needed, and
    blocks every later step until a decision.
 8. **Build estimate** — deterministic pricing.
-9. **Deliver** — canonical quote transformed by the selected adapter.
+9. **Deliver** — canonical quote transformed by the fixed simulated webhook.
 10. **Delivered** — synthetic external estimate ID.
 
 Each node exposes, where relevant: its sources, the validated structured
@@ -215,9 +214,9 @@ VAT, add 19% VAT, and report subtotal and total.
 
 The result is a **canonical quote**: resolved customer and location, source
 references, selected products, quantities, unit prices, tax, totals, and
-adapter-independent metadata. It is downloadable as JSON. Adapters transform
+adapter-independent metadata. It is downloadable as JSON. The webhook transforms
 that one stable contract; the transformation is shown before delivery so the
-boundary is inspectable. Both adapters are simulated, as described above.
+boundary is inspectable. The webhook is simulated, as described above.
 
 ## Synthetic dataset and curated scenarios
 

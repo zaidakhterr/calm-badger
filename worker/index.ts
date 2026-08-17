@@ -1,6 +1,7 @@
-import { isAdapterId } from "./adapters"
+import { DEFAULT_ADAPTER } from "./adapters"
 import { capturePageview, captureFunnelEvent, logRoute } from "./analytics"
 import { loadQuote } from "./build-estimate"
+import { isCatalogueSection, loadCatalogueProjection } from "./catalogue"
 import { deliverRun, previewDelivery } from "./deliver"
 import {
   loadCandidateEvidence,
@@ -190,6 +191,28 @@ async function routeRequest(
     )
   }
 
+  const catalogueMatch = /^\/api\/catalogue\/([^/]+)$/.exec(url.pathname)
+
+  if (catalogueMatch) {
+    const section = catalogueMatch[1]
+
+    if (!isCatalogueSection(section)) {
+      return Response.json(
+        { error: "Catalogue section not found" },
+        { status: 404, headers: jsonHeaders }
+      )
+    }
+
+    if (request.method !== "GET") {
+      return methodNotAllowed("GET")
+    }
+
+    return Response.json(
+      { catalogue: await loadCatalogueProjection(env, section) },
+      { headers: jsonHeaders }
+    )
+  }
+
   if (url.pathname === "/api/runs") {
     if (request.method !== "POST") {
       return methodNotAllowed("POST")
@@ -250,7 +273,7 @@ async function routeRequest(
     // Inspecting an adapter payload before delivery is an owner action, like
     // delivery itself. What was actually delivered becomes shared evidence.
     if (deliveryPreview) {
-      return deliveryPreviewResponse(request, env, viewId, url)
+      return deliveryPreviewResponse(request, env, viewId)
     }
 
     if (segment === "quote") {
@@ -724,8 +747,7 @@ async function quoteDownloadResponse(
 async function deliveryPreviewResponse(
   request: Request,
   env: Env,
-  viewId: string,
-  url: URL
+  viewId: string
 ): Promise<Response> {
   const authorization = await authorizeOwner(
     env,
@@ -735,16 +757,7 @@ async function deliveryPreviewResponse(
 
   if (!authorization.ok) return ownerRejection(authorization.reason)
 
-  const adapter = url.searchParams.get("adapter")
-
-  if (!isAdapterId(adapter)) {
-    return Response.json(
-      { error: "A known delivery adapter is required" },
-      { status: 400, headers: jsonHeaders }
-    )
-  }
-
-  const preview = await previewDelivery(env, authorization.runId, adapter)
+  const preview = await previewDelivery(env, authorization.runId)
 
   if (!preview) {
     return Response.json(
@@ -775,17 +788,7 @@ async function deliverRunResponse(
 
   if (!authorization.ok) return ownerRejection(authorization.reason)
 
-  const payload = await readJsonBody(request)
-  const adapter = (payload as { adapter?: unknown } | null)?.adapter
-
-  if (!isAdapterId(adapter)) {
-    return Response.json(
-      { error: "A known delivery adapter is required" },
-      { status: 400, headers: jsonHeaders }
-    )
-  }
-
-  const outcome = await deliverRun(env, authorization.runId, adapter)
+  const outcome = await deliverRun(env, authorization.runId)
 
   if (outcome.state === "not_priced") {
     return Response.json(
@@ -801,11 +804,11 @@ async function deliverRunResponse(
     )
   }
 
-  // The end of the funnel: which adapter, and nothing about what was sent.
+  // The end of the funnel: the fixed destination, and nothing about what was sent.
   captureFunnelEvent(env, ctx, {
     event: "rfq_quote_delivered",
     distinctId: authorization.runId,
-    properties: { adapter },
+    properties: { adapter: DEFAULT_ADAPTER },
   })
 
   return Response.json(

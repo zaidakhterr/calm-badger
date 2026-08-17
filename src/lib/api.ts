@@ -472,7 +472,7 @@ export type EstimateEvidence = {
   } | null
 }
 
-export type AdapterId = "corebridge-sandbox" | "generic-erp-webhook"
+export type AdapterId = "generic-erp-webhook"
 
 export type DeliveryAdapter = {
   id: AdapterId
@@ -490,7 +490,7 @@ export type DeliveryEvidence = {
   quoteAvailable: boolean
   quoteNumber: string | null
   delivery: {
-    adapter: AdapterId
+    adapter: string
     adapterName: string
     externalEstimateId: string
     deliveredAt: string
@@ -609,6 +609,84 @@ export async function fetchSystemDetails(): Promise<SystemDetails> {
 
   const body = (await response.json()) as { system: SystemDetails }
   return body.system
+}
+
+export const CATALOGUE_SECTIONS = [
+  "products",
+  "customers",
+  "orders",
+  "aliases",
+] as const
+
+export type CatalogueSection = (typeof CATALOGUE_SECTIONS)[number]
+
+export function isCatalogueSection(value: string): value is CatalogueSection {
+  return CATALOGUE_SECTIONS.includes(value as CatalogueSection)
+}
+
+export type CatalogueProduct = {
+  sku: string
+  name: string
+  description: string
+  category: string
+  manufacturer: string
+  unit: string
+  basePriceCents: number
+  status: string
+  replacementSku: string | null
+  nearDuplicateOf: string | null
+}
+
+export type CatalogueCustomer = {
+  id: string
+  name: string
+  domain: string
+  tier: string
+  tierDiscountBp: number
+  contactCount: number
+  contactNames: string[]
+  locationCount: number
+  cities: string[]
+}
+
+export type CatalogueOrder = {
+  id: string
+  orderedAt: string
+  customerId: string
+  customerName: string
+  contactName: string
+  city: string
+  lineCount: number
+  totalQuantity: number
+  totalCents: number
+  skus: string[]
+}
+
+export type CatalogueAlias = {
+  alias: string
+  kind: string
+  sku: string
+  productName: string
+  customerId: string | null
+  customerName: string | null
+}
+
+export type CatalogueProjection =
+  | { section: "products"; rows: CatalogueProduct[] }
+  | { section: "customers"; rows: CatalogueCustomer[] }
+  | { section: "orders"; rows: CatalogueOrder[] }
+  | { section: "aliases"; rows: CatalogueAlias[] }
+
+/** The complete bounded synthetic catalogue projection for one table. */
+export async function fetchCatalogue(
+  section: CatalogueSection
+): Promise<CatalogueProjection> {
+  const response = await fetch(`/api/catalogue/${encodeURIComponent(section)}`)
+
+  if (!response.ok) throw new Error(await readError(response))
+
+  return ((await response.json()) as { catalogue: CatalogueProjection })
+    .catalogue
 }
 
 export async function fetchScenarios(): Promise<Scenario[]> {
@@ -821,16 +899,15 @@ export function quoteDownloadUrl(viewId: string): string {
   return `/api/runs/${encodeURIComponent(viewId)}/quote`
 }
 
-/** Owner-only: what the chosen adapter would send, before anything is sent. */
+/** Owner-only: what the fixed webhook would send, before anything is sent. */
 export async function fetchAdapterPreview(
-  viewId: string,
-  adapter: AdapterId
+  viewId: string
 ): Promise<{ payload: unknown; adapter: DeliveryAdapter }> {
   const capability = readOwnerCapability(viewId)
   if (!capability) throw new Error("This browser does not own this run")
 
   const response = await fetch(
-    `/api/runs/${encodeURIComponent(viewId)}/delivery/preview?adapter=${adapter}`,
+    `/api/runs/${encodeURIComponent(viewId)}/delivery/preview`,
     { headers: { authorization: `Bearer ${capability}` } }
   )
 
@@ -843,10 +920,7 @@ export async function fetchAdapterPreview(
 }
 
 /** Owner-only: runs the simulated delivery. Nothing leaves the application. */
-export async function deliverQuote(
-  viewId: string,
-  adapter: AdapterId
-): Promise<void> {
+export async function deliverQuote(viewId: string): Promise<void> {
   const capability = readOwnerCapability(viewId)
   if (!capability) throw new Error("This browser does not own this run")
 
@@ -855,10 +929,8 @@ export async function deliverQuote(
     {
       method: "POST",
       headers: {
-        "content-type": "application/json",
         authorization: `Bearer ${capability}`,
       },
-      body: JSON.stringify({ adapter }),
     }
   )
 

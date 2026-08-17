@@ -328,7 +328,7 @@ describe("what the funnel records", () => {
 
     expect(delivery).toBeDefined()
     expect(delivery!.distinctId).toBe(runId)
-    expect(delivery!.properties).toEqual({ adapter: "corebridge-sandbox" })
+    expect(delivery!.properties).toEqual({ adapter: "generic-erp-webhook" })
 
     expectNoBusinessContent([decision!, delivery!])
   })

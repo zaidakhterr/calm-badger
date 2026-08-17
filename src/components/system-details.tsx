@@ -1,9 +1,14 @@
 import { useEffect, useState } from "react"
 import { Dialog } from "@base-ui/react/dialog"
-import { XIcon } from "@phosphor-icons/react"
+import { ArrowRightIcon, XIcon } from "@phosphor-icons/react"
+import { Link } from "@tanstack/react-router"
 
 import { Button } from "@/components/ui/button"
-import { fetchSystemDetails, type SystemDetails } from "@/lib/api"
+import {
+  fetchSystemDetails,
+  type CatalogueSection,
+  type SystemDetails,
+} from "@/lib/api"
 import { cn } from "@/lib/utils"
 
 /**
@@ -78,7 +83,10 @@ export function SystemDetailsDrawer() {
                 Reading configuration…
               </p>
             ) : (
-              <SystemDetailsBody details={details} />
+              <SystemDetailsBody
+                details={details}
+                onNavigate={() => setOpen(false)}
+              />
             )}
           </div>
         </Dialog.Popup>
@@ -87,7 +95,13 @@ export function SystemDetailsDrawer() {
   )
 }
 
-function SystemDetailsBody({ details }: { details: SystemDetails }) {
+function SystemDetailsBody({
+  details,
+  onNavigate,
+}: {
+  details: SystemDetails
+  onNavigate: () => void
+}) {
   return (
     <div className="space-y-6">
       <Section title="Architecture">
@@ -135,24 +149,32 @@ function SystemDetailsBody({ details }: { details: SystemDetails }) {
       </Section>
 
       <Section title="Catalogue">
-        <dl className="divide-y rounded-md border text-sm">
-          <DetailRow
+        <ul className="divide-y rounded-md border text-sm">
+          <CatalogueDetailRow
             label="Products"
             value={`${details.catalog.activeProducts} active · ${details.catalog.archivedProducts} archived`}
+            section="products"
+            onNavigate={onNavigate}
           />
-          <DetailRow
+          <CatalogueDetailRow
             label="Customers"
             value={`${details.catalog.customers} accounts · ${details.catalog.contacts} contacts · ${details.catalog.locations} locations`}
+            section="customers"
+            onNavigate={onNavigate}
           />
-          <DetailRow
+          <CatalogueDetailRow
             label="Historical orders"
             value={`${details.catalog.historicalOrders}`}
+            section="orders"
+            onNavigate={onNavigate}
           />
-          <DetailRow
+          <CatalogueDetailRow
             label="Aliases and variants"
             value={`${details.catalog.aliases}`}
+            section="aliases"
+            onNavigate={onNavigate}
           />
-        </dl>
+        </ul>
         <p className="mt-2 text-[13px] leading-5 text-muted-foreground">
           {details.catalog.note}
         </p>
@@ -209,11 +231,6 @@ function SystemDetailsBody({ details }: { details: SystemDetails }) {
                   {adapter.name}
                 </span>
                 <StateBadge tone="review" label="Simulated" />
-                {adapter.id === details.adapterContract.defaultAdapter ? (
-                  <span className="text-[11px] text-muted-foreground">
-                    preselected
-                  </span>
-                ) : null}
               </div>
               <p className="mt-1 text-[13px] leading-5 text-muted-foreground">
                 {adapter.contract}
@@ -307,11 +324,32 @@ function StateBadge({
   )
 }
 
-function DetailRow({ label, value }: { label: string; value: string }) {
+function CatalogueDetailRow({
+  label,
+  value,
+  section,
+  onNavigate,
+}: {
+  label: string
+  value: string
+  section: CatalogueSection
+  onNavigate: () => void
+}) {
   return (
-    <div className="flex h-10 items-center justify-between gap-3 px-3 text-[13px]">
-      <dt className="text-muted-foreground">{label}</dt>
-      <dd className="truncate text-right">{value}</dd>
-    </div>
+    <li>
+      <Link
+        to="/catalogue/$section"
+        params={{ section }}
+        onClick={onNavigate}
+        className="flex h-10 items-center gap-3 px-3 text-[13px] transition-colors outline-none hover:bg-muted/40 focus-visible:bg-muted/40 focus-visible:ring-2 focus-visible:ring-ring/30 focus-visible:ring-inset"
+      >
+        <span className="text-muted-foreground">{label}</span>
+        <span className="ml-auto truncate text-right">{value}</span>
+        <ArrowRightIcon
+          className="size-3.5 shrink-0 text-muted-foreground"
+          aria-hidden
+        />
+      </Link>
+    </li>
   )
 }

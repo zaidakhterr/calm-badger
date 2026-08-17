@@ -17,6 +17,7 @@ import {
   ADAPTERS,
   DEFAULT_ADAPTER,
   SIMULATION_NOTICE,
+  storedAdapterDescription,
   type AdapterDescription,
   type AdapterId,
 } from "./adapters"
@@ -872,14 +873,14 @@ export async function loadEstimateEvidence(
 
 export type DeliveryEvidenceProjection = {
   stepKey: string
-  /** Both simulated adapters, always, so the boundary is visible before use. */
+  /** The single simulated destination, visible before use. */
   adapters: AdapterDescription[]
   defaultAdapter: AdapterId
   /** Whether pricing has produced a quote for an adapter to transform. */
   quoteAvailable: boolean
   quoteNumber: string | null
   delivery: {
-    adapter: AdapterId
+    adapter: string
     adapterName: string
     externalEstimateId: string
     deliveredAt: string
@@ -901,14 +902,14 @@ export async function loadDeliveryEvidence(
 
   return {
     stepKey: DELIVER_STEP_KEY,
-    adapters: Object.values(ADAPTERS),
+    adapters: [ADAPTERS[DEFAULT_ADAPTER]],
     defaultAdapter: DEFAULT_ADAPTER,
     quoteAvailable: quote !== null,
     quoteNumber: quote?.quoteNumber ?? null,
     delivery: delivery
       ? {
           adapter: delivery.adapter,
-          adapterName: ADAPTERS[delivery.adapter].name,
+          adapterName: storedAdapterDescription(delivery.adapter).name,
           externalEstimateId: delivery.externalEstimateId,
           deliveredAt: delivery.deliveredAt,
           simulated: true,

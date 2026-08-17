@@ -52,7 +52,6 @@ describe("RFQ Relay Worker", () => {
     expect(system.architecture.steps).toContain("Match products")
     expect(system.retrieval.shortlistSize).toBeGreaterThan(0)
     expect(system.adapterContract.adapters.map((entry) => entry.id)).toEqual([
-      "corebridge-sandbox",
       "generic-erp-webhook",
     ])
     for (const adapter of system.adapterContract.adapters) {

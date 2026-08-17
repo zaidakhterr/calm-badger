@@ -322,7 +322,7 @@ async function evaluateScenario(
   gold: GoldScenario,
   options: EvaluationOptions
 ): Promise<ScenarioEvaluation> {
-  const adapter = options.adapter ?? "corebridge-sandbox"
+  const adapter = options.adapter ?? "generic-erp-webhook"
   const notes: string[] = []
   const startedAt = Date.now()
 

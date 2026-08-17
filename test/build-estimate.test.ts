@@ -520,86 +520,8 @@ const NOTICE =
   "Simulated locally. This adapter transforms the canonical quote and returns a synthetic identifier; no request leaves the application, no third-party system is contacted, and no affiliation or endorsement is implied."
 
 describe("adapter payloads", () => {
-  it("maps the canonical quote to the CoreBridge Sandbox document", () => {
-    expect(buildAdapterPayload("corebridge-sandbox", fixtureQuote)).toEqual({
-      documentType: "SALES_ESTIMATE",
-      sandbox: true,
-      estimate: {
-        reference: "Q-ABCDEF0123",
-        issuedOn: "2026-08-13",
-        currency: "EUR",
-        priceMode: "NET",
-        partner: {
-          partnerCode: "CUST-1001",
-          legalName: "Nordwerk Facility Services GmbH",
-          priceGroup: "PREFERRED",
-          contact: {
-            fullName: "Petra Lindqvist",
-            function: "Procurement",
-            emailAddress: "petra@nordwerk.example",
-          },
-        },
-        shipTo: {
-          siteName: "Spandau depot",
-          addressLine: "Industriestrasse 14",
-          postalCode: "13581",
-          city: "Berlin",
-          countryCode: "DE",
-        },
-        positions: [
-          {
-            position: 1,
-            articleCode: "NX-FLT-1120",
-            articleName: "Panel filter 592x592x48 ISO Coarse 60%",
-            unitOfMeasure: "piece",
-            quantity: 24,
-            netUnitPrice: "12.90",
-            netAmount: "309.60",
-            priceOrigin: "CONTRACT_PRICE",
-            priceNote: fixtureQuote.lines[0].pricing.explanation,
-          },
-          {
-            position: 2,
-            articleCode: "NX-SFT-2210",
-            articleName: "Nitrile coated glove size 9",
-            unitOfMeasure: "pair",
-            quantity: 100,
-            netUnitPrice: "3.10",
-            netAmount: "310.00",
-            priceOrigin: "PRICE_GROUP",
-            priceNote: fixtureQuote.lines[1].pricing.explanation,
-          },
-        ],
-        taxes: [
-          {
-            code: "DE-VAT-STANDARD",
-            ratePercent: "19.00",
-            baseAmount: "619.60",
-            taxAmount: "117.72",
-          },
-        ],
-        summary: {
-          netTotal: "619.60",
-          taxTotal: "117.72",
-          grossTotal: "737.32",
-          positionCount: 2,
-        },
-      },
-      origin: {
-        system: "RFQ Relay",
-        channel: "email",
-        documentReferences: ["PO-88213"],
-        attachments: [
-          "Email body (text/plain)",
-          "request.pdf (application/pdf)",
-        ],
-      },
-      disclaimer: NOTICE,
-    })
-  })
-
-  it("maps the same quote to the Generic ERP Webhook event", () => {
-    expect(buildAdapterPayload("generic-erp-webhook", fixtureQuote)).toEqual({
+  it("maps the canonical quote to the Generic ERP Webhook event", () => {
+    expect(buildAdapterPayload(fixtureQuote)).toEqual({
       event: "quote.created",
       event_version: 1,
       idempotency_key: "Q-ABCDEF0123",
@@ -656,29 +578,13 @@ describe("adapter payloads", () => {
     })
   })
 
-  it("designs the two payloads independently rather than renaming one", () => {
-    const coreBridge = buildAdapterPayload("corebridge-sandbox", fixtureQuote)
-    const webhook = buildAdapterPayload("generic-erp-webhook", fixtureQuote)
+  it("derives a stable synthetic webhook identifier", () => {
+    const identifier = externalEstimateId("Q-ABCDEF0123")
 
-    expect(Object.keys(coreBridge as object)).not.toEqual(
-      Object.keys(webhook as object)
-    )
-
-    // One carries decimal strings, the other integer minor units, from the
-    // same canonical amount.
-    expect(JSON.stringify(coreBridge)).toContain('"netUnitPrice":"12.90"')
-    expect(JSON.stringify(webhook)).toContain('"unit_price":1290')
-  })
-
-  it("derives a stable synthetic identifier per adapter", () => {
-    const first = externalEstimateId("corebridge-sandbox", "Q-ABCDEF0123")
-    const second = externalEstimateId("generic-erp-webhook", "Q-ABCDEF0123")
-
-    expect(first).toBe(externalEstimateId("corebridge-sandbox", "Q-ABCDEF0123"))
-    expect(first).toMatch(/^CBX-SBX-\d{8}$/)
-    expect(second).toMatch(/^ERP-SIM-\d{6}-\d{4}$/)
-    expect(first).not.toBe(second)
-    expect(isAdapterId("corebridge-sandbox")).toBe(true)
+    expect(identifier).toBe(externalEstimateId("Q-ABCDEF0123"))
+    expect(identifier).toMatch(/^ERP-SIM-\d{6}-\d{4}$/)
+    expect(isAdapterId("generic-erp-webhook")).toBe(true)
+    expect(isAdapterId("corebridge-sandbox")).toBe(false)
     expect(isAdapterId("sap")).toBe(false)
   })
 })
@@ -893,16 +799,15 @@ describe("downloading the canonical quote", () => {
   })
 })
 
-describe("choosing and inspecting an adapter", () => {
-  it("offers both simulated adapters, with CoreBridge preselected", async () => {
+describe("inspecting the fixed delivery webhook", () => {
+  it("offers only the Generic ERP Webhook", async () => {
     const { run } = await pricedRun()
     const evidence = await readDelivery(run.viewId)
 
-    expect(evidence.defaultAdapter).toBe("corebridge-sandbox")
+    expect(evidence.defaultAdapter).toBe("generic-erp-webhook")
     expect(evidence.quoteAvailable).toBe(true)
     expect(evidence.delivery).toBeNull()
     expect(evidence.adapters.map((adapter) => adapter.id)).toEqual([
-      "corebridge-sandbox",
       "generic-erp-webhook",
     ])
 
@@ -913,24 +818,22 @@ describe("choosing and inspecting an adapter", () => {
     }
   })
 
-  it("shows the owner each payload before anything is delivered", async () => {
+  it("shows the owner the fixed webhook payload before delivery", async () => {
     const { run, ownerCapability } = await pricedRun()
 
-    for (const adapter of ["corebridge-sandbox", "generic-erp-webhook"]) {
-      const response = await exports.default.fetch(
-        `${base}/api/runs/${run.viewId}/delivery/preview?adapter=${adapter}`,
-        { headers: { authorization: `Bearer ${ownerCapability}` } }
-      )
+    const response = await exports.default.fetch(
+      `${base}/api/runs/${run.viewId}/delivery/preview`,
+      { headers: { authorization: `Bearer ${ownerCapability}` } }
+    )
 
-      expect(response.status).toBe(200)
-      const preview = await response.json<{
-        payload: unknown
-        adapter: { id: string; simulated: boolean }
-      }>()
+    expect(response.status).toBe(200)
+    const preview = await response.json<{
+      payload: unknown
+      adapter: { id: string; simulated: boolean }
+    }>()
 
-      expect(preview.adapter.id).toBe(adapter)
-      expect(preview.payload).not.toBeNull()
-    }
+    expect(preview.adapter.id).toBe("generic-erp-webhook")
+    expect(preview.payload).not.toBeNull()
 
     // Inspecting delivered nothing: the graph is untouched.
     const after = await readRun(run.viewId)
@@ -944,10 +847,10 @@ describe("choosing and inspecting an adapter", () => {
     const { run } = await pricedRun()
 
     const anonymous = await exports.default.fetch(
-      `${base}/api/runs/${run.viewId}/delivery/preview?adapter=corebridge-sandbox`
+      `${base}/api/runs/${run.viewId}/delivery/preview`
     )
     const wrong = await exports.default.fetch(
-      `${base}/api/runs/${run.viewId}/delivery/preview?adapter=corebridge-sandbox`,
+      `${base}/api/runs/${run.viewId}/delivery/preview`,
       { headers: { authorization: "Bearer not-the-owner" } }
     )
 
@@ -955,14 +858,18 @@ describe("choosing and inspecting an adapter", () => {
     expect(wrong.status).toBe(403)
   })
 
-  it("rejects an unknown adapter", async () => {
+  it("does not let a query parameter change the fixed destination", async () => {
     const { run, ownerCapability } = await pricedRun()
     const response = await exports.default.fetch(
       `${base}/api/runs/${run.viewId}/delivery/preview?adapter=sap`,
       { headers: { authorization: `Bearer ${ownerCapability}` } }
     )
 
-    expect(response.status).toBe(400)
+    expect(response.status).toBe(200)
+    const preview = await response.json<{
+      adapter: { id: string }
+    }>()
+    expect(preview.adapter.id).toBe("generic-erp-webhook")
   })
 })
 
@@ -1083,11 +990,11 @@ describe("delivering the quote", () => {
 
     const evidence = await readDelivery(run.viewId)
 
-    expect(evidence.delivery!.adapter).toBe("corebridge-sandbox")
-    expect(evidence.delivery!.externalEstimateId).toMatch(/^CBX-SBX-/)
+    expect(evidence.delivery!.adapter).toBe("generic-erp-webhook")
+    expect(evidence.delivery!.externalEstimateId).toMatch(/^ERP-SIM-/)
     expect(evidence.delivery!.simulated).toBe(true)
     expect(JSON.stringify(evidence.delivery!.payload)).toContain(
-      "SALES_ESTIMATE"
+      "quote.created"
     )
   })
 
@@ -1105,9 +1012,12 @@ describe("delivering the quote", () => {
     expect(evidence.delivery).toBeNull()
   })
 
-  it("refuses an unknown adapter and a run that is not priced", async () => {
+  it("ignores an adapter body and refuses a run that is not priced", async () => {
     const { run, ownerCapability } = await pricedRun()
-    expect((await deliver(run.viewId, "sap", ownerCapability)).status).toBe(400)
+    expect((await deliver(run.viewId, "sap", ownerCapability)).status).toBe(200)
+    expect((await readDelivery(run.viewId)).delivery!.adapter).toBe(
+      "generic-erp-webhook"
+    )
 
     const unpriced = await createCuratedRun("messy-forwarded-request")
     await waitForWorkflowState(unpriced.run.viewId, [
@@ -1237,11 +1147,7 @@ describe("delivering the quote", () => {
       dump: () => env.DB.dump(),
     }
 
-    const outcome = await deliverRun(
-      { ...env, DB: database },
-      runId,
-      "corebridge-sandbox"
-    )
+    const outcome = await deliverRun({ ...env, DB: database }, runId)
 
     expect(outcome.state).toBe("not_priced")
     const deliveries = await env.DB.prepare(

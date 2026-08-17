@@ -1,35 +1,18 @@
 /**
  * Simulated delivery adapters.
  *
- * Both adapters implement one export contract: they are handed the canonical
- * quote and nothing else, and they return the payload a receiving system would
- * see plus a synthetic acknowledgement. Neither of them opens a socket. No
- * request leaves this Worker, no credential exists for them, and their names
- * describe shapes rather than products: "CoreBridge Sandbox" is a fictional
- * business system invented for this demo, and nothing here implies connectivity
- * with, affiliation with, or endorsement by any real vendor.
+ * The Generic ERP Webhook is the sole delivery destination. It receives the
+ * canonical quote and returns the payload a receiver would see plus a synthetic
+ * acknowledgement. It never opens a socket: no request leaves this Worker and
+ * no credential exists for it.
  *
- * The two payloads are deliberately designed apart rather than renamed copies
- * of each other, because the point of the boundary is that one stable canonical
- * document can satisfy genuinely different receivers:
- *
- * - CoreBridge Sandbox is document-oriented: a nested sales estimate with a
- *   partner block, positions, a tax table, and decimal-string amounts.
- * - Generic ERP Webhook is event-oriented: a flat snake_case envelope with a
- *   versioned event name and every amount as an integer in minor units.
- *
- * Both transformations are pure and deterministic: the same quote always
- * produces the same payload and the same synthetic identifier, which is what
- * makes them worth snapshotting.
+ * The transformation is pure and deterministic: the same quote always
+ * produces the same payload and synthetic identifier.
  */
 
-import { formatAmount, type PricingRule } from "./pricing"
 import type { CanonicalQuote } from "./quote"
 
-export const ADAPTER_IDS = [
-  "corebridge-sandbox",
-  "generic-erp-webhook",
-] as const
+export const ADAPTER_IDS = ["generic-erp-webhook"] as const
 
 export type AdapterId = (typeof ADAPTER_IDS)[number]
 
@@ -37,14 +20,14 @@ export function isAdapterId(value: unknown): value is AdapterId {
   return typeof value === "string" && ADAPTER_IDS.includes(value as AdapterId)
 }
 
-/** Preselected in the interface, and labelled simulated wherever it appears. */
-export const DEFAULT_ADAPTER: AdapterId = "corebridge-sandbox"
+/** The sole destination used for every new delivery. */
+export const DEFAULT_ADAPTER: AdapterId = "generic-erp-webhook"
 
 export const SIMULATION_NOTICE =
   "Simulated locally. This adapter transforms the canonical quote and returns a synthetic identifier; no request leaves the application, no third-party system is contacted, and no affiliation or endorsement is implied."
 
 export type AdapterDescription = {
-  id: AdapterId
+  id: string
   name: string
   /** How the payload is shaped, in one line, before a reviewer reads it. */
   contract: string
@@ -54,15 +37,6 @@ export type AdapterDescription = {
 }
 
 export const ADAPTERS: Record<AdapterId, AdapterDescription> = {
-  "corebridge-sandbox": {
-    id: "corebridge-sandbox",
-    name: "CoreBridge Sandbox",
-    contract:
-      "Document-oriented sales estimate: a nested partner block, numbered positions, a tax table, and amounts as decimal strings.",
-    payloadFormat: "JSON document, camelCase, decimal string amounts",
-    simulated: true,
-    notice: SIMULATION_NOTICE,
-  },
   "generic-erp-webhook": {
     id: "generic-erp-webhook",
     name: "Generic ERP Webhook",
@@ -89,13 +63,8 @@ export type AdapterDelivery = {
 }
 
 /** The payload a reviewer may inspect before deciding to deliver. */
-export function buildAdapterPayload(
-  adapter: AdapterId,
-  quote: CanonicalQuote
-): unknown {
-  return adapter === "corebridge-sandbox"
-    ? toCoreBridgeDocument(quote)
-    : toGenericErpEvent(quote)
+export function buildAdapterPayload(quote: CanonicalQuote): unknown {
+  return toGenericErpEvent(quote)
 }
 
 /**
@@ -104,15 +73,14 @@ export function buildAdapterPayload(
  * a function of the quote.
  */
 export function deliverQuote(
-  adapter: AdapterId,
   quote: CanonicalQuote,
   acceptedAt: string
 ): AdapterDelivery {
   return {
-    adapter: ADAPTERS[adapter],
-    payload: buildAdapterPayload(adapter, quote),
+    adapter: ADAPTERS[DEFAULT_ADAPTER],
+    payload: buildAdapterPayload(quote),
     receipt: {
-      externalEstimateId: externalEstimateId(adapter, quote.quoteNumber),
+      externalEstimateId: externalEstimateId(quote.quoteNumber),
       acceptedAt,
       status: "accepted",
       simulated: true,
@@ -126,93 +94,22 @@ export function deliverQuote(
  * so the same quote always produces the same one. It is not an identifier in
  * any real system.
  */
-export function externalEstimateId(
-  adapter: AdapterId,
-  quoteNumber: string
-): string {
-  const digits = fingerprint(`${adapter}:${quoteNumber}`)
-
-  return adapter === "corebridge-sandbox"
-    ? `CBX-SBX-${digits.slice(0, 8)}`
-    : `ERP-SIM-${digits.slice(0, 6)}-${digits.slice(6, 10)}`
+export function externalEstimateId(quoteNumber: string): string {
+  const digits = fingerprint(`${DEFAULT_ADAPTER}:${quoteNumber}`)
+  return `ERP-SIM-${digits.slice(0, 6)}-${digits.slice(6, 10)}`
 }
 
-/* -------------------------------------------------------------------------- */
-/* CoreBridge Sandbox — a nested estimate document                            */
-/* -------------------------------------------------------------------------- */
+/** Description for a delivery persisted by this or an earlier build. */
+export function storedAdapterDescription(id: string): AdapterDescription {
+  if (isAdapterId(id)) return ADAPTERS[id]
 
-const PRICE_ORIGIN: Record<PricingRule, string> = {
-  historical_override: "CONTRACT_PRICE",
-  customer_tier: "PRICE_GROUP",
-  quantity_break: "VOLUME_SCALE",
-  catalog_base: "LIST_PRICE",
-}
-
-function toCoreBridgeDocument(quote: CanonicalQuote) {
   return {
-    documentType: "SALES_ESTIMATE",
-    sandbox: true,
-    estimate: {
-      reference: quote.quoteNumber,
-      issuedOn: quote.issuedAt.slice(0, 10),
-      currency: quote.currency,
-      priceMode: "NET",
-      partner: {
-        partnerCode: quote.customer.customerId,
-        legalName: quote.customer.name,
-        priceGroup: quote.customer.tier.toUpperCase(),
-        contact: quote.customer.contact
-          ? {
-              fullName: quote.customer.contact.name,
-              function: quote.customer.contact.role,
-              emailAddress: quote.customer.contact.email,
-            }
-          : null,
-      },
-      shipTo: quote.customer.location
-        ? {
-            siteName: quote.customer.location.label,
-            addressLine: quote.customer.location.street,
-            postalCode: quote.customer.location.postalCode,
-            city: quote.customer.location.city,
-            countryCode: quote.customer.location.country,
-          }
-        : null,
-      positions: quote.lines.map((line) => ({
-        position: line.position,
-        articleCode: line.sku,
-        articleName: line.name,
-        unitOfMeasure: line.unit,
-        quantity: line.quantity,
-        netUnitPrice: formatAmount(line.pricing.unitPriceCents),
-        netAmount: formatAmount(line.subtotalCents),
-        priceOrigin: PRICE_ORIGIN[line.pricing.rule],
-        priceNote: line.pricing.explanation,
-      })),
-      taxes: [
-        {
-          code: "DE-VAT-STANDARD",
-          ratePercent: formatAmount(quote.totals.vatRateBp),
-          baseAmount: formatAmount(quote.totals.subtotalCents),
-          taxAmount: formatAmount(quote.totals.vatCents),
-        },
-      ],
-      summary: {
-        netTotal: formatAmount(quote.totals.subtotalCents),
-        taxTotal: formatAmount(quote.totals.vatCents),
-        grossTotal: formatAmount(quote.totals.totalCents),
-        positionCount: quote.totals.lineCount,
-      },
-    },
-    origin: {
-      system: quote.metadata.generator,
-      channel: quote.source.channel,
-      documentReferences: quote.source.references,
-      attachments: quote.source.documents.map(
-        (document) => `${document.label} (${document.mediaType})`
-      ),
-    },
-    disclaimer: SIMULATION_NOTICE,
+    id,
+    name: id === "corebridge-sandbox" ? "CoreBridge Sandbox" : "Legacy adapter",
+    contract: "Historical simulated delivery retained for read compatibility.",
+    payloadFormat: "Stored JSON payload",
+    simulated: true,
+    notice: SIMULATION_NOTICE,
   }
 }
 
