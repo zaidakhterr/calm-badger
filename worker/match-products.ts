@@ -47,8 +47,11 @@ import {
   type RerankUsage,
 } from "./providers/rerank"
 import { labelFor, parseModelOutput, type Confidence } from "./rfq-extraction"
+import { createRunStepRecorder, type RunStepRecorder } from "./run-steps"
 
 export const MATCH_PRODUCTS_STEP_KEY = "match-products"
+
+const MATCHES_EVIDENCE_KIND = "matches"
 
 /** Model text is stored for inspection, but never unbounded. */
 const MAX_STORED_OUTPUT_CHARS = 4_000
@@ -113,8 +116,10 @@ export async function matchProducts(
   env: Env,
   runId: string
 ): Promise<MatchProductsOutcome> {
+  const step = createRunStepRecorder(env, runId, MATCH_PRODUCTS_STEP_KEY)
+
   try {
-    return await match(env, runId)
+    return await match(env, runId, step)
   } catch (error) {
     const message = "The requested lines could not be matched."
 
@@ -129,7 +134,7 @@ export async function matchProducts(
     )
 
     try {
-      await failStep(env, runId, message)
+      await step.fail(message)
     } catch {
       // Nowhere left to record the failure; returning still stops the workflow.
     }
@@ -138,7 +143,11 @@ export async function matchProducts(
   }
 }
 
-async function match(env: Env, runId: string): Promise<MatchProductsOutcome> {
+async function match(
+  env: Env,
+  runId: string,
+  step: RunStepRecorder
+): Promise<MatchProductsOutcome> {
   const [lines, candidates] = await Promise.all([
     loadLines(env, runId),
     loadCandidates(env, runId),
@@ -146,12 +155,14 @@ async function match(env: Env, runId: string): Promise<MatchProductsOutcome> {
 
   if (lines.length === 0) {
     const message = "No requested lines were available to match."
-    await failStep(env, runId, message)
+    await step.fail(message)
     return { state: "error", message }
   }
 
   const startedAt = Date.now()
-  await beginStep(env, runId, lines.length)
+  await step.begin(
+    `Ranking shortlisted products for ${lines.length} ${lines.length === 1 ? "line" : "lines"}…`
+  )
 
   const provider = selectRerankProvider(env)
   const heuristics = readMatchHeuristics(env)
@@ -194,7 +205,7 @@ async function match(env: Env, runId: string): Promise<MatchProductsOutcome> {
         })
       )
 
-      await persistEvidence(env, runId, {
+      await step.attachEvidence(MATCHES_EVIDENCE_KIND, {
         state: "error",
         message,
         provider: provider.name,
@@ -204,7 +215,7 @@ async function match(env: Env, runId: string): Promise<MatchProductsOutcome> {
         totals: totalsOf(evidence, env, Date.now() - startedAt),
       })
 
-      await failStep(env, runId, message)
+      await step.fail(message)
       return { state: "error", message }
     }
   }
@@ -216,7 +227,7 @@ async function match(env: Env, runId: string): Promise<MatchProductsOutcome> {
   const reviewCount = evidence.length - acceptedCount
 
   await persistMatches(env, runId, evidence)
-  await persistEvidence(env, runId, {
+  await step.attachEvidence(MATCHES_EVIDENCE_KIND, {
     state: "complete",
     message: null,
     provider: provider.name,
@@ -226,7 +237,12 @@ async function match(env: Env, runId: string): Promise<MatchProductsOutcome> {
     totals: totalsOf(evidence, env, elapsedMs),
   })
 
-  await completeStep(env, runId, { acceptedCount, reviewCount, elapsedMs })
+  await step.complete(
+    `Matched ${acceptedCount} ${acceptedCount === 1 ? "line" : "lines"} to catalogue products` +
+      (reviewCount > 0
+        ? `, ${reviewCount} needing review.`
+        : " with nothing left to confirm.")
+  )
 
   console.log(
     JSON.stringify({
@@ -608,102 +624,4 @@ async function persistMatches(
   for (let index = 0; index < statements.length; index += 200) {
     await env.DB.batch(statements.slice(index, index + 200))
   }
-}
-
-async function beginStep(
-  env: Env,
-  runId: string,
-  lineCount: number
-): Promise<void> {
-  const now = new Date().toISOString()
-
-  await env.DB.batch([
-    env.DB.prepare(
-      `UPDATE run_steps
-          SET status = 'active',
-              summary = ?,
-              started_at = COALESCE(started_at, ?),
-              updated_at = ?
-        WHERE run_id = ? AND step_key = ?`
-    ).bind(
-      `Ranking shortlisted products for ${lineCount} ${lineCount === 1 ? "line" : "lines"}…`,
-      now,
-      now,
-      runId,
-      MATCH_PRODUCTS_STEP_KEY
-    ),
-    env.DB.prepare(
-      `UPDATE runs SET workflow_state = 'matching_products', updated_at = ?
-        WHERE id = ?`
-    ).bind(now, runId),
-  ])
-}
-
-async function completeStep(
-  env: Env,
-  runId: string,
-  totals: { acceptedCount: number; reviewCount: number; elapsedMs: number }
-): Promise<void> {
-  const now = new Date().toISOString()
-  const summary =
-    `Matched ${totals.acceptedCount} ${totals.acceptedCount === 1 ? "line" : "lines"} to catalogue products` +
-    (totals.reviewCount > 0
-      ? `, ${totals.reviewCount} needing review.`
-      : " with nothing left to confirm.")
-
-  await env.DB.batch([
-    env.DB.prepare(
-      `UPDATE run_steps
-          SET status = 'complete', summary = ?, completed_at = ?, updated_at = ?
-        WHERE run_id = ? AND step_key = ?`
-    ).bind(summary, now, now, runId, MATCH_PRODUCTS_STEP_KEY),
-    env.DB.prepare(
-      `UPDATE runs SET workflow_state = 'products_matched', updated_at = ?
-        WHERE id = ?`
-    ).bind(now, runId),
-  ])
-}
-
-async function failStep(
-  env: Env,
-  runId: string,
-  message: string
-): Promise<void> {
-  const now = new Date().toISOString()
-
-  await env.DB.batch([
-    env.DB.prepare(
-      `UPDATE run_steps
-          SET status = 'error', summary = ?, completed_at = ?, updated_at = ?
-        WHERE run_id = ? AND step_key = ?`
-    ).bind(message, now, now, runId, MATCH_PRODUCTS_STEP_KEY),
-    env.DB.prepare(
-      `UPDATE runs SET status = 'error', workflow_state = 'failed', updated_at = ?
-        WHERE id = ?`
-    ).bind(now, runId),
-  ])
-}
-
-async function persistEvidence(
-  env: Env,
-  runId: string,
-  payload: unknown
-): Promise<void> {
-  const now = new Date().toISOString()
-
-  await env.DB.prepare(
-    `INSERT INTO run_step_evidence (id, run_id, step_key, kind, payload, created_at)
-     VALUES (?, ?, ?, 'matches', ?, ?)
-     ON CONFLICT (run_id, step_key, kind) DO UPDATE SET
-       payload = excluded.payload,
-       created_at = excluded.created_at`
-  )
-    .bind(
-      crypto.randomUUID(),
-      runId,
-      MATCH_PRODUCTS_STEP_KEY,
-      JSON.stringify(payload),
-      now
-    )
-    .run()
 }
