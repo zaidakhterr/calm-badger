@@ -18,6 +18,8 @@
  * while it still reads `active`.
  */
 
+import { z } from "zod"
+
 import { readConfig } from "./env"
 import {
   estimateExtractionCostUsd,
@@ -28,6 +30,7 @@ import {
 } from "./providers/extraction"
 import {
   applyBusinessRules,
+  CONFIDENCE_SCHEMA,
   parseModelOutput,
   RFQ_EXTRACTION_INSTRUCTION,
   RFQ_SCHEMA_DESCRIPTION,
@@ -42,7 +45,81 @@ import { createRunStepRecorder, type RunStepRecorder } from "./run-steps"
 export const STRUCTURE_RFQ_STEP_KEY = "structure-rfq"
 
 /** The one kind of evidence this step attaches. */
-const STRUCTURE_EVIDENCE_KIND = "structure"
+export const STRUCTURE_EVIDENCE_KIND = "structure"
+
+/**
+ * One requested line after business validation: the position that identifies
+ * it, the facts that survived, and why it was flagged if it was. Nothing here
+ * is a measurement, so nothing here defaults — a line without a position or a
+ * state is not a line this step wrote.
+ */
+const VALIDATED_LINE_SCHEMA = z.object({
+  position: z.number(),
+  reference: z.string(),
+  description: z.string(),
+  /** Null whenever the extracted quantity was not usable. */
+  quantity: z.number().nullable(),
+  unit: z.string().nullable(),
+  /** Only ever a SKU that exists in the catalogue. */
+  catalogSku: z.string().nullable(),
+  sourceLabel: z.string(),
+  sourcePage: z.number().nullable(),
+  state: z.enum(["accepted", "review_required"]),
+  reason: z.string().nullable(),
+})
+
+/**
+ * The RFQ as it was persisted: the extraction schema's own customer, source,
+ * and deadline — this is the shape that schema already validated — over lines
+ * the business rules rewrote.
+ */
+const VALIDATED_RFQ_SCHEMA = z.object({
+  customer: rfqExtractionSchema.shape.customer,
+  source: rfqExtractionSchema.shape.source,
+  deadline: rfqExtractionSchema.shape.deadline,
+  lineItems: z.array(VALIDATED_LINE_SCHEMA),
+})
+
+/** What the provider reported it spent, or nothing. */
+const EXTRACTION_USAGE_SCHEMA = z.object({
+  inputTokens: z.number(),
+  outputTokens: z.number(),
+  totalTokens: z.number(),
+})
+
+/**
+ * The evidence this step writes, and therefore owns. The projection in
+ * `evidence.ts` parses stored rows with this schema rather than guessing at
+ * their shape, so writer and reader cannot drift apart without the build
+ * saying so.
+ *
+ * What the step decided — which provider answered, whether the output needed
+ * repair, and the validated RFQ itself — is required. The measurements around
+ * it default to `null`, so evidence written by an earlier build still renders
+ * instead of blanking the whole step, and an unrecorded measurement never
+ * reads as a zero the interface would show as a fact.
+ */
+export const STRUCTURE_EVIDENCE_SCHEMA = z.object({
+  provider: z.string(),
+  model: z.string(),
+  state: z.enum(["complete", "error"]),
+  message: z.string().nullable(),
+  repaired: z.boolean(),
+  confidence: CONFIDENCE_SCHEMA.nullable().catch(null),
+  validated: VALIDATED_RFQ_SCHEMA.nullable(),
+  /** Model text as returned, truncated. It never held a prompt or a key. */
+  originalOutput: z.string().nullable(),
+  issues: z.array(z.string()),
+  usage: EXTRACTION_USAGE_SCHEMA.nullable().catch(null),
+  metrics: z
+    .object({ latencyMs: z.number(), elapsedMs: z.number() })
+    .nullable()
+    .catch(null),
+  estimatedCostUsd: z.number().nullable().catch(null),
+  reportedCostUsd: z.number().nullable().catch(null),
+})
+
+export type StructureEvidence = z.infer<typeof STRUCTURE_EVIDENCE_SCHEMA>
 
 /** Model text is stored for inspection, but never unbounded. */
 const MAX_STORED_OUTPUT_CHARS = 12_000
@@ -148,7 +225,7 @@ async function structure(
       // No usage was reported, so no estimate is honest here.
       estimatedCostUsd: null,
       reportedCostUsd: null,
-    })
+    } satisfies StructureEvidence)
 
     await recorder.fail(message)
     return { state: "error", message }
@@ -209,7 +286,7 @@ async function structure(
     metrics: { latencyMs: result.latencyMs, elapsedMs },
     estimatedCostUsd: shared.estimatedCostUsd,
     reportedCostUsd: shared.reportedCostUsd,
-  })
+  } satisfies StructureEvidence)
 
   const reviewCount = validated.lineItems.filter(
     (line) => line.state === "review_required"
@@ -295,7 +372,7 @@ async function stopWithValidationFailure(
     metrics: { latencyMs: detail.latencyMs, elapsedMs: detail.elapsedMs },
     estimatedCostUsd: detail.estimatedCostUsd,
     reportedCostUsd: detail.reportedCostUsd,
-  })
+  } satisfies StructureEvidence)
 
   await recorder.fail(detail.message)
 

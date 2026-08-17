@@ -38,7 +38,11 @@ import { STORED_OCR_REGIONS_SCHEMA } from "./providers/ocr"
 import type { CanonicalQuote } from "./quote"
 import { RFQ_RECEIVED_STEP_KEY } from "./runs"
 import { loadSources, MAX_EMAIL_BODY_CHARS } from "./sources"
-import { STRUCTURE_RFQ_STEP_KEY } from "./structure-rfq"
+import {
+  STRUCTURE_EVIDENCE_KIND,
+  STRUCTURE_EVIDENCE_SCHEMA,
+  STRUCTURE_RFQ_STEP_KEY,
+} from "./structure-rfq"
 
 /* -------------------------------------------------------------------------- */
 /* RFQ received                                                               */
@@ -316,78 +320,34 @@ export async function loadStructureEvidence(
   env: Env,
   runId: string
 ): Promise<StructureEvidenceProjection> {
-  const stored = await readStoredEvidence(
+  const stored = await readOwnedEvidence(
     env,
     runId,
     STRUCTURE_RFQ_STEP_KEY,
-    "structure"
+    STRUCTURE_EVIDENCE_KIND,
+    STRUCTURE_EVIDENCE_SCHEMA
   )
+
+  const structure = stored.outcome === "read" ? stored.value : null
+  const unreadable = stored.outcome === "unreadable"
 
   return {
     stepKey: STRUCTURE_RFQ_STEP_KEY,
-    state: readState(stored?.state),
-    message: readText(stored?.message),
-    validated: readValidated(stored?.validated),
-    confidence: readConfidence(stored?.confidence),
-    repaired: stored?.repaired === true,
-    issues: readStrings(stored?.issues),
-    originalOutput: readText(stored?.originalOutput),
-    provider: readText(stored?.provider),
-    model: readText(stored?.model),
-    usage: readUsage(stored?.usage),
-    metrics: readMetrics(stored?.metrics),
-    estimatedCostUsd: readNumber(stored?.estimatedCostUsd),
-    reportedCostUsd: readNumber(stored?.reportedCostUsd),
-  }
-}
-
-function readValidated(
-  value: unknown
-): StructureEvidenceProjection["validated"] {
-  if (typeof value !== "object" || value === null) return null
-
-  const validated = value as Record<string, unknown>
-  const customer = asRecord(validated.customer)
-  const source = asRecord(validated.source)
-  const deadline = asRecord(validated.deadline)
-
-  return {
-    customer: {
-      companyName: readText(customer.companyName),
-      contactName: readText(customer.contactName),
-      contactEmail: readText(customer.contactEmail),
-      contactPhone: readText(customer.contactPhone),
-      deliveryLocation: readText(customer.deliveryLocation),
-    },
-    source: {
-      channel: readText(source.channel) ?? "email",
-      subject: readText(source.subject),
-      receivedAt: readText(source.receivedAt),
-      references: readStrings(source.references),
-    },
-    deadline: {
-      date: readText(deadline.date),
-      text: readText(deadline.text),
-    },
-    lineItems: (Array.isArray(validated.lineItems)
-      ? validated.lineItems
-      : []
-    ).map((entry, index) => {
-      const line = asRecord(entry)
-
-      return {
-        position: readNumber(line.position) ?? index + 1,
-        reference: readText(line.reference) ?? "",
-        description: readText(line.description) ?? "",
-        quantity: readNumber(line.quantity),
-        unit: readText(line.unit),
-        catalogSku: readText(line.catalogSku),
-        sourceLabel: readText(line.sourceLabel) ?? "",
-        sourcePage: readNumber(line.sourcePage),
-        state: readText(line.state) ?? "accepted",
-        reason: readText(line.reason),
-      }
-    }),
+    state: unreadable ? "error" : (structure?.state ?? "pending"),
+    message: unreadable
+      ? UNREADABLE_EVIDENCE_MESSAGE
+      : (structure?.message ?? null),
+    validated: structure?.validated ?? null,
+    confidence: structure?.confidence ?? null,
+    repaired: structure?.repaired ?? false,
+    issues: structure?.issues ?? [],
+    originalOutput: structure?.originalOutput ?? null,
+    provider: structure?.provider ?? null,
+    model: structure?.model ?? null,
+    usage: structure?.usage ?? null,
+    metrics: structure?.metrics ?? null,
+    estimatedCostUsd: structure?.estimatedCostUsd ?? null,
+    reportedCostUsd: structure?.reportedCostUsd ?? null,
   }
 }
 
@@ -1061,17 +1021,6 @@ function readUsage(value: unknown): StructureEvidenceProjection["usage"] {
     inputTokens: readNumber(usage.inputTokens) ?? 0,
     outputTokens: readNumber(usage.outputTokens) ?? 0,
     totalTokens: readNumber(usage.totalTokens) ?? 0,
-  }
-}
-
-function readMetrics(value: unknown): StructureEvidenceProjection["metrics"] {
-  if (typeof value !== "object" || value === null) return null
-
-  const metrics = value as Record<string, unknown>
-
-  return {
-    latencyMs: readNumber(metrics.latencyMs) ?? 0,
-    elapsedMs: readNumber(metrics.elapsedMs) ?? 0,
   }
 }
 

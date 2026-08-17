@@ -11,9 +11,10 @@
  */
 
 import { env, exports } from "cloudflare:workers"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 
 import { readConfig } from "../worker/env"
+import { loadStructureEvidence } from "../worker/evidence"
 import {
   estimateExtractionCostUsd,
   selectExtractionProvider,
@@ -933,6 +934,217 @@ describe("applying a reviewed line decision", () => {
     ).rejects.toThrow("position 99")
   })
 })
+
+/**
+ * Evidence written by a build that is not this one.
+ *
+ * The rows are seeded straight into D1, the way `run-steps.test.ts` seeds
+ * them, because the point is a payload no current code path writes: one that
+ * predates the measurements, and one whose validated RFQ has lost the position
+ * that identifies a line. Running the real workflow would only ever produce
+ * today's shape.
+ */
+describe("reading stored structure evidence a different build wrote", () => {
+  it("still projects a payload written before the measurements existed", async () => {
+    const runId = await seedRun()
+
+    // No `confidence`, `usage`, `metrics`, or costs: an earlier build did not
+    // record them.
+    await storeEvidence(
+      runId,
+      "structure-rfq",
+      "structure",
+      JSON.stringify({
+        provider: "contract-fake",
+        model: "extraction-contract-fake",
+        state: "complete",
+        message: null,
+        repaired: false,
+        validated: {
+          customer: {
+            companyName: "Northline Property Services",
+            contactName: null,
+            contactEmail: null,
+            contactPhone: null,
+            deliveryLocation: null,
+          },
+          source: {
+            channel: "email",
+            subject: null,
+            receivedAt: null,
+            references: [],
+          },
+          deadline: { date: null, text: null },
+          lineItems: [
+            {
+              position: 1,
+              reference: "NX-FLT-1120",
+              description: "Filter cartridge",
+              quantity: 24,
+              unit: "pieces",
+              catalogSku: "NX-FLT-1120",
+              sourceLabel: "replenishment-list.pdf",
+              sourcePage: 1,
+              state: "accepted",
+              reason: null,
+            },
+          ],
+        },
+        originalOutput: "{}",
+        issues: [],
+      })
+    )
+
+    const evidence = await loadStructureEvidence(env, runId)
+
+    expect(evidence.state).toBe("complete")
+    expect(evidence.provider).toBe("contract-fake")
+    expect(evidence.validated!.customer.companyName).toBe(
+      "Northline Property Services"
+    )
+    expect(evidence.validated!.lineItems).toHaveLength(1)
+    expect(evidence.validated!.lineItems[0].catalogSku).toBe("NX-FLT-1120")
+    // Not recorded reads as unknown, never as zero.
+    expect(evidence.confidence).toBeNull()
+    expect(evidence.usage).toBeNull()
+    expect(evidence.metrics).toBeNull()
+    expect(evidence.estimatedCostUsd).toBeNull()
+    expect(evidence.reportedCostUsd).toBeNull()
+  })
+
+  it("projects an error and logs one line when a validated line has no position", async () => {
+    const runId = await seedRun()
+
+    await storeEvidence(
+      runId,
+      "structure-rfq",
+      "structure",
+      JSON.stringify({
+        provider: "contract-fake",
+        model: "extraction-contract-fake",
+        state: "complete",
+        message: null,
+        repaired: false,
+        confidence: {
+          label: "High",
+          score: 0.9,
+          heuristic: "Nothing was cut.",
+        },
+        validated: {
+          customer: {
+            companyName: null,
+            contactName: null,
+            contactEmail: null,
+            contactPhone: null,
+            deliveryLocation: null,
+          },
+          source: {
+            channel: "email",
+            subject: null,
+            receivedAt: null,
+            references: [],
+          },
+          deadline: { date: null, text: null },
+          lineItems: [
+            {
+              reference: "NX-FLT-1120",
+              description: "Filter cartridge",
+              quantity: 24,
+              unit: "pieces",
+              catalogSku: "NX-FLT-1120",
+              sourceLabel: "replenishment-list.pdf",
+              sourcePage: 1,
+              state: "accepted",
+              reason: null,
+            },
+          ],
+        },
+        originalOutput: "{}",
+        issues: [],
+        usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+        metrics: { latencyMs: 4, elapsedMs: 6 },
+        estimatedCostUsd: 0.001,
+        reportedCostUsd: null,
+      })
+    )
+
+    const logged = await captureErrors(async () => {
+      const evidence = await loadStructureEvidence(env, runId)
+
+      expect(evidence.state).toBe("error")
+      expect(evidence.message).toBe(
+        "The stored evidence for this step could not be read."
+      )
+      expect(evidence.validated).toBeNull()
+      expect(evidence.provider).toBeNull()
+      expect(evidence.confidence).toBeNull()
+    })
+
+    expect(logged).toHaveLength(1)
+    // Identifiers only: no field name, no stored value, nothing to leak.
+    expect(logged[0]).toBe(
+      JSON.stringify({
+        event: "evidence_payload_invalid",
+        runId,
+        step: "structure-rfq",
+        kind: "structure",
+      })
+    )
+  })
+})
+
+const SEEDED_AT = "2026-01-01T00:00:00.000Z"
+
+/** A run with no steps and no evidence, ready for a hand-written payload. */
+async function seedRun(): Promise<string> {
+  const runId = crypto.randomUUID()
+
+  await env.DB.prepare(
+    `INSERT INTO runs (
+       id, view_id, owner_capability_hash, source_kind, scenario_id,
+       status, workflow_instance_id, workflow_state, workspace_hash,
+       created_at, updated_at
+     ) VALUES (?, ?, 'hash', 'curated', 'messy-forwarded-request',
+               'active', NULL, 'pending', NULL, ?, ?)`
+  )
+    .bind(runId, crypto.randomUUID(), SEEDED_AT, SEEDED_AT)
+    .run()
+
+  return runId
+}
+
+async function storeEvidence(
+  runId: string,
+  stepKey: string,
+  kind: string,
+  payload: string
+): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO run_step_evidence (
+       id, run_id, step_key, kind, payload, created_at
+     ) VALUES (?, ?, ?, ?, ?, ?)`
+  )
+    .bind(crypto.randomUUID(), runId, stepKey, kind, payload, SEEDED_AT)
+    .run()
+}
+
+/** The `console.error` lines one read produced, and only that read's. */
+async function captureErrors(read: () => Promise<void>): Promise<string[]> {
+  const lines: string[] = []
+  const logged = vi
+    .spyOn(console, "error")
+    .mockImplementation((line: string) => {
+      lines.push(line)
+    })
+
+  try {
+    await read()
+  } finally {
+    logged.mockRestore()
+  }
+
+  return lines.filter((line) => line.includes("evidence_payload_invalid"))
+}
 
 async function customerCount(): Promise<number> {
   const row = await env.DB.prepare(

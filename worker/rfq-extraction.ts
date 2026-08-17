@@ -262,14 +262,23 @@ export function applyBusinessRules(
 /* Confidence                                                                 */
 /* -------------------------------------------------------------------------- */
 
-export type ConfidenceLabel = "High" | "Medium" | "Review"
-
-export type Confidence = {
-  label: ConfidenceLabel
-  score: number
+/**
+ * A demo score and the words that explain it.
+ *
+ * Every step that judges something records one of these, and three of them are
+ * persisted inside step evidence, so the schema is the contract those readers
+ * parse with rather than a shape each of them guesses at.
+ */
+export const CONFIDENCE_SCHEMA = z.object({
+  label: z.enum(["High", "Medium", "Review"]),
+  score: z.number(),
   /** The deductions, in words, so the number is never mistaken for certainty. */
-  heuristic: string
-}
+  heuristic: z.string(),
+})
+
+export type Confidence = z.infer<typeof CONFIDENCE_SCHEMA>
+
+export type ConfidenceLabel = Confidence["label"]
 
 /**
  * A demo heuristic, not a calibrated probability. It starts from one and
