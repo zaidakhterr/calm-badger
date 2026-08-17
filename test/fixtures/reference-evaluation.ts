@@ -23,6 +23,7 @@
  */
 
 import type { ReferenceEvaluationSummary } from "../../worker/evaluation-summary"
+import type { DecisionInput } from "../../worker/review"
 import type { GoldDecision, GoldScenario } from "./gold-scenarios"
 import { GOLD_SCENARIOS } from "./gold-scenarios"
 
@@ -676,7 +677,7 @@ function decisionFor(
   item: ReviewItemView,
   structured: StructureView,
   notes: string[]
-): Record<string, unknown> {
+): DecisionInput {
   if (item.kind === "product") {
     if (item.proposal.sku) return { itemId: item.id, action: "accept" }
     if (item.alternatives.length > 0) {
@@ -698,13 +699,9 @@ function decisionFor(
       (line) => line.position === item.position
     )?.quantity
 
-    if (item.proposal.quantity ?? extracted) {
-      return {
-        itemId: item.id,
-        action: "quantity",
-        quantity: item.proposal.quantity ?? extracted,
-      }
-    }
+    const quantity = item.proposal.quantity ?? extracted
+
+    if (quantity) return { itemId: item.id, action: "quantity", quantity }
 
     notes.push(`line ${item.position} asked for a quantity nothing supplied`)
     return { itemId: item.id, action: "accept" }
