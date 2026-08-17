@@ -19,12 +19,18 @@
  *
  * `selectRerankProvider` refuses to build it when `APP_ENV` is production.
  *
+ * The ranking it renders `satisfies RerankRanking`: the same contract the live
+ * client asks the model to constrain its response to, and the same one the step
+ * validates with. A deliberate violation stays a violation — the invented SKU
+ * below is well-formed and wrong, exactly as a confident model's answer is.
+ *
  * Test hooks: a request whose wording contains one of the `trigger-…` markers
  * below produces the corresponding failure, which is how the provider, repair,
  * schema, and integrity contracts are exercised.
  */
 
 import type { AppConfig } from "../env"
+import type { RankedCandidate, RerankRanking } from "../product-matching"
 
 import {
   RerankProviderError,
@@ -99,9 +105,7 @@ export function createContractFakeRerankProvider(
   }
 }
 
-type Ranked = { sku: string; score: number; reason: string }
-
-function rank(request: RerankRequest): Ranked[] {
+function rank(request: RerankRequest): RankedCandidate[] {
   const queryTokens = [
     ...new Set(tokenise(`${request.reference} ${request.description}`)),
   ]
@@ -175,7 +179,7 @@ function clamp(value: number): number {
  * attempt can rescue, output nothing can rescue, and a confident selection of a
  * product that does not exist.
  */
-function renderText(ranked: Ranked[], wording: string): string {
+function renderText(ranked: RankedCandidate[], wording: string): string {
   if (wording.includes(TRIGGERS.unparsable)) {
     return "None of the candidates look right to me, sorry."
   }
@@ -191,7 +195,7 @@ function renderText(ranked: Ranked[], wording: string): string {
           ...ranked,
         ]
       : ranked,
-  }
+  } satisfies RerankRanking
 
   const json = JSON.stringify(payload, null, 2)
 

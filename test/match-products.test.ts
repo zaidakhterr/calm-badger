@@ -16,6 +16,8 @@
 import { env, exports } from "cloudflare:workers"
 import { describe, expect, it, vi } from "vitest"
 
+import { z } from "zod"
+
 import {
   ensureCatalogIndexes,
   normaliseText,
@@ -35,7 +37,12 @@ import {
   validateRerankOutput,
   type MatchAlternative,
 } from "../worker/product-matching"
-import { selectRerankProvider } from "../worker/providers/rerank"
+import { createOpenRouterRerankProvider } from "../worker/providers/openrouter-rerank"
+import {
+  RerankProviderError,
+  selectRerankProvider,
+  type RerankRequest,
+} from "../worker/providers/rerank"
 import { SCENARIOS } from "../worker/scenarios"
 
 const base = "https://example.test"
@@ -719,6 +726,83 @@ describe("model output that has to be validated", () => {
     expect(JSON.stringify(evidence)).not.toContain("openrouter.ai")
   })
 
+  it("reads a documented completion, its token counts, and its cost", async () => {
+    const requestFetch: typeof fetch = () =>
+      Promise.resolve(
+        Response.json({
+          id: "gen-1",
+          model: "openrouter/probe",
+          choices: [
+            {
+              index: 0,
+              message: { role: "assistant", content: '{"ok":true}' },
+              finish_reason: "stop",
+            },
+          ],
+          usage: {
+            prompt_tokens: 9,
+            completion_tokens: 4,
+            total_tokens: 13,
+            cost: 0.000045,
+          },
+        })
+      )
+
+    const provider = createOpenRouterRerankProvider(
+      readConfig(envWith({ OPENROUTER_API_KEY: "test-key" })),
+      requestFetch
+    )
+
+    const result = await provider.rerank(rerankRequest())
+
+    expect(result.text).toBe('{"ok":true}')
+    expect(result.usage).toEqual({
+      inputTokens: 9,
+      outputTokens: 4,
+      totalTokens: 13,
+    })
+    expect(result.finishReason).toBe("stop")
+    expect(result.reportedCostUsd).toBe(0.000045)
+  })
+
+  it("fails as a provider error when the response is not a completion", async () => {
+    // Without a parse at the boundary this is a ranking of empty text with no
+    // tokens, which reads downstream exactly like a model that ranked nothing.
+    const requestFetch: typeof fetch = () =>
+      Promise.resolve(Response.json({ ok: true, result: "queued" }))
+
+    const provider = createOpenRouterRerankProvider(
+      readConfig(envWith({ OPENROUTER_API_KEY: "test-key" })),
+      requestFetch
+    )
+
+    await expect(provider.rerank(rerankRequest())).rejects.toBeInstanceOf(
+      RerankProviderError
+    )
+  })
+
+  it("carries the status of a rejected request and nothing else", async () => {
+    const requestFetch: typeof fetch = () =>
+      Promise.resolve(
+        Response.json(
+          { error: { message: "upstream is on fire", code: 503 } },
+          { status: 503 }
+        )
+      )
+
+    const provider = createOpenRouterRerankProvider(
+      readConfig(envWith({ OPENROUTER_API_KEY: "test-key" })),
+      requestFetch
+    )
+
+    await expect(provider.rerank(rerankRequest())).rejects.toThrow(
+      /rejected the request \(503\)/
+    )
+    await expect(provider.rerank(rerankRequest())).rejects.not.toThrow(
+      /upstream is on fire/
+    )
+  })
+
   it("refuses to build the contract fake in production", () => {
     expect(() =>
       selectRerankProvider(
@@ -737,6 +821,30 @@ describe("model output that has to be validated", () => {
     ).toBe("contract-fake")
   })
 })
+
+/** One small reranking call, so the provider tests differ only in the answer. */
+function rerankRequest(): RerankRequest {
+  return {
+    runId: "run-id",
+    instruction: "Answer with the probe object.",
+    reference: "NX-VLV-2210",
+    description: "Brass ball valve DN25",
+    candidates: [
+      {
+        sku: "NX-VLV-2210",
+        name: "Brass ball valve",
+        description: "DN25 lever-operated brass ball valve",
+        category: "Valves",
+        manufacturer: "Nordex",
+        unit: "piece",
+        knownAs: ["ball valve"],
+      },
+    ],
+    schema: z.object({ ok: z.boolean() }),
+    schemaName: "probe",
+    schemaDescription: "A probe answer, so no run data reaches the stub.",
+  }
+}
 
 describe("the acceptance heuristics", () => {
   const winner: MatchAlternative = {

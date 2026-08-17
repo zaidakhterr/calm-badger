@@ -20,6 +20,13 @@
  * reranked line per retry would triple the paid calls for a step that already
  * makes one call per requested line.
  *
+ * The slice of the result this client consumes — text, finish reason, usage,
+ * and OpenRouter's own usage accounting — is parsed with the schema in
+ * `openrouter-response.ts`, which extraction reads the same provider with. A
+ * result that does not fit becomes a `RerankProviderError` rather than a
+ * ranking of empty text, and `requestFetch` is injectable so that contract can
+ * be tested without a network.
+ *
  * The model comes from `OPENROUTER_RERANK_MODEL`, which is configured
  * independently of the extraction model. The API key comes from the
  * `OPENROUTER_API_KEY` secret binding; it is never logged, never persisted, and
@@ -27,24 +34,32 @@
  */
 
 import { createOpenRouter } from "@openrouter/ai-sdk-provider"
-import { generateText, NoObjectGeneratedError, Output } from "ai"
+import { APICallError, generateText, NoObjectGeneratedError, Output } from "ai"
 
 import type { AppConfig } from "../env"
 
+import {
+  OPENROUTER_RESULT_SCHEMA,
+  readReportedCostUsd,
+  readTokenUsage,
+} from "./openrouter-response"
 import {
   RerankProviderError,
   type RerankProvider,
   type RerankRequest,
   type RerankResult,
-  type RerankUsage,
 } from "./rerank"
 
 const PROVIDER = "openrouter"
 const REQUEST_TIMEOUT_MS = 45_000
 const MAX_OUTPUT_TOKENS = 1_500
 
+const UNRECOGNISED_RESPONSE =
+  "The reranking model returned a response in an unrecognised shape."
+
 export function createOpenRouterRerankProvider(
-  config: AppConfig
+  config: AppConfig,
+  requestFetch: typeof fetch = fetch
 ): RerankProvider {
   const model = config.rerankModel
 
@@ -62,7 +77,7 @@ export function createOpenRouterRerankProvider(
         )
       }
 
-      const openrouter = createOpenRouter({ apiKey })
+      const openrouter = createOpenRouter({ apiKey, fetch: requestFetch })
       const languageModel = openrouter.chat(model, {
         usage: { include: true },
       })
@@ -70,7 +85,7 @@ export function createOpenRouterRerankProvider(
       const startedAt = Date.now()
 
       try {
-        const result = await generateText({
+        const generated = await generateText({
           model: languageModel,
           system: request.instruction,
           prompt: renderRequest(request),
@@ -85,30 +100,64 @@ export function createOpenRouterRerankProvider(
           abortSignal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         })
 
+        // The one boundary this client reads the provider across. A result
+        // that does not fit ends the run as any other provider failure does,
+        // rather than reaching the workflow as empty text and zero tokens.
+        const parsed = OPENROUTER_RESULT_SCHEMA.safeParse({
+          text: generated.text,
+          finishReason: generated.finishReason,
+          usage: generated.usage,
+          providerMetadata: generated.providerMetadata,
+        })
+
+        if (!parsed.success) {
+          throw new RerankProviderError(PROVIDER, UNRECOGNISED_RESPONSE)
+        }
+
         return {
           model,
-          text: result.text,
-          usage: readUsage(result.usage),
+          text: parsed.data.text,
+          usage: readTokenUsage(parsed.data),
           latencyMs: Date.now() - startedAt,
-          finishReason: result.finishReason,
-          reportedCostUsd: readReportedCost(result.providerMetadata),
+          finishReason: parsed.data.finishReason,
+          reportedCostUsd: readReportedCostUsd(parsed.data),
         }
       } catch (error) {
+        // A response that did not fit the schema is already this provider's
+        // error; describing it again would report it as a transport failure.
+        if (error instanceof RerankProviderError) throw error
+
         if (NoObjectGeneratedError.isInstance(error)) {
+          const parsed = OPENROUTER_RESULT_SCHEMA.safeParse({
+            text: error.text ?? "",
+            finishReason: error.finishReason ?? "error",
+            usage: error.usage,
+            providerMetadata: null,
+          })
+
+          if (!parsed.success) {
+            throw new RerankProviderError(PROVIDER, UNRECOGNISED_RESPONSE)
+          }
+
           return {
             model,
-            text: error.text ?? "",
-            usage: readUsage(error.usage),
+            text: parsed.data.text,
+            usage: readTokenUsage(parsed.data),
             latencyMs: Date.now() - startedAt,
-            finishReason: error.finishReason ?? "error",
+            finishReason: parsed.data.finishReason,
             reportedCostUsd: null,
           }
         }
 
+        const status = APICallError.isInstance(error)
+          ? (error.statusCode ?? null)
+          : null
+        const timedOut = error instanceof Error && error.name === "TimeoutError"
+
         throw new RerankProviderError(
           PROVIDER,
-          describeFailure(error),
-          readStatus(error)
+          describeFailure(status, timedOut),
+          status
         )
       }
     },
@@ -148,60 +197,19 @@ function renderRequest(request: RerankRequest): string {
     .join("\n")
 }
 
-function readUsage(usage: unknown): RerankUsage {
-  const value = (usage ?? {}) as Record<string, unknown>
-  const inputTokens = readInteger(value.inputTokens) ?? 0
-  const outputTokens = readInteger(value.outputTokens) ?? 0
-
-  return {
-    inputTokens,
-    outputTokens,
-    totalTokens: readInteger(value.totalTokens) ?? inputTokens + outputTokens,
-  }
-}
-
-/** OpenRouter usage accounting reports credits under `openrouter.usage.cost`. */
-function readReportedCost(metadata: unknown): number | null {
-  if (typeof metadata !== "object" || metadata === null) return null
-
-  const openrouter = (metadata as Record<string, unknown>).openrouter
-  if (typeof openrouter !== "object" || openrouter === null) return null
-
-  const usage = (openrouter as Record<string, unknown>).usage
-  if (typeof usage !== "object" || usage === null) return null
-
-  const cost = (usage as Record<string, unknown>).cost
-  return typeof cost === "number" && Number.isFinite(cost) ? cost : null
-}
-
 /**
  * Provider failures are reduced to a short sentence. The error cause can carry
- * the request body and headers, so nothing from it is propagated beyond a
- * status code.
+ * the request body and headers, so nothing from it is propagated beyond the
+ * status code the SDK's own `APICallError` names.
  */
-function describeFailure(error: unknown): string {
-  const status = readStatus(error)
-
+function describeFailure(status: number | null, timedOut: boolean): string {
   if (status !== null) {
     return `The reranking model rejected the request (${status}).`
   }
 
-  if (error instanceof Error && error.name === "TimeoutError") {
+  if (timedOut) {
     return "The reranking model did not respond in time."
   }
 
   return "The reranking model could not be reached."
-}
-
-function readStatus(error: unknown): number | null {
-  if (typeof error !== "object" || error === null) return null
-
-  const status = (error as { statusCode?: unknown }).statusCode
-  return typeof status === "number" && Number.isFinite(status) ? status : null
-}
-
-function readInteger(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value)
-    ? Math.trunc(value)
-    : null
 }

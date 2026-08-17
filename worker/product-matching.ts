@@ -53,7 +53,13 @@ export const rerankSchema = z.object({
     .max(16),
 })
 
-export type RankedCandidate = z.infer<typeof rerankSchema>["ranked"][number]
+/**
+ * The ranking a model is asked to answer with. Named because the contract fake
+ * writes one and this module validates one, and the two must be the same thing.
+ */
+export type RerankRanking = z.infer<typeof rerankSchema>
+
+export type RankedCandidate = RerankRanking["ranked"][number]
 
 export type RerankSchemaOutcome =
   | { state: "valid"; ranked: RankedCandidate[] }
