@@ -11,16 +11,39 @@
  * on the step and on the run rather than leaving the node waiting forever.
  */
 
+import { z } from "zod"
+
 import {
+  ADAPTER_PAYLOAD_SCHEMA,
+  ADAPTER_RECEIPT_SCHEMA,
   deliverQuote,
   DEFAULT_ADAPTER,
-  storedAdapterDescription,
   type AdapterDelivery,
+  type AdapterPayload,
+  type AdapterReceipt,
 } from "./adapters"
 import { loadQuote } from "./build-estimate"
 import { createRunStepRecorder } from "./run-steps"
 
 export const DELIVER_STEP_KEY = "deliver"
+
+/**
+ * The `payload` and `receipt` columns of `run_deliveries`, as this step stores
+ * them: the adapter's own two documents, JSON-encoded beside the identifier
+ * they were acknowledged under.
+ */
+const STORED_JSON_SCHEMA = z.string().transform((raw, ctx) => {
+  try {
+    const decoded: unknown = JSON.parse(raw)
+    return decoded
+  } catch {
+    ctx.addIssue({ code: "custom", message: "The column is not JSON text." })
+    return z.NEVER
+  }
+})
+
+const STORED_PAYLOAD_SCHEMA = STORED_JSON_SCHEMA.pipe(ADAPTER_PAYLOAD_SCHEMA)
+const STORED_RECEIPT_SCHEMA = STORED_JSON_SCHEMA.pipe(ADAPTER_RECEIPT_SCHEMA)
 
 /** The sentence delivery ends on, shared by the fresh and repair paths. */
 const deliveredSummary = (externalEstimateId: string): string =>
@@ -28,15 +51,22 @@ const deliveredSummary = (externalEstimateId: string): string =>
 
 export type DeliveryOutcome =
   | { state: "delivered"; delivery: AdapterDelivery }
-  | { state: "already_delivered"; delivery: AdapterDelivery }
+  | { state: "already_delivered"; delivery: StoredDelivery }
   | { state: "not_priced" }
   | { state: "error"; message: string }
 
+/**
+ * A delivery as it was written down. The identifier and the moment are the
+ * delivery — they are what says this run was delivered, and they are columns of
+ * their own. The two documents beside them are what was sent and what came
+ * back: `null` when the stored JSON no longer fits the adapter's contract, so
+ * a delivery an earlier build wrote still reads as delivered.
+ */
 export type StoredDelivery = {
   adapter: string
   externalEstimateId: string
-  payload: unknown
-  receipt: AdapterDelivery["receipt"]
+  payload: AdapterPayload | null
+  receipt: AdapterReceipt | null
   deliveredAt: string
 }
 
@@ -89,14 +119,7 @@ async function deliverOnce(env: Env, runId: string): Promise<DeliveryOutcome> {
       { at: existing.deliveredAt }
     )
 
-    return {
-      state: "already_delivered",
-      delivery: {
-        adapter: storedAdapterDescription(existing.adapter),
-        payload: existing.payload,
-        receipt: existing.receipt,
-      },
-    }
+    return { state: "already_delivered", delivery: existing }
   }
 
   const quote = await loadQuote(env, runId)
@@ -181,19 +204,14 @@ export async function loadDelivery(
 
   if (!row) return null
 
+  const payload = STORED_PAYLOAD_SCHEMA.safeParse(row.payload)
+  const receipt = STORED_RECEIPT_SCHEMA.safeParse(row.receipt)
+
   return {
     adapter: row.adapter,
     externalEstimateId: row.external_estimate_id,
-    payload: parseJson(row.payload),
-    receipt: parseJson(row.receipt) as AdapterDelivery["receipt"],
+    payload: payload.success ? payload.data : null,
+    receipt: receipt.success ? receipt.data : null,
     deliveredAt: row.delivered_at,
-  }
-}
-
-function parseJson(value: string): unknown {
-  try {
-    return JSON.parse(value)
-  } catch {
-    return null
   }
 }

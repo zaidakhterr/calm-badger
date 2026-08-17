@@ -22,8 +22,15 @@ import {
   storedAdapterDescription,
   type AdapterDescription,
   type AdapterId,
+  type AdapterPayload,
+  type AdapterReceipt,
 } from "./adapters"
-import { BUILD_ESTIMATE_STEP_KEY, loadQuote } from "./build-estimate"
+import {
+  BUILD_ESTIMATE_STEP_KEY,
+  ESTIMATE_EVIDENCE_KIND,
+  ESTIMATE_EVIDENCE_SCHEMA,
+  loadQuote,
+} from "./build-estimate"
 import { DELIVER_STEP_KEY, loadDelivery } from "./deliver"
 import {
   MATCH_PRODUCTS_STEP_KEY,
@@ -646,46 +653,28 @@ export async function loadEstimateEvidence(
   runId: string
 ): Promise<EstimateEvidenceProjection> {
   const [stored, quote] = await Promise.all([
-    readStoredEvidence(env, runId, BUILD_ESTIMATE_STEP_KEY, "estimate"),
+    readOwnedEvidence(
+      env,
+      runId,
+      BUILD_ESTIMATE_STEP_KEY,
+      ESTIMATE_EVIDENCE_KIND,
+      ESTIMATE_EVIDENCE_SCHEMA
+    ),
     loadQuote(env, runId),
   ])
 
-  const rules = stored?.rules ? asRecord(stored.rules) : null
-  const totals = stored?.totals ? asRecord(stored.totals) : null
+  const estimate = stored.outcome === "read" ? stored.value : null
+  const unreadable = stored.outcome === "unreadable"
 
   return {
     stepKey: BUILD_ESTIMATE_STEP_KEY,
-    state: readState(stored?.state),
-    message: readText(stored?.message),
+    state: unreadable ? "error" : (estimate?.state ?? "pending"),
+    message: unreadable
+      ? UNREADABLE_EVIDENCE_MESSAGE
+      : (estimate?.message ?? null),
     quote,
-    rules: rules
-      ? {
-          precedence: readStrings(rules.precedence),
-          applied: (Array.isArray(rules.applied) ? rules.applied : []).map(
-            (entry) => {
-              const applied = asRecord(entry)
-
-              return {
-                rule: readText(applied.rule) ?? "",
-                lineCount: readNumber(applied.lineCount) ?? 0,
-              }
-            }
-          ),
-          vatRateBp: readNumber(rules.vatRateBp) ?? 0,
-          rounding: readText(rules.rounding) ?? "",
-          note: readText(rules.note) ?? "",
-        }
-      : null,
-    totals: totals
-      ? {
-          lineCount: readNumber(totals.lineCount) ?? 0,
-          subtotalCents: readNumber(totals.subtotalCents) ?? 0,
-          vatRateBp: readNumber(totals.vatRateBp) ?? 0,
-          vatCents: readNumber(totals.vatCents) ?? 0,
-          totalCents: readNumber(totals.totalCents) ?? 0,
-          elapsedMs: readNumber(totals.elapsedMs) ?? 0,
-        }
-      : null,
+    rules: estimate?.rules ?? null,
+    totals: estimate?.totals ?? null,
   }
 }
 
@@ -708,8 +697,9 @@ export type DeliveryEvidenceProjection = {
     deliveredAt: string
     simulated: true
     notice: string
-    payload: unknown
-    receipt: unknown
+    /** `null` when the stored document no longer fits the adapter's contract. */
+    payload: AdapterPayload | null
+    receipt: AdapterReceipt | null
   } | null
 }
 
@@ -813,57 +803,4 @@ async function readOwnedEvidence<Schema extends z.ZodType>(
   )
 
   return { outcome: "unreadable" }
-}
-
-async function readStoredEvidence(
-  env: Env,
-  runId: string,
-  stepKey: string,
-  kind: string
-): Promise<Record<string, unknown> | null> {
-  const row = await env.DB.prepare(
-    `SELECT payload FROM run_step_evidence
-      WHERE run_id = ? AND step_key = ? AND kind = ?`
-  )
-    .bind(runId, stepKey, kind)
-    .first<{ payload: string }>()
-
-  if (!row) return null
-
-  try {
-    const parsed: unknown = JSON.parse(row.payload)
-    return typeof parsed === "object" && parsed !== null
-      ? (parsed as Record<string, unknown>)
-      : null
-  } catch {
-    return null
-  }
-}
-
-/*
- * The last of the hand-rolled readers. Only the Build estimate branch above
- * still calls them; they go when its own step owns a schema.
- */
-
-function readState(value: unknown): EstimateEvidenceProjection["state"] {
-  return value === "complete" || value === "error" ? value : "pending"
-}
-
-function readNumber(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) ? value : null
-}
-
-function readStrings(value: unknown): string[] {
-  if (!Array.isArray(value)) return []
-  return value.filter((entry): entry is string => typeof entry === "string")
-}
-
-function readText(value: unknown): string | null {
-  return typeof value === "string" ? value : null
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return typeof value === "object" && value !== null
-    ? (value as Record<string, unknown>)
-    : {}
 }

@@ -10,6 +10,8 @@
  * produces the same payload and synthetic identifier.
  */
 
+import { z } from "zod"
+
 import type { CanonicalQuote } from "./quote"
 
 export const ADAPTER_IDS = ["generic-erp-webhook"] as const
@@ -48,22 +50,79 @@ export const ADAPTERS: Record<AdapterId, AdapterDescription> = {
   },
 }
 
+/**
+ * Exactly what the receiving system would be sent: the Generic ERP Webhook's
+ * event envelope, which is the one payload this application produces.
+ *
+ * It is written here because this module defines the transformation, and read
+ * back with the same schema by whoever stored it. Every field is a fact about
+ * the quote it was built from, so nothing defaults.
+ */
+export const ADAPTER_PAYLOAD_SCHEMA = z.object({
+  event: z.literal("quote.created"),
+  event_version: z.number(),
+  idempotency_key: z.string(),
+  simulated: z.literal(true),
+  data: z.object({
+    quote_id: z.string(),
+    issued_at: z.string(),
+    currency: z.string(),
+    amount_scale: z.literal("minor_units"),
+    prices_include_tax: z.boolean(),
+    customer_id: z.string(),
+    customer_name: z.string(),
+    customer_tier: z.string(),
+    customer_tier_discount_bp: z.number(),
+    contact_email: z.string().nullable(),
+    ship_to_city: z.string().nullable(),
+    ship_to_country: z.string().nullable(),
+    ship_to_postal_code: z.string().nullable(),
+    items: z.array(
+      z.object({
+        line_no: z.number(),
+        sku: z.string(),
+        description: z.string(),
+        uom: z.string(),
+        qty: z.number(),
+        unit_price: z.number(),
+        list_price: z.number(),
+        line_total: z.number(),
+        pricing_rule: z.string(),
+        discount_bp: z.number().nullable(),
+      })
+    ),
+    subtotal: z.number(),
+    tax_rate_bp: z.number(),
+    tax_total: z.number(),
+    grand_total: z.number(),
+    source_channel: z.string(),
+    source_references: z.array(z.string()),
+    source_document_count: z.number(),
+  }),
+  notice: z.string(),
+})
+
+export type AdapterPayload = z.infer<typeof ADAPTER_PAYLOAD_SCHEMA>
+
+/** The synthetic acknowledgement the adapter returns. */
+export const ADAPTER_RECEIPT_SCHEMA = z.object({
+  externalEstimateId: z.string(),
+  acceptedAt: z.string(),
+  status: z.literal("accepted"),
+  simulated: z.literal(true),
+  notice: z.string(),
+})
+
+export type AdapterReceipt = z.infer<typeof ADAPTER_RECEIPT_SCHEMA>
+
 export type AdapterDelivery = {
   adapter: AdapterDescription
-  /** Exactly what the receiving system would be sent. */
-  payload: unknown
-  /** The synthetic acknowledgement the adapter returns. */
-  receipt: {
-    externalEstimateId: string
-    acceptedAt: string
-    status: "accepted"
-    simulated: true
-    notice: string
-  }
+  payload: AdapterPayload
+  receipt: AdapterReceipt
 }
 
 /** The payload a reviewer may inspect before deciding to deliver. */
-export function buildAdapterPayload(quote: CanonicalQuote): unknown {
+export function buildAdapterPayload(quote: CanonicalQuote): AdapterPayload {
   return toGenericErpEvent(quote)
 }
 
@@ -158,7 +217,7 @@ function toGenericErpEvent(quote: CanonicalQuote) {
       source_document_count: quote.source.documents.length,
     },
     notice: SIMULATION_NOTICE,
-  }
+  } satisfies AdapterPayload
 }
 
 /** A short stable digit string; enough to look like an identifier, no more. */

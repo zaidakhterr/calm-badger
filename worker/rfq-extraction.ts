@@ -34,6 +34,13 @@ export const RFQ_SCHEMA_DESCRIPTION =
 
 const nullableText = (max: number) => z.string().max(max).nullable()
 
+/**
+ * Document references the request quoted at itself — an order number, a
+ * previous quote. Named because they outlive the extraction: the RFQ row
+ * stores them and the canonical quote carries them on.
+ */
+export const SOURCE_REFERENCES_SCHEMA = z.array(z.string().max(200)).max(20)
+
 export const rfqExtractionSchema = z.object({
   customer: z.object({
     companyName: nullableText(200),
@@ -46,7 +53,7 @@ export const rfqExtractionSchema = z.object({
     channel: z.enum(["email", "pdf", "image", "mixed"]),
     subject: nullableText(300),
     receivedAt: nullableText(60),
-    references: z.array(z.string().max(200)).max(20),
+    references: SOURCE_REFERENCES_SCHEMA,
   }),
   deadline: z.object({
     date: nullableText(40),

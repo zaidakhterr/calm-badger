@@ -16,7 +16,7 @@
  */
 
 import { env, exports } from "cloudflare:workers"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 
 import {
   buildAdapterPayload,
@@ -29,8 +29,10 @@ import {
   quoteTotals,
   VAT_RATE_BP,
 } from "../worker/pricing"
-import { QUOTE_SCHEMA, type CanonicalQuote } from "../worker/quote"
+import { loadQuote } from "../worker/build-estimate"
 import { deliverRun } from "../worker/deliver"
+import { loadDeliveryEvidence, loadEstimateEvidence } from "../worker/evidence"
+import { QUOTE_SCHEMA, type CanonicalQuote } from "../worker/quote"
 
 const base = "https://example.test"
 
@@ -1057,5 +1059,252 @@ describe("delivering the quote automatically", () => {
       .first<{ quotes: number; deliveries: number }>()
 
     expect(remaining).toEqual({ quotes: 0, deliveries: 0 })
+  })
+})
+
+/* -------------------------------------------------------------------------- */
+/* Stored documents a different build wrote                                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Rows are seeded straight into D1, the way `run-steps.test.ts` does, because
+ * the point is a stored document no current code path writes: one that predates
+ * a field, and one this build cannot read at all. Running the real workflow
+ * would only ever produce today's shape.
+ */
+describe("reading a stored estimate and delivery a different build wrote", () => {
+  const SEEDED_AT = "2026-01-01T00:00:00.000Z"
+
+  async function seedRun(): Promise<string> {
+    const runId = crypto.randomUUID()
+
+    await env.DB.prepare(
+      `INSERT INTO runs (
+         id, view_id, owner_capability_hash, source_kind, scenario_id,
+         status, workflow_instance_id, workflow_state, workspace_hash,
+         created_at, updated_at
+       ) VALUES (?, ?, 'hash', 'curated', 'routine-replenishment',
+                 'active', NULL, 'estimate_built', NULL, ?, ?)`
+    )
+      .bind(runId, crypto.randomUUID(), SEEDED_AT, SEEDED_AT)
+      .run()
+
+    return runId
+  }
+
+  async function storeEstimateEvidence(
+    runId: string,
+    payload: string
+  ): Promise<void> {
+    await env.DB.prepare(
+      `INSERT INTO run_step_evidence (
+         id, run_id, step_key, kind, payload, created_at
+       ) VALUES (?, ?, 'build-estimate', 'estimate', ?, ?)`
+    )
+      .bind(crypto.randomUUID(), runId, payload, SEEDED_AT)
+      .run()
+  }
+
+  async function storeQuoteDocument(
+    runId: string,
+    document: string
+  ): Promise<void> {
+    await env.DB.prepare(
+      `INSERT INTO run_quotes (
+         run_id, quote_number, currency, line_count, subtotal_cents,
+         vat_rate_bp, vat_cents, total_cents, document, created_at
+       ) VALUES (?, 'Q-ABCDEF0123', 'EUR', 2, 61960, 1900, 11772, 73732, ?, ?)`
+    )
+      .bind(runId, document, SEEDED_AT)
+      .run()
+  }
+
+  async function storeDelivery(
+    runId: string,
+    payload: string,
+    receipt: string
+  ): Promise<void> {
+    await env.DB.prepare(
+      `INSERT INTO run_deliveries (
+         run_id, adapter, external_estimate_id, payload, receipt, delivered_at
+       ) VALUES (?, 'generic-erp-webhook', 'ERP-SIM-123456-7890', ?, ?, ?)`
+    )
+      .bind(runId, payload, receipt, SEEDED_AT)
+      .run()
+  }
+
+  /** The `console.error` lines one read produced, and only that read's. */
+  async function captureErrors(
+    event: string,
+    read: () => Promise<void>
+  ): Promise<string[]> {
+    const lines: string[] = []
+    const logged = vi
+      .spyOn(console, "error")
+      .mockImplementation((line: string) => {
+        lines.push(line)
+      })
+
+    try {
+      await read()
+    } finally {
+      logged.mockRestore()
+    }
+
+    return lines.filter((line) => line.includes(event))
+  }
+
+  it("still projects an estimate written before the rules and totals existed", async () => {
+    const runId = await seedRun()
+
+    // No `rules` and no `totals`: an earlier build recorded the quote and left
+    // the description of how it was priced for later.
+    await storeEstimateEvidence(
+      runId,
+      JSON.stringify({ state: "complete", message: null, quote: fixtureQuote })
+    )
+    await storeQuoteDocument(runId, JSON.stringify(fixtureQuote))
+
+    const evidence = await loadEstimateEvidence(env, runId)
+
+    expect(evidence.state).toBe("complete")
+    expect(evidence.message).toBeNull()
+    expect(evidence.quote?.quoteNumber).toBe(fixtureQuote.quoteNumber)
+    expect(evidence.quote?.totals.totalCents).toBe(73_732)
+    // Not recorded reads as unknown, never as zero.
+    expect(evidence.rules).toBeNull()
+    expect(evidence.totals).toBeNull()
+  })
+
+  it("projects an error and logs one line when the stored estimate is not one it knows", async () => {
+    const runId = await seedRun()
+
+    await storeEstimateEvidence(
+      runId,
+      JSON.stringify({
+        state: "priced",
+        message: null,
+        quote: fixtureQuote,
+        rules: {
+          precedence: ["catalog_base"],
+          applied: [{ rule: "catalog_base", lineCount: 2 }],
+          vatRateBp: 1900,
+          rounding: "…",
+          note: "…",
+        },
+        totals: {
+          lineCount: 2,
+          subtotalCents: 61_960,
+          vatRateBp: 1900,
+          vatCents: 11_772,
+          totalCents: 73_732,
+          elapsedMs: 4,
+        },
+      })
+    )
+    await storeQuoteDocument(runId, JSON.stringify(fixtureQuote))
+
+    const logged = await captureErrors("evidence_payload_invalid", async () => {
+      const evidence = await loadEstimateEvidence(env, runId)
+
+      expect(evidence.state).toBe("error")
+      expect(evidence.message).toBe(
+        "The stored evidence for this step could not be read."
+      )
+      expect(evidence.rules).toBeNull()
+      expect(evidence.totals).toBeNull()
+      // The quote is a document of its own, and it still reads.
+      expect(evidence.quote?.quoteNumber).toBe(fixtureQuote.quoteNumber)
+    })
+
+    expect(logged).toHaveLength(1)
+    // Identifiers only: no field name, no stored value, nothing to leak.
+    expect(logged[0]).toBe(
+      JSON.stringify({
+        event: "evidence_payload_invalid",
+        runId,
+        step: "build-estimate",
+        kind: "estimate",
+      })
+    )
+  })
+
+  it("reports no quote at all when the stored document is not one it can price", async () => {
+    const runId = await seedRun()
+
+    // A document with no customer is not a quote: there is nobody it prices
+    // for, so it is refused rather than shown with a hole in it.
+    // `JSON.stringify` drops the undefined key, so what is stored is a
+    // document with no customer in it at all.
+    await storeQuoteDocument(
+      runId,
+      JSON.stringify({ ...fixtureQuote, customer: undefined })
+    )
+
+    const logged = await captureErrors("quote_document_invalid", async () => {
+      expect(await loadQuote(env, runId)).toBeNull()
+
+      const evidence = await loadEstimateEvidence(env, runId)
+      expect(evidence.quote).toBeNull()
+      expect(evidence.state).toBe("pending")
+    })
+
+    expect(logged).toHaveLength(2)
+    expect(logged[0]).toBe(
+      JSON.stringify({
+        event: "quote_document_invalid",
+        runId,
+        step: "build-estimate",
+      })
+    )
+  })
+
+  it("still reports a delivery whose stored documents it cannot read", async () => {
+    const runId = await seedRun()
+
+    await storeDelivery(
+      runId,
+      // An event envelope missing everything it was carrying, and a receipt
+      // that is not JSON at all.
+      JSON.stringify({ event: "quote.created", event_version: 1 }),
+      "not json at all"
+    )
+
+    const evidence = await loadDeliveryEvidence(env, runId)
+
+    // What happened is the delivery: the destination, the identifier it was
+    // accepted under, and when. The two documents beside it are what was sent.
+    expect(evidence.delivery).not.toBeNull()
+    expect(evidence.delivery!.adapter).toBe("generic-erp-webhook")
+    expect(evidence.delivery!.adapterName).toBe("Generic ERP Webhook")
+    expect(evidence.delivery!.externalEstimateId).toBe("ERP-SIM-123456-7890")
+    expect(evidence.delivery!.deliveredAt).toBe(SEEDED_AT)
+    expect(evidence.delivery!.payload).toBeNull()
+    expect(evidence.delivery!.receipt).toBeNull()
+  })
+
+  it("reads back the documents the adapter wrote", async () => {
+    const runId = await seedRun()
+    const payload = buildAdapterPayload(fixtureQuote)
+
+    await storeDelivery(
+      runId,
+      JSON.stringify(payload),
+      JSON.stringify({
+        externalEstimateId: "ERP-SIM-123456-7890",
+        acceptedAt: SEEDED_AT,
+        status: "accepted",
+        simulated: true,
+        notice: NOTICE,
+      })
+    )
+
+    const evidence = await loadDeliveryEvidence(env, runId)
+
+    expect(evidence.delivery!.payload).toEqual(payload)
+    expect(evidence.delivery!.receipt!.externalEstimateId).toBe(
+      "ERP-SIM-123456-7890"
+    )
+    expect(evidence.delivery!.receipt!.status).toBe("accepted")
   })
 })

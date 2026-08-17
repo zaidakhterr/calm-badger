@@ -37,6 +37,7 @@ import {
   RFQ_SCHEMA_NAME,
   rfqExtractionSchema,
   scoreExtraction,
+  SOURCE_REFERENCES_SCHEMA,
   validateAgainstSchema,
   type ValidatedRfq,
 } from "./rfq-extraction"
@@ -79,6 +80,24 @@ const VALIDATED_RFQ_SCHEMA = z.object({
   deadline: rfqExtractionSchema.shape.deadline,
   lineItems: z.array(VALIDATED_LINE_SCHEMA),
 })
+
+/**
+ * The `run_rfq.source_references` column, as this step JSON-encodes it: the
+ * extraction contract's own list, stored beside the RFQ it came from. Whoever
+ * reads the column decides what an unreadable one means.
+ */
+export const STORED_SOURCE_REFERENCES_SCHEMA = z
+  .string()
+  .transform((raw, ctx) => {
+    try {
+      const decoded: unknown = JSON.parse(raw)
+      return decoded
+    } catch {
+      ctx.addIssue({ code: "custom", message: "The column is not JSON text." })
+      return z.NEVER
+    }
+  })
+  .pipe(SOURCE_REFERENCES_SCHEMA)
 
 /** What the provider reported it spent, or nothing. */
 const EXTRACTION_USAGE_SCHEMA = z.object({

@@ -14,98 +14,142 @@
  * provider response, because those fields are simply never read into it.
  */
 
+import { z } from "zod"
+
 import {
   priceLine,
+  PRICING_RULE_SCHEMA,
   quoteTotals,
+  QUOTE_TOTALS_SCHEMA,
   ROUNDING_NOTE,
   type AppliedPrice,
-  type PricingRule,
-  type QuoteTotals,
 } from "./pricing"
+import { STORED_SOURCE_REFERENCES_SCHEMA } from "./structure-rfq"
 
 /** Bumped when the shape changes; adapters and downloads state it. */
 export const QUOTE_SCHEMA = "rfq-relay.canonical-quote/v1"
 
-export type QuoteCustomer = {
-  customerId: string
-  name: string
-  tier: string
-  tierDiscountBp: number
-  contact: { name: string; role: string; email: string } | null
-  location: {
-    label: string
-    street: string
-    postalCode: string
-    city: string
-    country: string
-  } | null
-}
+export const QUOTE_CUSTOMER_SCHEMA = z.object({
+  customerId: z.string(),
+  name: z.string(),
+  tier: z.string(),
+  tierDiscountBp: z.number(),
+  contact: z
+    .object({ name: z.string(), role: z.string(), email: z.string() })
+    .nullable(),
+  location: z
+    .object({
+      label: z.string(),
+      street: z.string(),
+      postalCode: z.string(),
+      city: z.string(),
+      country: z.string(),
+    })
+    .nullable(),
+})
 
-export type QuoteSourceDocument = {
-  kind: string
-  label: string
-  mediaType: string
-  pageCount: number
-}
+export type QuoteCustomer = z.infer<typeof QUOTE_CUSTOMER_SCHEMA>
 
-export type QuoteSource = {
-  channel: string
-  subject: string | null
-  receivedAt: string | null
+export const QUOTE_SOURCE_DOCUMENT_SCHEMA = z.object({
+  kind: z.string(),
+  label: z.string(),
+  mediaType: z.string(),
+  pageCount: z.number(),
+})
+
+export type QuoteSourceDocument = z.infer<typeof QUOTE_SOURCE_DOCUMENT_SCHEMA>
+
+export const QUOTE_SOURCE_SCHEMA = z.object({
+  channel: z.string(),
+  subject: z.string().nullable(),
+  receivedAt: z.string().nullable(),
   /** Document references the request itself quoted, e.g. an order number. */
-  references: string[]
-  documents: QuoteSourceDocument[]
-}
+  references: z.array(z.string()),
+  documents: z.array(QUOTE_SOURCE_DOCUMENT_SCHEMA),
+})
 
-export type QuoteLine = {
-  position: number
+export type QuoteSource = z.infer<typeof QUOTE_SOURCE_SCHEMA>
+
+export const QUOTE_LINE_SCHEMA = z.object({
+  position: z.number(),
   /** What the request asked for, in its own words. */
-  requested: {
-    reference: string
-    description: string
-    sourceLabel: string
-    sourcePage: number | null
-  }
-  sku: string
-  name: string
-  unit: string
-  quantity: number
-  pricing: {
-    rule: PricingRule
-    ruleLabel: string
-    basePriceCents: number
-    unitPriceCents: number
-    discountBp: number | null
-    explanation: string
-  }
-  subtotalCents: number
+  requested: z.object({
+    reference: z.string(),
+    description: z.string(),
+    sourceLabel: z.string(),
+    sourcePage: z.number().nullable(),
+  }),
+  sku: z.string(),
+  name: z.string(),
+  unit: z.string(),
+  quantity: z.number(),
+  pricing: z.object({
+    rule: PRICING_RULE_SCHEMA,
+    ruleLabel: z.string(),
+    basePriceCents: z.number(),
+    unitPriceCents: z.number(),
+    discountBp: z.number().nullable(),
+    explanation: z.string(),
+  }),
+  subtotalCents: z.number(),
   /** How the product was decided, so the price is traceable to a match. */
-  match: { method: string; confidenceLabel: string }
-}
+  match: z.object({ method: z.string(), confidenceLabel: z.string() }),
+})
 
-export type CanonicalQuote = {
-  schema: typeof QUOTE_SCHEMA
-  quoteNumber: string
-  issuedAt: string
-  currency: "EUR"
+export type QuoteLine = z.infer<typeof QUOTE_LINE_SCHEMA>
+
+/**
+ * The document itself, as this module assembles it and as everything
+ * downstream reads it back.
+ *
+ * Nothing here defaults. A quote is what a customer would be charged, so a
+ * field this schema cannot read is not a quote with a gap in it: it is not
+ * this document, and whoever asked for it is told there is none rather than
+ * shown an amount nobody computed.
+ */
+export const CANONICAL_QUOTE_SCHEMA = z.object({
+  schema: z.literal(QUOTE_SCHEMA),
+  quoteNumber: z.string(),
+  issuedAt: z.string(),
+  currency: z.literal("EUR"),
   /** Line prices exclude VAT; the totals add it once. */
-  priceBasis: "excluding_vat"
-  customer: QuoteCustomer
-  source: QuoteSource
-  lines: QuoteLine[]
-  totals: QuoteTotals
-  metadata: {
-    generator: string
-    schemaVersion: string
-    pricingPrecedence: PricingRule[]
-    rounding: string
-    note: string
-  }
-}
+  priceBasis: z.literal("excluding_vat"),
+  customer: QUOTE_CUSTOMER_SCHEMA,
+  source: QUOTE_SOURCE_SCHEMA,
+  lines: z.array(QUOTE_LINE_SCHEMA),
+  totals: QUOTE_TOTALS_SCHEMA,
+  metadata: z.object({
+    generator: z.string(),
+    schemaVersion: z.string(),
+    pricingPrecedence: z.array(PRICING_RULE_SCHEMA),
+    rounding: z.string(),
+    note: z.string(),
+  }),
+})
+
+export type CanonicalQuote = z.infer<typeof CANONICAL_QUOTE_SCHEMA>
+
+/**
+ * The quote as a stored column holds it: this document, JSON-encoded by
+ * whichever step wrote it down. Readers parse the text with this rather than
+ * trusting that what was stored is still what this build calls a quote.
+ */
+export const STORED_QUOTE_DOCUMENT_SCHEMA = z
+  .string()
+  .transform((raw, ctx) => {
+    try {
+      const decoded: unknown = JSON.parse(raw)
+      return decoded
+    } catch {
+      ctx.addIssue({ code: "custom", message: "The column is not JSON text." })
+      return z.NEVER
+    }
+  })
+  .pipe(CANONICAL_QUOTE_SCHEMA)
 
 const GENERATOR = "RFQ Relay"
 
-const PRICING_PRECEDENCE: PricingRule[] = [
+const PRICING_PRECEDENCE: CanonicalQuote["metadata"]["pricingPrecedence"] = [
   "historical_override",
   "customer_tier",
   "quantity_break",
@@ -521,24 +565,18 @@ async function loadSource(env: Env, runId: string): Promise<QuoteSource> {
       }>(),
   ])
 
-  let references: string[] = []
-
-  try {
-    const parsed: unknown = JSON.parse(rfq?.source_references ?? "[]")
-    if (Array.isArray(parsed)) {
-      references = parsed.filter(
-        (entry): entry is string => typeof entry === "string"
-      )
-    }
-  } catch {
-    references = []
-  }
+  // The references are what the request quoted at itself, carried along for a
+  // reader; a column this build cannot read costs the quote those strings and
+  // never the price.
+  const references = STORED_SOURCE_REFERENCES_SCHEMA.safeParse(
+    rfq?.source_references ?? "[]"
+  )
 
   return {
     channel: rfq?.source_channel ?? "email",
     subject: rfq?.source_subject ?? null,
     receivedAt: rfq?.source_received_at ?? null,
-    references,
+    references: references.success ? references.data : [],
     documents: documents.results.map((row) => ({
       kind: row.kind,
       label: row.label,

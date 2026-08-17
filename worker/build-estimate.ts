@@ -14,13 +14,61 @@
  * rather than leave the node reading `active` forever.
  */
 
+import { z } from "zod"
+
 import { formatAmount, ROUNDING_NOTE, VAT_RATE_BP } from "./pricing"
-import { assembleQuote, type CanonicalQuote } from "./quote"
+import {
+  assembleQuote,
+  CANONICAL_QUOTE_SCHEMA,
+  STORED_QUOTE_DOCUMENT_SCHEMA,
+  type CanonicalQuote,
+} from "./quote"
 import { createRunStepRecorder, type RunStepRecorder } from "./run-steps"
 
 export const BUILD_ESTIMATE_STEP_KEY = "build-estimate"
 
-const ESTIMATE_EVIDENCE_KIND = "estimate"
+/** The one kind of evidence this step attaches. */
+export const ESTIMATE_EVIDENCE_KIND = "estimate"
+
+/**
+ * The evidence this step writes, and therefore owns. The projection in
+ * `evidence.ts` parses stored rows with this schema rather than guessing at
+ * their shape, so writer and reader cannot drift apart without the build
+ * saying so.
+ *
+ * Evidence is only ever attached once a quote exists, so the state and the
+ * quote are required. How the rules fell and what the arithmetic came to are a
+ * description of that quote rather than the quote itself, so they default to
+ * `null` and evidence written by an earlier build still renders.
+ */
+export const ESTIMATE_EVIDENCE_SCHEMA = z.object({
+  state: z.literal("complete"),
+  message: z.string().nullable(),
+  quote: CANONICAL_QUOTE_SCHEMA,
+  rules: z
+    .object({
+      precedence: z.array(z.string()),
+      applied: z.array(z.object({ rule: z.string(), lineCount: z.number() })),
+      vatRateBp: z.number(),
+      rounding: z.string(),
+      note: z.string(),
+    })
+    .nullable()
+    .catch(null),
+  totals: z
+    .object({
+      lineCount: z.number(),
+      subtotalCents: z.number(),
+      vatRateBp: z.number(),
+      vatCents: z.number(),
+      totalCents: z.number(),
+      elapsedMs: z.number(),
+    })
+    .nullable()
+    .catch(null),
+})
+
+export type EstimateEvidence = z.infer<typeof ESTIMATE_EVIDENCE_SCHEMA>
 
 export type BuildEstimateOutcome =
   | {
@@ -138,7 +186,7 @@ async function build(
       totalCents: quote.totals.totalCents,
       elapsedMs,
     },
-  })
+  } satisfies EstimateEvidence)
 
   const lineCount = quote.totals.lineCount
 
@@ -201,11 +249,24 @@ export async function loadQuote(
 
   if (!row) return null
 
-  try {
-    return JSON.parse(row.document) as CanonicalQuote
-  } catch {
+  const stored = STORED_QUOTE_DOCUMENT_SCHEMA.safeParse(row.document)
+
+  if (!stored.success) {
+    // Identifiers only: the stored document is never logged. A quote nobody
+    // can read is no quote, so delivery and the download both say so rather
+    // than working from a document this build does not recognise.
+    console.error(
+      JSON.stringify({
+        event: "quote_document_invalid",
+        runId,
+        step: BUILD_ESTIMATE_STEP_KEY,
+      })
+    )
+
     return null
   }
+
+  return stored.data
 }
 
 async function persistQuote(

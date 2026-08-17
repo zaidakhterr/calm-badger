@@ -35,9 +35,17 @@
  * lines, the VAT amount, and the total consistent with one another.
  */
 
+import { z } from "zod"
+
 /** Applied-rule identifiers. They are stable and safe to show. */
-export type PricingRule =
-  "historical_override" | "customer_tier" | "quantity_break" | "catalog_base"
+export const PRICING_RULE_SCHEMA = z.enum([
+  "historical_override",
+  "customer_tier",
+  "quantity_break",
+  "catalog_base",
+])
+
+export type PricingRule = z.infer<typeof PRICING_RULE_SCHEMA>
 
 export type QuantityBreak = {
   minQuantity: number
@@ -141,13 +149,16 @@ export function priceLine(input: PriceInput): AppliedPrice {
   })
 }
 
-export type QuoteTotals = {
-  lineCount: number
-  subtotalCents: number
-  vatRateBp: number
-  vatCents: number
-  totalCents: number
-}
+/** What a quote adds up to. Every amount is an integer in minor units. */
+export const QUOTE_TOTALS_SCHEMA = z.object({
+  lineCount: z.number(),
+  subtotalCents: z.number(),
+  vatRateBp: z.number(),
+  vatCents: z.number(),
+  totalCents: z.number(),
+})
+
+export type QuoteTotals = z.infer<typeof QUOTE_TOTALS_SCHEMA>
 
 /** Subtotal excludes VAT; VAT is applied once, over the whole subtotal. */
 export function quoteTotals(lines: { subtotalCents: number }[]): QuoteTotals {
