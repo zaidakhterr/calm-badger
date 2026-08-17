@@ -12,6 +12,7 @@ import {
   readReviewState,
   REVIEW_EVENT_TYPE,
 } from "./review"
+import { createRunStepRecorder } from "./run-steps"
 import { RFQ_RECEIVED_STEP_KEY } from "./runs"
 import { structureRfq } from "./structure-rfq"
 
@@ -46,19 +47,13 @@ export class RfqWorkflow extends WorkflowEntrypoint<Env, RfqWorkflowParams> {
       const now = new Date().toISOString()
 
       // Idempotent: the request handler already persisted RFQ receipt, so the
-      // durable orchestrator only confirms it owns the run.
-      await this.env.DB.batch([
-        this.env.DB.prepare(
-          `UPDATE run_steps
-              SET status = 'complete',
-                  completed_at = COALESCE(completed_at, ?),
-                  updated_at = ?
-            WHERE run_id = ? AND step_key = ?`
-        ).bind(now, now, runId, RFQ_RECEIVED_STEP_KEY),
-        this.env.DB.prepare(
-          `UPDATE runs SET workflow_state = 'accepted', updated_at = ? WHERE id = ?`
-        ).bind(now, runId),
-      ])
+      // durable orchestrator only confirms it owns the run. The receipt
+      // sentence and any earlier completion time are preserved by the
+      // recorder's `rfq-received` row, so a replay changes nothing.
+      await createRunStepRecorder(this.env, runId, "rfq-received").complete(
+        null,
+        { at: now }
+      )
 
       console.log(
         JSON.stringify({
