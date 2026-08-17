@@ -8,7 +8,9 @@
  * mutation endpoints.
  */
 
-import { SCENARIO_IDS, isScenarioId, type ScenarioId } from "./scenarios"
+import { z } from "zod"
+
+import { SCENARIO_IDS, type ScenarioId } from "./scenarios"
 import {
   curatedSources,
   deleteStoredSources,
@@ -16,8 +18,17 @@ import {
   type PreparedSource,
 } from "./sources"
 
-export { SCENARIO_IDS, isScenarioId }
+export { SCENARIO_IDS }
 export type { ScenarioId }
+
+/**
+ * The body that starts a curated run. This module owns it because it is this
+ * module that turns the request into a run row: a body naming anything other
+ * than one of the three curated scenarios never becomes one.
+ */
+export const CURATED_RUN_BODY_SCHEMA = z.object({
+  scenarioId: z.enum(SCENARIO_IDS),
+})
 
 export type RunStepStatus =
   "waiting" | "active" | "complete" | "review_required" | "error"

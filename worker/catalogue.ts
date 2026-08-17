@@ -8,6 +8,8 @@
  * without turning free-form input into database queries.
  */
 
+import { z } from "zod"
+
 export const CATALOGUE_SECTIONS = [
   "products",
   "customers",
@@ -15,13 +17,15 @@ export const CATALOGUE_SECTIONS = [
   "aliases",
 ] as const
 
-export type CatalogueSection = (typeof CATALOGUE_SECTIONS)[number]
+/**
+ * Which projection a catalogue URL asks for. The path segment is user input, so
+ * it is parsed into one of these four names before anything is loaded.
+ */
+export const CATALOGUE_SECTION_SCHEMA = z.enum(CATALOGUE_SECTIONS)
+
+export type CatalogueSection = z.infer<typeof CATALOGUE_SECTION_SCHEMA>
 
 const PUBLIC_CATALOGUE_LIMIT = 500
-
-export function isCatalogueSection(value: string): value is CatalogueSection {
-  return CATALOGUE_SECTIONS.includes(value as CatalogueSection)
-}
 
 export type CatalogueProduct = {
   sku: string

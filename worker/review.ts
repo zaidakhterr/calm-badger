@@ -133,6 +133,14 @@ export const REVIEW_DECISIONS_BODY_SCHEMA = z.object({
 })
 
 /**
+ * The body that settles the review. Approving or rejecting is the whole
+ * vocabulary; anything else is not a decision this node knows how to make.
+ */
+export const REVIEW_SETTLEMENT_BODY_SCHEMA = z.object({
+  action: z.enum(["approve", "reject"]),
+})
+
+/**
  * How a product line was decided. Anything else — including a decision word an
  * earlier build wrote — reads as the alternative, which is how the stored
  * reason already describes it.
@@ -1255,7 +1263,9 @@ async function resolveDecision(
   }
 }
 
-export type ReviewDecision = "approve" | "reject"
+export type ReviewDecision = z.infer<
+  typeof REVIEW_SETTLEMENT_BODY_SCHEMA
+>["action"]
 
 export type ReviewSettlement =
   | { state: "settled"; decision: ReviewDecision; review: ReviewProjection }

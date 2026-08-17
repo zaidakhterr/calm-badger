@@ -11,6 +11,8 @@
  * combined upload never reaches the workflow.
  */
 
+import { z } from "zod"
+
 import { findScenario, type Scenario } from "./scenarios"
 
 export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024
@@ -25,7 +27,26 @@ export const SUPPORTED_UPLOAD_TYPES = [
   "image/png",
 ] as const
 
-export type UploadMediaType = (typeof SUPPORTED_UPLOAD_TYPES)[number]
+/**
+ * What an uploaded file is allowed to be. This module owns the vocabulary
+ * because it is the only place a browser's media type is turned into one, so
+ * everyone downstream — the OCR reader, the preview route — receives a member
+ * of this set rather than whatever string the upload announced.
+ */
+export const UPLOAD_MEDIA_TYPE_SCHEMA = z.enum(SUPPORTED_UPLOAD_TYPES)
+
+export type UploadMediaType = z.infer<typeof UPLOAD_MEDIA_TYPE_SCHEMA>
+
+/**
+ * What a *stored* source may be: an upload, or the email body this application
+ * writes itself. Nothing else is ever put in `run_sources.media_type`.
+ */
+export const SOURCE_MEDIA_TYPE_SCHEMA = z.enum([
+  ...SUPPORTED_UPLOAD_TYPES,
+  "text/plain",
+])
+
+export type SourceMediaType = z.infer<typeof SOURCE_MEDIA_TYPE_SCHEMA>
 
 export type SourceKind = "email_body" | "inline_image" | "attachment"
 export type SourceRetentionClass = "custom" | "curated"
@@ -33,7 +54,7 @@ export type SourceRetentionClass = "custom" | "curated"
 export type PreparedSource = {
   kind: SourceKind
   label: string
-  mediaType: UploadMediaType | "text/plain"
+  mediaType: SourceMediaType
   bytes: ArrayBuffer
 }
 
@@ -42,7 +63,7 @@ export type StoredSource = {
   position: number
   kind: SourceKind
   label: string
-  mediaType: string
+  mediaType: SourceMediaType
   byteSize: number
   storageKey: string
 }
@@ -53,15 +74,11 @@ export type ValidationResult =
 const encoder = new TextEncoder()
 
 /** Leading bytes each accepted format must actually start with. */
-const MAGIC_BYTES: Record<UploadMediaType, number[][]> = {
+const MAGIC_BYTES = {
   "application/pdf": [[0x25, 0x50, 0x44, 0x46]],
   "image/png": [[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]],
   "image/jpeg": [[0xff, 0xd8, 0xff]],
-}
-
-export function isSupportedUploadType(value: string): value is UploadMediaType {
-  return (SUPPORTED_UPLOAD_TYPES as readonly string[]).includes(value)
-}
+} satisfies Record<UploadMediaType, number[][]>
 
 export function describeUploadLimits(): string {
   return `Attach PDF, JPEG, or PNG files only, up to ${MAX_UPLOAD_FILES} files, ${MAX_UPLOAD_BYTES / (1024 * 1024)} MB, and ${MAX_OCR_PAGES_PER_RUN} PDF or image pages combined.`
@@ -74,8 +91,9 @@ export function describeUploadLimits(): string {
 export async function validateCustomSubmission(
   form: FormData
 ): Promise<ValidationResult> {
-  const rawBody = form.get("emailBody")
-  const emailBody = typeof rawBody === "string" ? rawBody.trim() : ""
+  // A multipart field is either text or a file; only text is an email body.
+  const submitted = z.string().safeParse(form.get("emailBody"))
+  const emailBody = submitted.success ? submitted.data.trim() : ""
 
   if (emailBody.length === 0) {
     return { ok: false, error: "An email body is required to start a run" }
@@ -117,15 +135,17 @@ export async function validateCustomSubmission(
   ]
 
   for (const file of files) {
-    const mediaType = (file.type || "").split(";")[0].trim().toLowerCase()
+    const announced = (file.type || "").split(";")[0].trim().toLowerCase()
+    const declared = UPLOAD_MEDIA_TYPE_SCHEMA.safeParse(announced)
 
-    if (!isSupportedUploadType(mediaType)) {
+    if (!declared.success) {
       return {
         ok: false,
         error: `${describeFile(file)} is not a supported file type. ${describeUploadLimits()}`,
       }
     }
 
+    const mediaType = declared.data
     const bytes = await file.arrayBuffer()
 
     if (!hasExpectedMagicBytes(mediaType, bytes)) {
@@ -284,12 +304,15 @@ export async function loadSources(
        FROM run_sources WHERE run_id = ? ORDER BY position ASC`
   )
     .bind(runId)
+    // The kind and media type columns are written by `storeSources` above and
+    // by nothing else, from the two vocabularies declared at the top of this
+    // module, so the row type names them rather than widening them to string.
     .all<{
       id: string
       position: number
-      kind: string
+      kind: SourceKind
       label: string
-      media_type: string
+      media_type: SourceMediaType
       byte_size: number
       storage_key: string
     }>()
@@ -297,7 +320,7 @@ export async function loadSources(
   return rows.results.map((row) => ({
     id: row.id,
     position: row.position,
-    kind: row.kind as SourceKind,
+    kind: row.kind,
     label: row.label,
     mediaType: row.media_type,
     byteSize: row.byte_size,
@@ -337,9 +360,13 @@ function formatMegabytes(bytes: number): string {
   return (bytes / (1024 * 1024)).toFixed(1)
 }
 
-function toArrayBuffer(view: Uint8Array): ArrayBuffer {
-  return view.buffer.slice(
-    view.byteOffset,
-    view.byteOffset + view.byteLength
-  ) as ArrayBuffer
+/**
+ * The bytes of a view as a buffer of their own. A copy, deliberately: the
+ * caller's view may be a window onto a larger (or shared) buffer, and what is
+ * handed to R2 or to a request body must be exactly the bytes in the view.
+ */
+export function toArrayBuffer(view: Uint8Array): ArrayBuffer {
+  const copy = new Uint8Array(view.byteLength)
+  copy.set(view)
+  return copy.buffer
 }

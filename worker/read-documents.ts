@@ -318,8 +318,9 @@ async function readSource(
   const document = await provider.read({
     sourceId: source.id,
     label: source.label,
-    mediaType: source.mediaType as
-      "application/pdf" | "image/jpeg" | "image/png",
+    // Narrowed by the `text/plain` return above: what is left of the stored
+    // vocabulary is exactly the set of upload types the reader accepts.
+    mediaType: source.mediaType,
     bytes,
     maxPages,
     runPageLimit: MAX_OCR_PAGES_PER_RUN,

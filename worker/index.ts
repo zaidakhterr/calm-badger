@@ -1,6 +1,8 @@
+import { z } from "zod"
+
 import { capturePageview, captureFunnelEvent, logRoute } from "./analytics"
 import { loadQuote } from "./build-estimate"
-import { isCatalogueSection, loadCatalogueProjection } from "./catalogue"
+import { CATALOGUE_SECTION_SCHEMA, loadCatalogueProjection } from "./catalogue"
 import { ConfigError, readConfig } from "./env"
 import {
   loadCandidateEvidence,
@@ -18,6 +20,7 @@ import {
   REVIEW_DECISION_SCHEMA,
   REVIEW_DECISIONS_BODY_SCHEMA,
   REVIEW_EVENT_TYPE,
+  REVIEW_SETTLEMENT_BODY_SCHEMA,
   searchReviewCatalog,
   searchReviewCustomers,
   settleReview,
@@ -26,9 +29,9 @@ import {
 import {
   authorizeOwner,
   createRun,
+  CURATED_RUN_BODY_SCHEMA,
   deleteRun,
   isOwnerRequest,
-  isScenarioId,
   loadRun,
   resolveRunId,
   workflowInstanceId,
@@ -39,9 +42,10 @@ import { runRetentionSweep } from "./retention"
 import { scenarioPreviews } from "./scenarios"
 import { loadSystemDetails } from "./system"
 import {
-  isSupportedUploadType,
   loadSources,
   MAX_UPLOAD_BYTES,
+  toArrayBuffer,
+  UPLOAD_MEDIA_TYPE_SCHEMA,
   validateCustomSubmission,
 } from "./sources"
 
@@ -157,24 +161,26 @@ export default {
     env: Env,
     ctx: ExecutionContext
   ): void {
-    ctx.waitUntil(
-      runRetentionSweep(env, {
-        now: new Date(controller.scheduledTime),
-        trigger: "scheduled",
-      }).then(
-        () => undefined,
-        (error: unknown) => {
-          console.error(
-            JSON.stringify({
-              event: "retention_sweep_failed",
-              error: error instanceof Error ? error.name : "unknown",
-            })
-          )
-        }
-      )
-    )
+    ctx.waitUntil(sweepQuietly(env, new Date(controller.scheduledTime)))
   },
 } satisfies ExportedHandler<Env>
+
+/**
+ * The sweep, with its failure kept off the schedule. A cleanup that could not
+ * run is a log line and a run left for tomorrow, never an unhandled rejection.
+ */
+async function sweepQuietly(env: Env, now: Date): Promise<void> {
+  try {
+    await runRetentionSweep(env, { now, trigger: "scheduled" })
+  } catch (error) {
+    console.error(
+      JSON.stringify({
+        event: "retention_sweep_failed",
+        error: error instanceof Error ? error.name : "unknown",
+      })
+    )
+  }
+}
 
 async function routeRequest(
   request: Request,
@@ -219,9 +225,9 @@ async function routeRequest(
   const catalogueMatch = /^\/api\/catalogue\/([^/]+)$/.exec(url.pathname)
 
   if (catalogueMatch) {
-    const section = catalogueMatch[1]
+    const section = CATALOGUE_SECTION_SCHEMA.safeParse(catalogueMatch[1])
 
-    if (!isCatalogueSection(section)) {
+    if (!section.success) {
       return Response.json(
         { error: "Catalogue section not found" },
         { status: 404, headers: jsonHeaders }
@@ -233,7 +239,7 @@ async function routeRequest(
     }
 
     return Response.json(
-      { catalogue: await loadCatalogueProjection(env, section) },
+      { catalogue: await loadCatalogueProjection(env, section.data) },
       { headers: jsonHeaders }
     )
   }
@@ -622,16 +628,12 @@ function readWorkspaceId(request: Request): string | null {
 }
 
 function readCuratedInput(request: Request, bytes: Uint8Array): InputResult {
-  const payload = (() => {
-    try {
-      return JSON.parse(new TextDecoder().decode(bytes)) as unknown
-    } catch {
-      return null
-    }
-  })()
-  const scenarioId = (payload as { scenarioId?: unknown } | null)?.scenarioId
+  const body = parseJsonBody(
+    new TextDecoder().decode(bytes),
+    CURATED_RUN_BODY_SCHEMA
+  )
 
-  if (!isScenarioId(scenarioId)) {
+  if (!body.ok) {
     return {
       ok: false,
       error: "A known curated scenario is required",
@@ -641,7 +643,11 @@ function readCuratedInput(request: Request, bytes: Uint8Array): InputResult {
 
   return {
     ok: true,
-    value: { kind: "curated", scenarioId, requestUrl: request.url },
+    value: {
+      kind: "curated",
+      scenarioId: body.value.scenarioId,
+      requestUrl: request.url,
+    },
   }
 }
 
@@ -659,10 +665,7 @@ async function readCustomInput(
     form = await new Request("https://upload.invalid/", {
       method: "POST",
       headers: { "content-type": contentType },
-      body: bytes.buffer.slice(
-        bytes.byteOffset,
-        bytes.byteOffset + bytes.byteLength
-      ) as ArrayBuffer,
+      body: toArrayBuffer(bytes),
     }).formData()
   } catch {
     return {
@@ -798,11 +801,9 @@ async function reviewDecisionsResponse(
 
   if (!authorization.ok) return ownerRejection(authorization.reason)
 
-  const body = REVIEW_DECISIONS_BODY_SCHEMA.safeParse(
-    await readJsonBody(request)
-  )
+  const body = await readJsonBody(request, REVIEW_DECISIONS_BODY_SCHEMA)
 
-  if (!body.success) {
+  if (!body.ok) {
     return Response.json(
       { error: "A list of review decisions is required" },
       { status: 400, headers: jsonHeaders }
@@ -811,7 +812,7 @@ async function reviewDecisionsResponse(
 
   const decisions: DecisionInput[] = []
 
-  for (const entry of body.data.decisions) {
+  for (const entry of body.value.decisions) {
     const decision = REVIEW_DECISION_SCHEMA.safeParse(entry)
 
     if (!decision.success) {
@@ -866,16 +867,16 @@ async function reviewDecisionResponse(
 
   if (!authorization.ok) return ownerRejection(authorization.reason)
 
-  const payload = await readJsonBody(request)
-  const action = (payload as { action?: unknown } | null)?.action
+  const body = await readJsonBody(request, REVIEW_SETTLEMENT_BODY_SCHEMA)
 
-  if (action !== "approve" && action !== "reject") {
+  if (!body.ok) {
     return Response.json(
       { error: "A review decision must be approve or reject" },
       { status: 400, headers: jsonHeaders }
     )
   }
 
+  const action = body.value.action
   const outcome = await settleReview(env, authorization.runId, action)
 
   if (outcome.state === "absent") {
@@ -1024,7 +1025,10 @@ async function sourcePreviewResponse(
     (candidate) => candidate.id === sourceId
   )
 
-  if (!source || !isSupportedUploadType(source.mediaType)) {
+  if (
+    !source ||
+    !UPLOAD_MEDIA_TYPE_SCHEMA.safeParse(source.mediaType).success
+  ) {
     return Response.json(
       { error: "This source is unavailable" },
       { status: 404, headers: jsonHeaders }
@@ -1107,12 +1111,47 @@ function ownerViewer(isOwner: boolean) {
   } as const
 }
 
-async function readJsonBody(request: Request): Promise<unknown> {
+/**
+ * A request body that survived both gates: it was JSON, and it was the JSON the
+ * endpoint's owner declared. `ok: false` deliberately says nothing more — every
+ * handler answers a malformed body with its own sentence and status.
+ */
+type JsonBody<Value> = { ok: true; value: Value } | { ok: false }
+
+/** Reads a request body and parses it with the schema its owner exports. */
+async function readJsonBody<Value>(
+  request: Request,
+  schema: z.ZodType<Value>
+): Promise<JsonBody<Value>> {
+  let decoded: unknown
+
   try {
-    return await request.json()
+    decoded = await request.json()
   } catch {
-    return null
+    return { ok: false }
   }
+
+  const parsed = schema.safeParse(decoded)
+
+  return parsed.success ? { ok: true, value: parsed.data } : { ok: false }
+}
+
+/** The same two gates over text a caller has already read out of the request. */
+function parseJsonBody<Value>(
+  text: string,
+  schema: z.ZodType<Value>
+): JsonBody<Value> {
+  let decoded: unknown
+
+  try {
+    decoded = JSON.parse(text)
+  } catch {
+    return { ok: false }
+  }
+
+  const parsed = schema.safeParse(decoded)
+
+  return parsed.success ? { ok: true, value: parsed.data } : { ok: false }
 }
 
 async function healthResponse(env: Env): Promise<Response> {

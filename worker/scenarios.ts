@@ -452,13 +452,6 @@ export const SCENARIOS: Scenario[] = [
   },
 ]
 
-export function isScenarioId(value: unknown): value is ScenarioId {
-  return (
-    typeof value === "string" &&
-    (SCENARIO_IDS as readonly string[]).includes(value)
-  )
-}
-
 export function findScenario(id: ScenarioId): Scenario {
   const scenario = SCENARIOS.find((candidate) => candidate.id === id)
   if (!scenario) throw new Error(`Unknown scenario: ${id}`)
