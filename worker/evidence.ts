@@ -37,7 +37,11 @@ import {
   CUSTOMER_EVIDENCE_SCHEMA,
   RESOLVE_CUSTOMER_STEP_KEY,
 } from "./resolve-customer"
-import { RETRIEVE_CANDIDATES_STEP_KEY } from "./retrieve-candidates"
+import {
+  CANDIDATES_EVIDENCE_KIND,
+  CANDIDATES_EVIDENCE_SCHEMA,
+  RETRIEVE_CANDIDATES_STEP_KEY,
+} from "./retrieve-candidates"
 import { STORED_OCR_REGIONS_SCHEMA } from "./providers/ocr"
 import type { CanonicalQuote } from "./quote"
 import { RFQ_RECEIVED_STEP_KEY } from "./runs"
@@ -484,70 +488,29 @@ export async function loadCandidateEvidence(
   env: Env,
   runId: string
 ): Promise<CandidateEvidenceProjection> {
-  const stored = await readStoredEvidence(
+  const stored = await readOwnedEvidence(
     env,
     runId,
     RETRIEVE_CANDIDATES_STEP_KEY,
-    "candidates"
+    CANDIDATES_EVIDENCE_KIND,
+    CANDIDATES_EVIDENCE_SCHEMA
   )
 
-  const catalog = stored?.catalog ? asRecord(stored.catalog) : null
-  const totals = stored?.totals ? asRecord(stored.totals) : null
+  const candidates = stored.outcome === "read" ? stored.value : null
+  const unreadable = stored.outcome === "unreadable"
 
   return {
     stepKey: RETRIEVE_CANDIDATES_STEP_KEY,
-    state: readState(stored?.state),
-    message: readText(stored?.message),
-    method: readText(stored?.method),
-    shortlistSize: readNumber(stored?.shortlistSize) ?? 0,
-    customerScoped: stored?.customerScoped === true,
-    catalog: catalog
-      ? {
-          activeProducts: readNumber(catalog.activeProducts) ?? 0,
-          totalProducts: readNumber(catalog.totalProducts) ?? 0,
-          archivedExcluded: readNumber(catalog.archivedExcluded) ?? 0,
-        }
-      : null,
-    lines: (Array.isArray(stored?.lines) ? stored.lines : []).map((entry) => {
-      const line = asRecord(entry)
-
-      return {
-        position: readNumber(line.position) ?? 0,
-        reference: readText(line.reference) ?? "",
-        description: readText(line.description) ?? "",
-        query: readText(line.query) ?? "",
-        state: readText(line.state) ?? "retrieved",
-        supersededSku: readText(line.supersededSku),
-        note: readText(line.note) ?? "",
-        candidates: (Array.isArray(line.candidates) ? line.candidates : []).map(
-          (value, index) => {
-            const candidate = asRecord(value)
-
-            return {
-              rank: readNumber(candidate.rank) ?? index + 1,
-              sku: readText(candidate.sku) ?? "",
-              name: readText(candidate.name) ?? "",
-              category: readText(candidate.category) ?? "",
-              manufacturer: readText(candidate.manufacturer) ?? "",
-              unit: readText(candidate.unit) ?? "",
-              source: readText(candidate.source) ?? "",
-              score: readNumber(candidate.score) ?? 0,
-              evidence: readText(candidate.evidence) ?? "",
-              nearDuplicateOf: readText(candidate.nearDuplicateOf),
-            }
-          }
-        ),
-      }
-    }),
-    totals: totals
-      ? {
-          lineCount: readNumber(totals.lineCount) ?? 0,
-          exactCount: readNumber(totals.exactCount) ?? 0,
-          retrievedCount: readNumber(totals.retrievedCount) ?? 0,
-          candidateCount: readNumber(totals.candidateCount) ?? 0,
-          elapsedMs: readNumber(totals.elapsedMs) ?? 0,
-        }
-      : null,
+    state: unreadable ? "error" : (candidates?.state ?? "pending"),
+    message: unreadable
+      ? UNREADABLE_EVIDENCE_MESSAGE
+      : (candidates?.message ?? null),
+    method: candidates?.method ?? null,
+    shortlistSize: candidates?.shortlistSize ?? 0,
+    customerScoped: candidates?.customerScoped ?? false,
+    catalog: candidates?.catalog ?? null,
+    lines: candidates?.lines ?? [],
+    totals: candidates?.totals ?? null,
   }
 }
 

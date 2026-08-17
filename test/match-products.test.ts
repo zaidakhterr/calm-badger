@@ -14,7 +14,7 @@
  */
 
 import { env, exports } from "cloudflare:workers"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 
 import {
   ensureCatalogIndexes,
@@ -25,6 +25,7 @@ import {
   type LineRetrieval,
 } from "../worker/catalog/retrieval"
 import { readConfig } from "../worker/env"
+import { loadCandidateEvidence } from "../worker/evidence"
 import { applyReviewProductDecision } from "../worker/match-products"
 import {
   applyIntegrityChecks,
@@ -1270,6 +1271,198 @@ describe("applying an owner's product choice", () => {
     expect(stored!.total).toBe(0)
   })
 })
+
+/**
+ * Evidence written by a build that is not this one.
+ *
+ * The rows are seeded straight into D1, the way `run-steps.test.ts` seeds
+ * them, because the point is a payload no current code path writes: one that
+ * predates the counts, and one whose shortlist has lost the SKU that names a
+ * product. Running the real workflow would only ever produce today's shape.
+ */
+describe("reading stored candidate evidence a different build wrote", () => {
+  it("still projects a payload written before the catalogue scale and totals existed", async () => {
+    const runId = await seedRun()
+
+    await storeEvidence(
+      runId,
+      "retrieve-candidates",
+      "candidates",
+      JSON.stringify({
+        state: "complete",
+        method: "exact-evidence-then-d1-full-text",
+        message: null,
+        shortlistSize: 8,
+        customerScoped: false,
+        lines: [
+          {
+            position: 1,
+            reference: "NX-FLT-1120",
+            description: "Filter cartridge",
+            query: "filter cartridge",
+            state: "exact",
+            supersededSku: null,
+            note: "Settled by deterministic evidence; no model was asked.",
+            candidates: [
+              {
+                rank: 1,
+                sku: "NX-FLT-1120",
+                name: "Filter cartridge",
+                category: "Filtration",
+                manufacturer: "Nordex",
+                unit: "pieces",
+                source: "exact_sku",
+                score: 1,
+                evidence: "The request prints NX-FLT-1120.",
+                nearDuplicateOf: null,
+              },
+            ],
+          },
+        ],
+      })
+    )
+
+    const evidence = await loadCandidateEvidence(env, runId)
+
+    expect(evidence.state).toBe("complete")
+    expect(evidence.shortlistSize).toBe(8)
+    expect(evidence.customerScoped).toBe(false)
+    expect(evidence.lines).toHaveLength(1)
+    expect(evidence.lines[0].candidates[0].sku).toBe("NX-FLT-1120")
+    // Not recorded reads as unknown, never as zero.
+    expect(evidence.catalog).toBeNull()
+    expect(evidence.totals).toBeNull()
+  })
+
+  it("projects an error and logs one line when a candidate names no product", async () => {
+    const runId = await seedRun()
+
+    await storeEvidence(
+      runId,
+      "retrieve-candidates",
+      "candidates",
+      JSON.stringify({
+        state: "complete",
+        method: "exact-evidence-then-d1-full-text",
+        message: null,
+        shortlistSize: 8,
+        customerScoped: false,
+        catalog: {
+          activeProducts: 240,
+          totalProducts: 250,
+          archivedExcluded: 10,
+        },
+        lines: [
+          {
+            position: 1,
+            reference: "NX-FLT-1120",
+            description: "Filter cartridge",
+            query: "filter cartridge",
+            state: "retrieved",
+            supersededSku: null,
+            note: "Retrieved from the complete active catalogue.",
+            candidates: [
+              {
+                rank: 1,
+                name: "Filter cartridge",
+                category: "Filtration",
+                manufacturer: "Nordex",
+                unit: "pieces",
+                source: "full_text",
+                score: 0.4,
+                evidence: "Wording overlap.",
+                nearDuplicateOf: null,
+              },
+            ],
+          },
+        ],
+        totals: {
+          lineCount: 1,
+          exactCount: 0,
+          retrievedCount: 1,
+          candidateCount: 1,
+          elapsedMs: 5,
+        },
+      })
+    )
+
+    const logged = await captureErrors(async () => {
+      const evidence = await loadCandidateEvidence(env, runId)
+
+      expect(evidence.state).toBe("error")
+      expect(evidence.message).toBe(
+        "The stored evidence for this step could not be read."
+      )
+      expect(evidence.lines).toEqual([])
+      expect(evidence.catalog).toBeNull()
+      expect(evidence.totals).toBeNull()
+    })
+
+    expect(logged).toHaveLength(1)
+    // Identifiers only: no field name, no stored value, nothing to leak.
+    expect(logged[0]).toBe(
+      JSON.stringify({
+        event: "evidence_payload_invalid",
+        runId,
+        step: "retrieve-candidates",
+        kind: "candidates",
+      })
+    )
+  })
+})
+
+const SEEDED_AT = "2026-01-01T00:00:00.000Z"
+
+/** A run with no steps and no evidence, ready for a hand-written payload. */
+async function seedRun(): Promise<string> {
+  const runId = crypto.randomUUID()
+
+  await env.DB.prepare(
+    `INSERT INTO runs (
+       id, view_id, owner_capability_hash, source_kind, scenario_id,
+       status, workflow_instance_id, workflow_state, workspace_hash,
+       created_at, updated_at
+     ) VALUES (?, ?, 'hash', 'curated', 'messy-forwarded-request',
+               'active', NULL, 'pending', NULL, ?, ?)`
+  )
+    .bind(runId, crypto.randomUUID(), SEEDED_AT, SEEDED_AT)
+    .run()
+
+  return runId
+}
+
+async function storeEvidence(
+  runId: string,
+  stepKey: string,
+  kind: string,
+  payload: string
+): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO run_step_evidence (
+       id, run_id, step_key, kind, payload, created_at
+     ) VALUES (?, ?, ?, ?, ?, ?)`
+  )
+    .bind(crypto.randomUUID(), runId, stepKey, kind, payload, SEEDED_AT)
+    .run()
+}
+
+/** The `console.error` lines one read produced, and only that read's. */
+async function captureErrors(read: () => Promise<void>): Promise<string[]> {
+  const lines: string[] = []
+  const logged = vi
+    .spyOn(console, "error")
+    .mockImplementation((line: string) => {
+      lines.push(line)
+    })
+
+  try {
+    await read()
+  } finally {
+    logged.mockRestore()
+  }
+
+  return lines.filter((line) => line.includes("evidence_payload_invalid"))
+}
 
 async function statusesOf(skus: string[]): Promise<string[]> {
   if (skus.length === 0) return []

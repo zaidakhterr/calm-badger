@@ -17,6 +17,8 @@
  * reads `active`.
  */
 
+import { z } from "zod"
+
 import {
   ensureCatalogIndexes,
   retrieveForLine,
@@ -29,7 +31,79 @@ import { createRunStepRecorder, type RunStepRecorder } from "./run-steps"
 export const RETRIEVE_CANDIDATES_STEP_KEY = "retrieve-candidates"
 
 /** The evidence this step attaches to itself. */
-const EVIDENCE_KIND = "candidates"
+export const CANDIDATES_EVIDENCE_KIND = "candidates"
+
+/**
+ * One shortlisted product, with the rank and the evidence that put it there.
+ * `source` and the line's `state` stay open strings: retrieval owns those two
+ * vocabularies, and this step only records what it was handed.
+ */
+const RETRIEVED_CANDIDATE_SCHEMA = z.object({
+  rank: z.number(),
+  sku: z.string(),
+  name: z.string(),
+  category: z.string(),
+  manufacturer: z.string(),
+  unit: z.string(),
+  source: z.string(),
+  score: z.number(),
+  /** Why this product is in front of a reviewer at all. */
+  evidence: z.string(),
+  nearDuplicateOf: z.string().nullable(),
+})
+
+/** What retrieval decided about one requested line, and what it offered. */
+const RETRIEVED_LINE_SCHEMA = z.object({
+  position: z.number(),
+  reference: z.string(),
+  description: z.string(),
+  query: z.string(),
+  state: z.string(),
+  supersededSku: z.string().nullable(),
+  note: z.string(),
+  candidates: z.array(RETRIEVED_CANDIDATE_SCHEMA),
+})
+
+/**
+ * The evidence this step writes, and therefore owns. The projection in
+ * `evidence.ts` parses stored rows with this schema rather than guessing at
+ * their shape, so writer and reader cannot drift apart without the build
+ * saying so.
+ *
+ * This step has one ending — it either retrieves or the run stops before any
+ * evidence is written — so `complete` is the only state it has ever stored.
+ * The lines and their candidates are the evidence itself and are required; the
+ * catalogue scale and the arithmetic over the lines are shown beside them and
+ * default to `null`, so a row written by an earlier build still renders.
+ */
+export const CANDIDATES_EVIDENCE_SCHEMA = z.object({
+  state: z.literal("complete"),
+  method: z.string(),
+  message: z.string().nullable(),
+  shortlistSize: z.number(),
+  customerScoped: z.boolean(),
+  catalog: z
+    .object({
+      activeProducts: z.number(),
+      totalProducts: z.number(),
+      archivedExcluded: z.number(),
+    })
+    .nullable()
+    .catch(null),
+  lines: z.array(RETRIEVED_LINE_SCHEMA),
+  totals: z
+    .object({
+      lineCount: z.number(),
+      exactCount: z.number(),
+      retrievedCount: z.number(),
+      candidateCount: z.number(),
+      elapsedMs: z.number(),
+    })
+    .nullable()
+    .catch(null),
+})
+
+export type CandidatesEvidence = z.infer<typeof CANDIDATES_EVIDENCE_SCHEMA>
 
 export type RetrieveCandidatesOutcome =
   | {
@@ -128,7 +202,7 @@ async function retrieve(
   )
 
   await persistCandidates(env, runId, retrievals)
-  await step.attachEvidence(EVIDENCE_KIND, {
+  await step.attachEvidence(CANDIDATES_EVIDENCE_KIND, {
     state: "complete",
     method: "exact-evidence-then-d1-full-text",
     message: null,
@@ -143,7 +217,7 @@ async function retrieve(
       candidateCount,
       elapsedMs,
     },
-  })
+  } satisfies CandidatesEvidence)
 
   await step.complete(
     `Retrieved ${candidateCount} ${candidateCount === 1 ? "candidate" : "candidates"} ` +
