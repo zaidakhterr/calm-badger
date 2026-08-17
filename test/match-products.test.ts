@@ -18,11 +18,13 @@ import { describe, expect, it } from "vitest"
 
 import {
   ensureCatalogIndexes,
+  normaliseText,
   retrieveForLine,
   searchCatalog,
   SHORTLIST_SIZE,
   type LineRetrieval,
 } from "../worker/catalog/retrieval"
+import { applyReviewProductDecision } from "../worker/match-products"
 import {
   applyIntegrityChecks,
   decideMatch,
@@ -133,10 +135,13 @@ type MatchEvidence = {
   } | null
 }
 
-async function createCuratedRun(scenarioId: string) {
+async function createCuratedRun(scenarioId: string, workspaceId?: string) {
   const response = await exports.default.fetch(`${base}/api/runs`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      ...(workspaceId ? { "x-workspace-id": workspaceId } : {}),
+    },
     body: JSON.stringify({ scenarioId }),
   })
 
@@ -144,12 +149,13 @@ async function createCuratedRun(scenarioId: string) {
   return response.json<{ run: Run; ownerCapability: string }>()
 }
 
-async function createCustomRun(emailBody: string) {
+async function createCustomRun(emailBody: string, workspaceId?: string) {
   const form = new FormData()
   form.set("emailBody", emailBody)
 
   const response = await exports.default.fetch(`${base}/api/runs`, {
     method: "POST",
+    ...(workspaceId ? { headers: { "x-workspace-id": workspaceId } } : {}),
     body: form,
   })
 
@@ -969,6 +975,290 @@ describe("what leaves the system", () => {
       .first<{ candidates: number; matches: number }>()
 
     expect(remaining).toEqual({ candidates: 0, matches: 0 })
+  })
+})
+
+/* -------------------------------------------------------------------------- */
+
+describe("applying an owner's product choice", () => {
+  type MatchRow = {
+    state: string
+    sku: string | null
+    method: string
+    confidence_label: string
+    confidence_score: number
+    winner_gap: number
+    reason: string
+  }
+
+  type Scope = { workspace_hash: string | null; customer_id: string | null }
+
+  /**
+   * A curated run that stopped at review, with the position of a line the
+   * matcher refused to settle — the one an owner actually decides.
+   */
+  async function pausedRun(workspaceId: string) {
+    const { run } = await createCuratedRun(
+      "messy-forwarded-request",
+      workspaceId
+    )
+    await waitForStep(run.viewId, "match-products", ["complete", "error"])
+
+    const runId = await runIdOf(run.viewId)
+    const pending = await env.DB.prepare(
+      `SELECT position FROM run_line_matches
+        WHERE run_id = ? AND state = 'review_required'
+        ORDER BY position ASC LIMIT 1`
+    )
+      .bind(runId)
+      .first<{ position: number }>()
+
+    expect(pending).not.toBeNull()
+    return { viewId: run.viewId, runId, position: pending!.position }
+  }
+
+  function matchAt(runId: string, position: number): Promise<MatchRow | null> {
+    return env.DB.prepare(
+      `SELECT state, sku, method, confidence_label, confidence_score,
+              winner_gap, reason
+         FROM run_line_matches WHERE run_id = ? AND position = ?`
+    )
+      .bind(runId, position)
+      .first<MatchRow>()
+  }
+
+  function scopeOf(runId: string): Promise<Scope | null> {
+    return env.DB.prepare(
+      `SELECT r.workspace_hash AS workspace_hash,
+              customer.customer_id AS customer_id
+         FROM runs r
+         LEFT JOIN run_customer_resolution customer ON customer.run_id = r.id
+        WHERE r.id = ?`
+    )
+      .bind(runId)
+      .first<Scope>()
+  }
+
+  async function aliasesFor(runId: string, phrase: string) {
+    const scope = await scopeOf(runId)
+    const rows = await env.DB.prepare(
+      `SELECT alias, sku, expires_at FROM workspace_product_aliases
+        WHERE workspace_hash = ? AND customer_id = ? AND normalised = ?`
+    )
+      .bind(
+        scope?.workspace_hash ?? null,
+        scope?.customer_id ?? null,
+        normaliseText(phrase)
+      )
+      .all<{ alias: string; sku: string; expires_at: string }>()
+
+    return rows.results
+  }
+
+  function inAnHour(): string {
+    return new Date(Date.now() + 3_600_000).toISOString()
+  }
+
+  it("accepts the chosen product and remembers the wording it failed on", async () => {
+    const { runId, position } = await pausedRun(
+      "workspace-apply-product-000001"
+    )
+    const phrase = "the depot's usual seal kit"
+    const expiresAt = inAnHour()
+
+    await applyReviewProductDecision(env, runId, {
+      position,
+      sku: "NX-SEA-9120",
+      decision: "accepted_proposal",
+      sourcePhrase: phrase,
+      aliasExpiresAt: expiresAt,
+    })
+
+    expect(await matchAt(runId, position)).toEqual({
+      state: "accepted",
+      sku: "NX-SEA-9120",
+      method: "owner_review",
+      confidence_label: "High",
+      confidence_score: 1,
+      winner_gap: 1,
+      reason:
+        "The owner accepted the proposed match to NX-SEA-9120 during review.",
+    })
+
+    expect(await aliasesFor(runId, phrase)).toEqual([
+      { alias: phrase, sku: "NX-SEA-9120", expires_at: expiresAt },
+    ])
+
+    // Only the decided line moves; its neighbours keep what matching wrote.
+    const others = await env.DB.prepare(
+      `SELECT COUNT(*) AS total FROM run_line_matches
+        WHERE run_id = ? AND position <> ? AND method = 'owner_review'`
+    )
+      .bind(runId, position)
+      .first<{ total: number }>()
+
+    expect(others!.total).toBe(0)
+  })
+
+  it("words each of the three offers the owner could take", async () => {
+    const { runId, position } = await pausedRun(
+      "workspace-apply-product-000002"
+    )
+
+    const wording = {
+      accepted_proposal:
+        "The owner accepted the proposed match to NX-SEA-9120 during review.",
+      chose_alternative:
+        "The owner chose the alternative NX-SEA-9120 during review.",
+      chose_catalog:
+        "The owner chose NX-SEA-9120 from the complete catalogue during review.",
+    } as const
+
+    for (const [decision, reason] of Object.entries(wording)) {
+      await applyReviewProductDecision(env, runId, {
+        position,
+        sku: "NX-SEA-9120",
+        decision: decision as keyof typeof wording,
+        sourcePhrase: "wording that is never remembered",
+        aliasExpiresAt: null,
+      })
+
+      expect((await matchAt(runId, position))!.reason).toBe(reason)
+    }
+  })
+
+  it("learns nothing when the alias window is absent or already closed", async () => {
+    const { runId, position } = await pausedRun(
+      "workspace-apply-product-000003"
+    )
+
+    for (const aliasExpiresAt of [
+      null,
+      new Date(Date.now() - 3_600_000).toISOString(),
+    ]) {
+      const phrase = `phrase for ${aliasExpiresAt ?? "no window"}`
+
+      await applyReviewProductDecision(env, runId, {
+        position,
+        sku: "NX-SEA-9120",
+        decision: "chose_catalog",
+        sourcePhrase: phrase,
+        aliasExpiresAt,
+      })
+
+      expect((await matchAt(runId, position))!.state).toBe("accepted")
+      expect(await aliasesFor(runId, phrase)).toEqual([])
+    }
+
+    // Wording that normalises to nothing is not a phrase anyone can look up.
+    await applyReviewProductDecision(env, runId, {
+      position,
+      sku: "NX-SEA-9120",
+      decision: "chose_catalog",
+      sourcePhrase: "   ",
+      aliasExpiresAt: inAnHour(),
+    })
+
+    expect(await aliasesFor(runId, "   ")).toEqual([])
+  })
+
+  it("keeps one mapping for a phrase however often it is applied", async () => {
+    const { runId, position } = await pausedRun(
+      "workspace-apply-product-000004"
+    )
+    const phrase = "the depot's usual seal kit"
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await applyReviewProductDecision(env, runId, {
+        position,
+        sku: "NX-SEA-9120",
+        decision: "chose_alternative",
+        sourcePhrase: phrase,
+        aliasExpiresAt: inAnHour(),
+      })
+    }
+
+    expect(await aliasesFor(runId, phrase)).toEqual([
+      expect.objectContaining({ sku: "NX-SEA-9120" }),
+    ])
+
+    // A corrected correction replaces the mapping rather than joining it.
+    await applyReviewProductDecision(env, runId, {
+      position,
+      sku: "NX-SEA-9121",
+      decision: "chose_catalog",
+      sourcePhrase: phrase,
+      aliasExpiresAt: inAnHour(),
+    })
+
+    expect(await aliasesFor(runId, phrase)).toEqual([
+      expect.objectContaining({ sku: "NX-SEA-9121" }),
+    ])
+
+    expect((await matchAt(runId, position))!.sku).toBe("NX-SEA-9121")
+  })
+
+  it("refuses a position that this run has no match for", async () => {
+    const { runId } = await pausedRun("workspace-apply-product-000006")
+    const phrase = "wording for a line that does not exist"
+
+    await expect(
+      applyReviewProductDecision(env, runId, {
+        position: 99,
+        sku: "NX-SEA-9120",
+        decision: "chose_catalog",
+        sourcePhrase: phrase,
+        aliasExpiresAt: inAnHour(),
+      })
+    ).rejects.toThrow("position 99")
+
+    // The refusal is complete: no alias survives the apply that never happened.
+    expect(await aliasesFor(runId, phrase)).toEqual([])
+  })
+
+  it("applies the match but files no wording when no customer was resolved", async () => {
+    const { run } = await createCustomRun(
+      [
+        "From: someone@unknown-buyer.example",
+        "",
+        "Please quote 12 brass ball valve DN25 with lever handle.",
+      ].join("\n"),
+      "workspace-apply-product-000005"
+    )
+
+    await waitForStep(run.viewId, "match-products", ["complete", "error"])
+
+    const runId = await runIdOf(run.viewId)
+    const scope = await scopeOf(runId)
+    expect(scope!.workspace_hash).not.toBeNull()
+    expect(scope!.customer_id).toBeNull()
+
+    const phrase = "brass ball valve DN25"
+    const first = await env.DB.prepare(
+      `SELECT position FROM run_line_matches WHERE run_id = ?
+        ORDER BY position ASC LIMIT 1`
+    )
+      .bind(runId)
+      .first<{ position: number }>()
+
+    await applyReviewProductDecision(env, runId, {
+      position: first!.position,
+      sku: "NX-VLV-2210",
+      decision: "chose_catalog",
+      sourcePhrase: phrase,
+      aliasExpiresAt: inAnHour(),
+    })
+
+    expect((await matchAt(runId, first!.position))!.state).toBe("accepted")
+
+    const stored = await env.DB.prepare(
+      `SELECT COUNT(*) AS total FROM workspace_product_aliases
+        WHERE workspace_hash = ? AND normalised = ?`
+    )
+      .bind(scope!.workspace_hash, normaliseText(phrase))
+      .first<{ total: number }>()
+
+    expect(stored!.total).toBe(0)
   })
 })
 

@@ -24,6 +24,7 @@
 import {
   loadActiveProducts,
   loadGlobalAliases,
+  normaliseText,
   type CatalogProduct,
 } from "./catalog/retrieval"
 import {
@@ -624,4 +625,163 @@ async function persistMatches(
   for (let index = 0; index < statements.length; index += 200) {
     await env.DB.batch(statements.slice(index, index + 200))
   }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Applying a review outcome                                                  */
+/* -------------------------------------------------------------------------- */
+
+/** Which of the three offers the owner took for a line. */
+export type ReviewProductDecision =
+  "accepted_proposal" | "chose_alternative" | "chose_catalog"
+
+export type ReviewProductChoice = {
+  position: number
+  sku: string
+  decision: ReviewProductDecision
+  /** The request's own wording for the line, as the alias to remember. */
+  sourcePhrase: string
+  /** When the remembered wording should be forgotten; null never remembers. */
+  aliasExpiresAt: string | null
+}
+
+/**
+ * Applies one product choice an owner made in review.
+ *
+ * This step owns `run_line_matches`, so it owns the correction too: review
+ * hands over resolved values — a position, a SKU, which of the three offers was
+ * taken — and never the columns. The workspace alias is written here for the
+ * same reason: the phrase this step failed to match is the phrase worth
+ * remembering, and retrieval reads it back scoped to
+ * `(workspace_hash, customer_id, normalised)`.
+ *
+ * Everything commits in one batch, so retrieval can never observe the gap
+ * between forgetting the old mapping for a phrase and recording the new one.
+ * Nothing re-checks the review: the caller has already won the claim, and every
+ * statement is idempotent, so a retried apply lands the same row.
+ *
+ * Unlike the step itself, this *does* throw — when the addressed line has no
+ * match to correct, and before anything is written. The header's "nothing is
+ * thrown" governs the step and its paid provider call; this runs in a durable
+ * apply step instead, where a throw is the designed failure path (retry) and a
+ * silent no-op would let the run record the outcome as applied while the
+ * owner's choice was dropped.
+ */
+export async function applyReviewProductDecision(
+  env: Env,
+  runId: string,
+  choice: ReviewProductChoice
+): Promise<void> {
+  const existing = await env.DB.prepare(
+    `SELECT position FROM run_line_matches WHERE run_id = ? AND position = ?`
+  )
+    .bind(runId, choice.position)
+    .first<{ position: number }>()
+
+  // Checked before the batch rather than from its result: an alias written
+  // alongside a match that does not exist would outlive the failed apply.
+  if (!existing) {
+    throw new Error(
+      `No line match at position ${choice.position} for run ${runId}.`
+    )
+  }
+
+  const now = new Date().toISOString()
+
+  const statements: D1PreparedStatement[] = [
+    env.DB.prepare(
+      `UPDATE run_line_matches
+          SET state = 'accepted',
+              sku = ?,
+              method = 'owner_review',
+              confidence_label = 'High', confidence_score = 1,
+              winner_gap = 1,
+              reason = ?
+        WHERE run_id = ? AND position = ?`
+    ).bind(choice.sku, reasonFor(choice), runId, choice.position),
+  ]
+
+  const alias = await aliasStatements(env, runId, choice, now)
+  statements.push(...alias)
+
+  await env.DB.batch(statements)
+}
+
+function reasonFor(choice: ReviewProductChoice): string {
+  if (choice.decision === "accepted_proposal") {
+    return `The owner accepted the proposed match to ${choice.sku} during review.`
+  }
+
+  if (choice.decision === "chose_catalog") {
+    return `The owner chose ${choice.sku} from the complete catalogue during review.`
+  }
+
+  return `The owner chose the alternative ${choice.sku} during review.`
+}
+
+async function aliasStatements(
+  env: Env,
+  runId: string,
+  choice: ReviewProductChoice,
+  now: string
+): Promise<D1PreparedStatement[]> {
+  if (!choice.aliasExpiresAt || choice.aliasExpiresAt <= now) return []
+
+  const normalised = normaliseText(choice.sourcePhrase)
+  if (normalised.length === 0) return []
+
+  const scope = await env.DB.prepare(
+    `SELECT r.workspace_hash AS workspace_hash,
+            customer.customer_id AS customer_id
+       FROM runs r
+       LEFT JOIN run_customer_resolution customer ON customer.run_id = r.id
+      WHERE r.id = ?`
+  )
+    .bind(runId)
+    .first<{ workspace_hash: string | null; customer_id: string | null }>()
+
+  // Remembered wording is scoped to one workspace *and* one customer, so a run
+  // that resolved to nobody — or one opened without a workspace token — has
+  // nowhere to file the correction. The match is still applied; only the
+  // learning is skipped.
+  if (!scope?.workspace_hash || !scope.customer_id) {
+    console.log(
+      JSON.stringify({
+        event: "match_products_alias_skipped",
+        runId,
+        step: MATCH_PRODUCTS_STEP_KEY,
+        position: choice.position,
+        reason: scope?.workspace_hash ? "no_customer" : "no_workspace",
+      })
+    )
+
+    return []
+  }
+
+  // The phrase is one mapping, not a history of contradictory mappings, so an
+  // older SKU for the same wording goes before the correction lands.
+  return [
+    env.DB.prepare(
+      `DELETE FROM workspace_product_aliases
+        WHERE workspace_hash = ? AND customer_id = ? AND normalised = ?`
+    ).bind(scope.workspace_hash, scope.customer_id, normalised),
+    env.DB.prepare(
+      `INSERT INTO workspace_product_aliases
+         (workspace_hash, customer_id, normalised, alias, sku, created_at,
+          expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (workspace_hash, customer_id, normalised, sku)
+         DO UPDATE SET alias = excluded.alias,
+                       created_at = excluded.created_at,
+                       expires_at = excluded.expires_at`
+    ).bind(
+      scope.workspace_hash,
+      scope.customer_id,
+      normalised,
+      choice.sourcePhrase,
+      choice.sku,
+      now,
+      choice.aliasExpiresAt
+    ),
+  ]
 }
