@@ -9,6 +9,7 @@
 
 import { env, exports } from "cloudflare:workers"
 import { describe, expect, it, vi } from "vitest"
+import { z } from "zod"
 
 import { readConfig } from "../worker/env"
 import { loadDocumentEvidence } from "../worker/evidence"
@@ -25,6 +26,7 @@ import {
   mistralPageProbe,
 } from "../worker/providers/mistral-ocr"
 import { readDocuments } from "../worker/read-documents"
+import { JSON_TEXT_SCHEMA } from "../worker/rfq-extraction"
 import {
   MAX_OCR_PAGES_PER_RUN,
   storeSources,
@@ -89,6 +91,25 @@ type Evidence = {
     }[]
   }[]
 }
+
+/** A binding member the code under test never reaches; reaching it is a bug. */
+function unreachable(member: string): never {
+  throw new Error(`${member} must not be reached`)
+}
+
+/**
+ * The slice of Mistral's request body this file reads back: the page selector
+ * and the two switches that keep image bytes and block detail out of a read.
+ */
+const MISTRAL_REQUEST_BODY_SCHEMA = JSON_TEXT_SCHEMA.pipe(
+  z.object({
+    pages: z.string(),
+    include_image_base64: z.boolean(),
+    include_blocks: z.boolean(),
+  })
+)
+
+type MistralRequest = z.infer<typeof MISTRAL_REQUEST_BODY_SCHEMA>
 
 async function createCuratedRun(scenarioId = "messy-forwarded-request") {
   const response = await exports.default.fetch(`${base}/api/runs`, {
@@ -658,12 +679,9 @@ describe("selecting the OCR provider", () => {
   })
 
   it("rejects Mistral's probe page even when usage under-reports it", async () => {
-    const requestBodies: unknown[] = []
-    const requestFetch = ((_input: RequestInfo | URL, init?: RequestInit) => {
-      if (typeof init?.body !== "string") {
-        throw new Error("Expected a JSON request body")
-      }
-      requestBodies.push(JSON.parse(init.body) as unknown)
+    const requestBodies: MistralRequest[] = []
+    const requestFetch: typeof fetch = (_input, init) => {
+      requestBodies.push(MISTRAL_REQUEST_BODY_SCHEMA.parse(init?.body))
       return Promise.resolve(
         Response.json({
           model: "mistral-ocr-test",
@@ -676,7 +694,7 @@ describe("selecting the OCR provider", () => {
           usage_info: { pages_processed: 1, doc_size_bytes: 4 },
         })
       )
-    }) as typeof fetch
+    }
     const provider = createMistralOcrProvider(
       readConfig(envWith({ MISTRAL_API_KEY: "test-key" })),
       requestFetch
@@ -882,23 +900,34 @@ describe("storing source artifacts", () => {
     const failure = new Error("second put failed")
     const objects = new Set<string>()
     let puts = 0
-    const artifacts = {
-      put(key: string) {
+    const artifacts: R2Bucket = {
+      put(key, value, options) {
         puts += 1
         if (puts === 2) return Promise.reject(failure)
         objects.add(key)
-        return Promise.resolve()
+        return env.ARTIFACTS.put(key, value, options)
       },
-      delete(key: string) {
-        objects.delete(key)
-        return Promise.resolve()
+      delete(keys) {
+        for (const key of Array.isArray(keys) ? keys : [keys]) {
+          objects.delete(key)
+        }
+        return env.ARTIFACTS.delete(keys)
       },
-    } as unknown as R2Bucket
-    const database = {
-      batch() {
-        throw new Error("D1 must not be reached")
-      },
-    } as unknown as D1Database
+      head: () => unreachable("R2Bucket.head"),
+      get: () => unreachable("R2Bucket.get"),
+      list: () => unreachable("R2Bucket.list"),
+      createMultipartUpload: () =>
+        unreachable("R2Bucket.createMultipartUpload"),
+      resumeMultipartUpload: () =>
+        unreachable("R2Bucket.resumeMultipartUpload"),
+    }
+    const database: D1Database = {
+      batch: () => unreachable("D1 must not be reached"),
+      prepare: () => unreachable("D1 must not be reached"),
+      exec: () => unreachable("D1 must not be reached"),
+      dump: () => unreachable("D1 must not be reached"),
+      withSession: () => unreachable("D1 must not be reached"),
+    }
 
     await expect(
       storeSources(
@@ -915,21 +944,32 @@ describe("storing source artifacts", () => {
   it("deletes every R2 write and preserves a D1 batch failure", async () => {
     const failure = new Error("metadata batch failed")
     const objects = new Set<string>()
-    const artifacts = {
-      put(key: string) {
+    const artifacts: R2Bucket = {
+      put(key, value, options) {
         objects.add(key)
-        return Promise.resolve()
+        return env.ARTIFACTS.put(key, value, options)
       },
-      delete(key: string) {
-        objects.delete(key)
-        return Promise.resolve()
+      delete(keys) {
+        for (const key of Array.isArray(keys) ? keys : [keys]) {
+          objects.delete(key)
+        }
+        return env.ARTIFACTS.delete(keys)
       },
-    } as unknown as R2Bucket
-    const statement = { bind: () => statement }
-    const database = {
-      prepare: () => statement,
+      head: () => unreachable("R2Bucket.head"),
+      get: () => unreachable("R2Bucket.get"),
+      list: () => unreachable("R2Bucket.list"),
+      createMultipartUpload: () =>
+        unreachable("R2Bucket.createMultipartUpload"),
+      resumeMultipartUpload: () =>
+        unreachable("R2Bucket.resumeMultipartUpload"),
+    }
+    const database: D1Database = {
+      prepare: (query) => env.DB.prepare(query),
       batch: () => Promise.reject(failure),
-    } as unknown as D1Database
+      exec: () => unreachable("D1Database.exec"),
+      dump: () => unreachable("D1Database.dump"),
+      withSession: () => unreachable("D1Database.withSession"),
+    }
 
     await expect(
       storeSources(
