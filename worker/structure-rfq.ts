@@ -159,7 +159,7 @@ async function structure(
     model: result.model,
     usage: result.usage,
     originalOutput: result.text.slice(0, MAX_STORED_OUTPUT_CHARS),
-    estimatedCostUsd: estimateExtractionCostUsd(env, result.usage),
+    estimatedCostUsd: estimateExtractionCostUsd(readConfig(env), result.usage),
     reportedCostUsd: result.reportedCostUsd,
   }
 

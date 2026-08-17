@@ -10,6 +10,7 @@
 
 import { ADAPTERS, DEFAULT_ADAPTER } from "./adapters"
 import { SHORTLIST_SIZE } from "./catalog/retrieval"
+import { readConfig } from "./env"
 import { REFERENCE_EVALUATION } from "./evaluation-report"
 import { evaluationSection } from "./evaluation-summary"
 import { RATE_LIMIT_MAX_RUNS } from "./rate-limit"
@@ -95,6 +96,7 @@ function providerEntry(
 }
 
 export async function loadSystemDetails(env: Env): Promise<SystemDetails> {
+  const config = readConfig(env)
   const counts = await env.DB.prepare(COUNT_QUERY).first<Counts>()
 
   return {
@@ -138,20 +140,20 @@ export async function loadSystemDetails(env: Env): Promise<SystemDetails> {
     providers: [
       providerEntry(
         "Document reading (OCR)",
-        env.OCR_PROVIDER,
-        env.MISTRAL_OCR_MODEL,
+        config.ocrProvider,
+        config.mistralOcrModel,
         "Reads the email body, inline images, and PDF attachments into page markdown with source provenance."
       ),
       providerEntry(
         "RFQ structuring",
-        env.EXTRACTION_PROVIDER,
-        env.OPENROUTER_EXTRACTION_MODEL,
+        config.extractionProvider,
+        config.extractionModel,
         "Schema-constrained extraction through the Vercel AI SDK, followed by one JSON repair attempt, Zod validation, and database integrity checks."
       ),
       providerEntry(
         "Candidate reranking",
-        env.RERANK_PROVIDER,
-        env.OPENROUTER_RERANK_MODEL,
+        config.rerankProvider,
+        config.rerankModel,
         "Ranks the bounded shortlist for one requested line at a time and returns evidence for its ordering."
       ),
       {

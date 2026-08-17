@@ -33,6 +33,7 @@
  * the global dataset or another visitor's run.
  */
 
+import { readConfig, type AppConfig } from "./env"
 import { retentionDeadline } from "./retention-policy"
 import { MAX_LINE_QUANTITY } from "./rfq-extraction"
 import { createRunStepRecorder } from "./run-steps"
@@ -42,17 +43,6 @@ export const REVIEW_STEP_TITLE = "Review required"
 
 /** The event type the Worker delivers to a hibernating workflow instance. */
 export const REVIEW_EVENT_TYPE = "owner-review"
-
-/**
- * How long an owner has. The window mirrors the run's own retention, because a
- * review must never outlive the data it decides: custom uploads and everything
- * derived from them are deleted after 24 hours, curated sample runs after seven
- * days. Both are configurable so the expiry path is testable in seconds.
- */
-const DEFAULT_WINDOW_SECONDS = {
-  curated: 7 * 24 * 60 * 60,
-  custom: 24 * 60 * 60,
-}
 
 export type ReviewState =
   "not_required" | "pending" | "approved" | "rejected" | "expired"
@@ -160,7 +150,10 @@ async function open(env: Env, runId: string): Promise<ReviewOpening> {
     .first<{ source_kind: string }>()
 
   const now = new Date()
-  const windowMs = reviewWindowMs(env, run?.source_kind ?? "curated")
+  const windowMs = reviewWindowMs(
+    readConfig(env),
+    run?.source_kind ?? "curated"
+  )
   const expiresAt = new Date(now.getTime() + windowMs).toISOString()
   const summary = describeItems(items)
 
@@ -242,19 +235,13 @@ async function open(env: Env, runId: string): Promise<ReviewOpening> {
   }
 }
 
-function reviewWindowMs(env: Env, sourceKind: string): number {
-  const configured =
+function reviewWindowMs(config: AppConfig, sourceKind: string): number {
+  const seconds =
     sourceKind === "custom"
-      ? env.REVIEW_WINDOW_SECONDS_CUSTOM
-      : env.REVIEW_WINDOW_SECONDS_CURATED
+      ? config.reviewWindowSecondsCustom
+      : config.reviewWindowSecondsCurated
 
-  const seconds = Number.parseFloat(configured ?? "")
-
-  return Number.isFinite(seconds) && seconds > 0
-    ? seconds * 1000
-    : (sourceKind === "custom"
-        ? DEFAULT_WINDOW_SECONDS.custom
-        : DEFAULT_WINDOW_SECONDS.curated) * 1000
+  return seconds * 1000
 }
 
 function remainingMs(expiresAt: string): number {

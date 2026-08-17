@@ -15,6 +15,8 @@
  * anywhere — not to a table, not to a log, not to an analytics event.
  */
 
+import { readConfig, type AppConfig } from "./env"
+
 const HOUR_MS = 60 * 60 * 1000
 
 export const RATE_LIMIT_MAX_RUNS = 5
@@ -100,7 +102,7 @@ export async function visitorHash(
   // A request without a client address is counted in one shared bucket. That is
   // stricter than letting it through unlimited, and it identifies no one.
   const address = request.headers.get("cf-connecting-ip")?.trim() || "unknown"
-  const material = `${rotatingSalt(env)}:${purpose}:${windowStart.toISOString()}:${address}`
+  const material = `${rotatingSalt(readConfig(env))}:${purpose}:${windowStart.toISOString()}:${address}`
 
   const digest = await crypto.subtle.digest(
     "SHA-256",
@@ -118,9 +120,8 @@ export async function visitorHash(
  * than an empty one, so an unsalted — and therefore guessable — address hash
  * cannot be persisted.
  */
-function rotatingSalt(env: Env): string {
-  const configured = env.RATE_LIMIT_SALT?.trim()
-  if (configured) return configured
+function rotatingSalt(config: AppConfig): string {
+  if (config.rateLimitSalt !== null) return config.rateLimitSalt
 
   if (!fallbackSalt) {
     fallbackSalt = crypto.randomUUID()

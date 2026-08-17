@@ -1142,7 +1142,7 @@ async function healthResponse(env: Env): Promise<Response> {
 
   const body: HealthResponse = {
     status: "ok",
-    environment: env.APP_ENV,
+    environment: readConfig(env).appEnv,
     services: {
       d1: "ready",
       r2: "ready",

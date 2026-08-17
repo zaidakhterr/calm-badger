@@ -19,6 +19,8 @@
 
 import { z } from "zod"
 
+import type { AppConfig } from "./env"
+
 import {
   labelFor,
   type Confidence,
@@ -169,38 +171,15 @@ export type MatchHeuristics = {
 }
 
 /**
- * The winner-strength default is the same 0.55 that separates a Medium
- * confidence label from a Review one, so "accepted" and "at least Medium" mean
- * the same thing here.
- */
-const DEFAULT_HEURISTICS: MatchHeuristics = {
-  winnerStrength: 0.55,
-  winnerGap: 0.12,
-}
-
-/**
  * Both thresholds are configured variables rather than constants, so a
  * deployment can be made stricter or looser without a code change. They are
  * demo judgement either way, and the interface says so.
  */
-export function readMatchHeuristics(env: Env): MatchHeuristics {
+export function readMatchHeuristics(config: AppConfig): MatchHeuristics {
   return {
-    winnerStrength: readThreshold(
-      env.MATCH_WINNER_STRENGTH,
-      DEFAULT_HEURISTICS.winnerStrength
-    ),
-    winnerGap: readThreshold(
-      env.MATCH_WINNER_GAP,
-      DEFAULT_HEURISTICS.winnerGap
-    ),
+    winnerStrength: config.matchWinnerStrength,
+    winnerGap: config.matchWinnerGap,
   }
-}
-
-function readThreshold(value: string | undefined, fallback: number): number {
-  const parsed = Number.parseFloat(value ?? "")
-  return Number.isFinite(parsed) && parsed >= 0 && parsed <= 1
-    ? parsed
-    : fallback
 }
 
 export type MatchDecision = {

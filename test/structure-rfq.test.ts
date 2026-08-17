@@ -707,16 +707,18 @@ describe("selecting the extraction provider", () => {
   it("reports an unknown cost rather than zero when prices are misconfigured", () => {
     const usage = { inputTokens: 1000, outputTokens: 500, totalTokens: 1500 }
 
-    expect(estimateExtractionCostUsd(env, usage)).toBeGreaterThan(0)
+    expect(estimateExtractionCostUsd(readConfig(env), usage)).toBeGreaterThan(0)
     expect(
       estimateExtractionCostUsd(
-        envWith({ OPENROUTER_COST_PER_1M_INPUT_TOKENS_USD: "" }),
+        readConfig(envWith({ OPENROUTER_COST_PER_1M_INPUT_TOKENS_USD: "" })),
         usage
       )
     ).toBeNull()
     expect(
       estimateExtractionCostUsd(
-        envWith({ OPENROUTER_COST_PER_1M_OUTPUT_TOKENS_USD: "free" }),
+        readConfig(
+          envWith({ OPENROUTER_COST_PER_1M_OUTPUT_TOKENS_USD: "free" })
+        ),
         usage
       )
     ).toBeNull()

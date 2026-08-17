@@ -110,8 +110,8 @@ export function selectRerankProvider(config: AppConfig): RerankProvider {
 
 /** Estimated spend for one reranking call, in USD. */
 export function estimateRerankCostUsd(
-  env: Env,
+  config: AppConfig,
   usage: RerankUsage
 ): number | null {
-  return estimateOpenRouterCostUsd(env, usage)
+  return estimateOpenRouterCostUsd(config, usage)
 }

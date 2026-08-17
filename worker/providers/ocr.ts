@@ -118,11 +118,11 @@ export function selectOcrProvider(config: AppConfig): OcrProvider {
  * be a quiet lie.
  */
 export function estimateOcrCostUsd(
-  env: Env,
+  config: AppConfig,
   pagesProcessed: number
 ): number | null {
-  const perThousand = Number.parseFloat(env.OCR_COST_PER_1000_PAGES_USD)
-  if (!Number.isFinite(perThousand) || perThousand < 0) return null
+  const perThousand = config.ocrCostPer1000PagesUsd
+  if (perThousand === null) return null
 
   return Math.round(((pagesProcessed * perThousand) / 1000) * 1e6) / 1e6
 }

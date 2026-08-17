@@ -11,17 +11,19 @@
  * whose prices were never configured would be a quiet lie.
  */
 
+import type { AppConfig } from "../env"
+
 export type TokenUsage = {
   inputTokens: number
   outputTokens: number
 }
 
 export function estimateOpenRouterCostUsd(
-  env: Env,
+  config: AppConfig,
   usage: TokenUsage
 ): number | null {
-  const input = readPrice(env.OPENROUTER_COST_PER_1M_INPUT_TOKENS_USD)
-  const output = readPrice(env.OPENROUTER_COST_PER_1M_OUTPUT_TOKENS_USD)
+  const input = config.openRouterCostPer1MInputTokensUsd
+  const output = config.openRouterCostPer1MOutputTokensUsd
 
   if (input === null || output === null) return null
 
@@ -29,9 +31,4 @@ export function estimateOpenRouterCostUsd(
     (usage.inputTokens * input) / 1e6 + (usage.outputTokens * output) / 1e6
 
   return Math.round(total * 1e6) / 1e6
-}
-
-function readPrice(value: string): number | null {
-  const parsed = Number.parseFloat(value)
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null
 }

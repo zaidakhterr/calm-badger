@@ -32,8 +32,22 @@ import { z } from "zod"
 const DEFAULT_MISTRAL_OCR_MODEL = "mistral-ocr-latest"
 const DEFAULT_OPENROUTER_MODEL = "openai/gpt-5.6-luna"
 const DEFAULT_POSTHOG_HOST = "https://eu.i.posthog.com"
+
+/**
+ * The winner-strength default is the same 0.55 that separates a Medium
+ * confidence label from a Review one, so "accepted" and "at least Medium" mean
+ * the same thing.
+ */
 const DEFAULT_WINNER_STRENGTH = 0.55
 const DEFAULT_WINNER_GAP = 0.12
+
+/**
+ * How long an owner has to decide. The window mirrors the run's own retention,
+ * because a review must never outlive the data it decides: custom uploads and
+ * everything derived from them are deleted after 24 hours, curated sample runs
+ * after seven days. Both are configurable so the expiry path is testable in
+ * seconds.
+ */
 const DEFAULT_WINDOW_SECONDS_CURATED = 7 * 24 * 60 * 60
 const DEFAULT_WINDOW_SECONDS_CUSTOM = 24 * 60 * 60
 

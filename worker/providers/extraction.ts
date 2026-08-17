@@ -98,8 +98,8 @@ export function selectExtractionProvider(
 
 /** Estimated spend for one extraction call. Shared with reranking. */
 export function estimateExtractionCostUsd(
-  env: Env,
+  config: AppConfig,
   usage: ExtractionUsage
 ): number | null {
-  return estimateOpenRouterCostUsd(env, usage)
+  return estimateOpenRouterCostUsd(config, usage)
 }

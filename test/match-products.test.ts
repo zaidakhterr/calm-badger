@@ -805,20 +805,24 @@ describe("the acceptance heuristics", () => {
   })
 
   it("reads both thresholds from configuration and ignores nonsense", () => {
-    expect(readMatchHeuristics(env)).toEqual({
+    expect(readMatchHeuristics(readConfig(env))).toEqual({
       winnerStrength: 0.55,
       winnerGap: 0.12,
     })
 
     expect(
       readMatchHeuristics(
-        envWith({ MATCH_WINNER_STRENGTH: "0.9", MATCH_WINNER_GAP: "0.3" })
+        readConfig(
+          envWith({ MATCH_WINNER_STRENGTH: "0.9", MATCH_WINNER_GAP: "0.3" })
+        )
       )
     ).toEqual({ winnerStrength: 0.9, winnerGap: 0.3 })
 
     expect(
       readMatchHeuristics(
-        envWith({ MATCH_WINNER_STRENGTH: "strict", MATCH_WINNER_GAP: "-2" })
+        readConfig(
+          envWith({ MATCH_WINNER_STRENGTH: "strict", MATCH_WINNER_GAP: "-2" })
+        )
       )
     ).toEqual({ winnerStrength: 0.55, winnerGap: 0.12 })
 

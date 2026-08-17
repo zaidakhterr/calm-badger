@@ -300,7 +300,10 @@ async function readSource(
       pageCount: document.pages.length,
       pagesProcessed: document.usage.pagesProcessed,
       latencyMs: document.latencyMs,
-      estimatedCostUsd: estimateOcrCostUsd(env, document.usage.pagesProcessed),
+      estimatedCostUsd: estimateOcrCostUsd(
+        readConfig(env),
+        document.usage.pagesProcessed
+      ),
       sanitizedResponse: document.sanitizedResponse,
     },
   }

@@ -685,15 +685,24 @@ describe("selecting the OCR provider", () => {
   })
 
   it("reports an unknown cost rather than zero when the page price is misconfigured", () => {
-    expect(estimateOcrCostUsd(env, 2)).toBeGreaterThan(0)
+    expect(estimateOcrCostUsd(readConfig(env), 2)).toBeGreaterThan(0)
     expect(
-      estimateOcrCostUsd(envWith({ OCR_COST_PER_1000_PAGES_USD: "" }), 2)
+      estimateOcrCostUsd(
+        readConfig(envWith({ OCR_COST_PER_1000_PAGES_USD: "" })),
+        2
+      )
     ).toBeNull()
     expect(
-      estimateOcrCostUsd(envWith({ OCR_COST_PER_1000_PAGES_USD: "free" }), 2)
+      estimateOcrCostUsd(
+        readConfig(envWith({ OCR_COST_PER_1000_PAGES_USD: "free" })),
+        2
+      )
     ).toBeNull()
     expect(
-      estimateOcrCostUsd(envWith({ OCR_COST_PER_1000_PAGES_USD: "-1" }), 2)
+      estimateOcrCostUsd(
+        readConfig(envWith({ OCR_COST_PER_1000_PAGES_USD: "-1" })),
+        2
+      )
     ).toBeNull()
   })
 })

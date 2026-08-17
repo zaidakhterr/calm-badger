@@ -167,7 +167,7 @@ async function match(
   )
 
   const provider = selectRerankProvider(readConfig(env))
-  const heuristics = readMatchHeuristics(env)
+  const heuristics = readMatchHeuristics(readConfig(env))
   const skus = [...new Set(candidates.map((candidate) => candidate.sku))]
   const [products, aliases] = await Promise.all([
     loadActiveProducts(env, skus),
@@ -555,7 +555,8 @@ function totalsOf(lines: LineEvidence[], env: Env, elapsedMs: number) {
       0
     ),
     usage: reranked > 0 ? usage : null,
-    estimatedCostUsd: reranked > 0 ? estimateRerankCostUsd(env, usage) : null,
+    estimatedCostUsd:
+      reranked > 0 ? estimateRerankCostUsd(readConfig(env), usage) : null,
     elapsedMs,
   }
 }
