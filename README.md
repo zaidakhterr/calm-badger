@@ -400,6 +400,16 @@ pnpm test
 tests: the Worker integration tests serve scenario attachments and the SPA
 fallback through the `ASSETS` binding, which needs a built `dist/`.
 
+`pnpm lint` runs ESLint and then Oxlint. Oxlint carries the anti-slop plugin
+vendored under `tools/oxlint/anti-slop`, all fifteen rules at error over the
+whole repository. What they enforce is one rule: parse at the boundary. Every
+boundary — a persisted evidence payload, a provider response, configuration, an
+API response on the client, `localStorage`, a script's JSON — parses once into a
+named type, with a Zod schema owned by whoever defines the contract. Writers
+check their payload with `satisfies`; readers `safeParse`. A type assertion
+survives only where it is the honest tool, and then it carries a `SAFETY:`
+comment stating the invariant.
+
 ## Evaluation
 
 The three curated workflows are scored against gold fixtures by replaying them

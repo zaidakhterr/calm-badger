@@ -12,6 +12,8 @@ Single bounded context. Terms below are the ubiquitous language; use them in cod
 
 **Evidence** — the persisted, validated artifact attached to a step (documents, structure, customer, candidates, match, estimate, delivery), keyed by `(run, step, kind)`. Written by the recorder on behalf of a step; read by the run-view projection.
 
+**Boundary schema** — the Zod schema a module exports for the contract it writes or owns: a step's evidence payload, the slice of a provider response an adapter consumes, `AppConfig`, the API responses the client reads. Every boundary parses once, there: writers check their payload with `satisfies`, readers `safeParse`. Persisted enrichment fields are lenient (defaulted, nullable, or caught) so a row from an earlier build still renders; identity and state fields are required. A failed parse becomes the projection's `error` state with an `evidence_payload_invalid` log line, a provider error, or a `config_invalid` 500 — never a throw mid-projection.
+
 **Workflow state** — the run-level progress string (`accepted`, `reading_documents`, … `delivered`, `failed`) shown to the client. Derived vocabulary of the recorder; steps do not choose it directly.
 
 **Review** — the consolidated human decision point; the workflow hibernates until the owner decides, then wakes and applies the outcome. Review itself writes only the review tables and the claim that settles them.
