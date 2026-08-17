@@ -1,7 +1,30 @@
 import { exports } from "cloudflare:workers"
 import { describe, expect, it } from "vitest"
+import { z } from "zod"
 
 import type { CatalogueProjection } from "../worker/catalogue"
+
+/**
+ * The fields a browsable row has to carry.
+ *
+ * The projection's own type already names them; these schemas are what the
+ * response actually has to hold at runtime, so a row that arrives with a field
+ * missing or of the wrong kind fails the test rather than typechecking.
+ */
+const PRODUCT_ROW_SCHEMA = z.object({
+  sku: z.string(),
+  name: z.string(),
+  category: z.string(),
+  manufacturer: z.string(),
+  basePriceCents: z.number(),
+})
+
+const ALIAS_ROW_SCHEMA = z.object({
+  alias: z.string(),
+  kind: z.string(),
+  sku: z.string(),
+  productName: z.string(),
+})
 
 async function readCatalogue(section: string): Promise<{
   response: Response
@@ -25,12 +48,7 @@ describe("public catalogue browser", () => {
 
     expect(catalogue.rows).toHaveLength(250)
     expect(catalogue.rows.some((row) => row.status === "archived")).toBe(true)
-    const firstProduct = catalogue.rows[0]
-    expect(typeof firstProduct?.sku).toBe("string")
-    expect(typeof firstProduct?.name).toBe("string")
-    expect(typeof firstProduct?.category).toBe("string")
-    expect(typeof firstProduct?.manufacturer).toBe("string")
-    expect(typeof firstProduct?.basePriceCents).toBe("number")
+    PRODUCT_ROW_SCHEMA.parse(catalogue.rows[0])
   })
 
   it("summarizes every customer without exposing contact details", async () => {
@@ -65,11 +83,7 @@ describe("public catalogue browser", () => {
     if (catalogue.section !== "aliases") throw new Error("wrong projection")
 
     expect(catalogue.rows.length).toBeGreaterThan(250)
-    const firstAlias = catalogue.rows[0]
-    expect(typeof firstAlias?.alias).toBe("string")
-    expect(typeof firstAlias?.kind).toBe("string")
-    expect(typeof firstAlias?.sku).toBe("string")
-    expect(typeof firstAlias?.productName).toBe("string")
+    ALIAS_ROW_SCHEMA.parse(catalogue.rows[0])
   })
 
   it("rejects writes and unknown catalogue sections", async () => {
