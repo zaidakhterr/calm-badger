@@ -289,6 +289,22 @@ function RunPage() {
 
   if (isUnavailable) return <RunUnavailable />
 
+  // Which nodes have anything to open, so "expand all" and "collapse all" act
+  // on exactly the nodes a reader could toggle by hand.
+  const panels = Object.fromEntries(
+    run.steps.map((step) => [
+      step.key,
+      evidencePanel(step, snapshot, viewId, () => {
+        void readRunSnapshot(viewId).then(setSnapshot)
+      }),
+    ])
+  )
+  const expandableKeys = run.steps
+    .filter((step) => panels[step.key] !== null)
+    .map((step) => step.key)
+  const isStepOpen = (key: string) =>
+    openSteps[key] ?? opensItself(run.steps.find((step) => step.key === key)!)
+
   return (
     <main className="mx-auto w-full max-w-3xl px-4 py-6 sm:px-6 sm:py-8">
       <div className="flex flex-wrap items-center gap-2">
@@ -323,11 +339,38 @@ function RunPage() {
         </p>
       ) : null}
 
-      <ol className="mt-6" aria-label="RFQ workflow progress">
+      <div className="mt-6 flex items-center justify-end gap-1">
+        <Button
+          variant="ghost"
+          size="sm"
+          type="button"
+          disabled={expandableKeys.every((key) => isStepOpen(key))}
+          onClick={() =>
+            setOpenSteps(
+              Object.fromEntries(expandableKeys.map((key) => [key, true]))
+            )
+          }
+        >
+          Expand all
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          type="button"
+          disabled={expandableKeys.every((key) => !isStepOpen(key))}
+          onClick={() =>
+            setOpenSteps(
+              Object.fromEntries(expandableKeys.map((key) => [key, false]))
+            )
+          }
+        >
+          Collapse all
+        </Button>
+      </div>
+
+      <ol className="mt-1" aria-label="RFQ workflow progress">
         {run.steps.map((step, index) => {
-          const panel = evidencePanel(step, snapshot, viewId, () => {
-            void readRunSnapshot(viewId).then(setSnapshot)
-          })
+          const panel = panels[step.key]
 
           return (
             <WorkflowStepRow
@@ -335,7 +378,7 @@ function RunPage() {
               step={step}
               isLast={index === run.steps.length - 1}
               nextStatus={run.steps[index + 1]?.status ?? null}
-              isOpen={openSteps[step.key] ?? opensItself(step)}
+              isOpen={isStepOpen(step.key)}
               onToggle={
                 panel
                   ? () =>
