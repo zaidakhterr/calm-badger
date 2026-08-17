@@ -137,8 +137,9 @@ async function readStep(runId: string, stepKey: string): Promise<StepRow> {
     .bind(runId, stepKey)
     .first<StepRow>()
 
-  expect(row).not.toBeNull()
-  return row as StepRow
+  if (row === null) throw new Error(`Run ${runId} has no ${stepKey} step`)
+
+  return row
 }
 
 async function readSteps(runId: string): Promise<StepRow[]> {
@@ -160,8 +161,9 @@ async function readRun(runId: string): Promise<RunRow> {
     .bind(runId)
     .first<RunRow>()
 
-  expect(row).not.toBeNull()
-  return row as RunRow
+  if (row === null) throw new Error(`No run row for ${runId}`)
+
+  return row
 }
 
 async function readEvidence(runId: string): Promise<EvidenceRow[]> {
@@ -249,12 +251,14 @@ describe("beginning a step", () => {
   it("refuses steps that never begin", async () => {
     const runId = await seedRun()
 
-    for (const stepKey of [
+    const withoutABeginning: RunStepKey[] = [
       "rfq-received",
       "review-required",
       "build-estimate",
       "deliver",
-    ] as RunStepKey[]) {
+    ]
+
+    for (const stepKey of withoutABeginning) {
       await expect(
         createRunStepRecorder(env, runId, stepKey).begin("Working…")
       ).rejects.toThrow(/No workflow state is defined/)
@@ -399,11 +403,14 @@ describe("completing a step", () => {
   })
 
   it("ends the run on an approved, rejected, or expired review", async () => {
-    for (const [variant, workflowState, runStatus, stepStatus] of [
+    /** Each review ending, with the workflow state, run status, and step status it leaves. */
+    const endings: [CompleteVariant, string, string, string][] = [
       ["approved", "review_approved", "active", "complete"],
       ["rejected", "review_rejected", "error", "error"],
       ["expired", "review_expired", "error", "error"],
-    ] as [CompleteVariant, string, string, string][]) {
+    ]
+
+    for (const [variant, workflowState, runStatus, stepStatus] of endings) {
       const runId = await seedRun()
       const recorder = createRunStepRecorder(env, runId, "review-required")
 
