@@ -1,14 +1,25 @@
-import type { D1Migration } from "cloudflare:test"
 import { applyD1Migrations } from "cloudflare:test"
 import { env } from "cloudflare:workers"
 import { beforeAll, beforeEach } from "vitest"
+import { z } from "zod"
 
 import { seedCatalog } from "./seed-catalog"
 
-// `TEST_D1_MIGRATIONS` is injected by `vitest.config.ts` and is deliberately
-// absent from the generated Worker environment types.
-const migrations = (env as unknown as { TEST_D1_MIGRATIONS: D1Migration[] })
-  .TEST_D1_MIGRATIONS
+/**
+ * The migrations `vitest.config.ts` injects into the environment.
+ *
+ * They are deliberately absent from the generated Worker environment types, so
+ * the injection is a boundary like any other: an environment that arrives
+ * without a readable migration list says so here, rather than inside the first
+ * query of a suite that has no schema.
+ */
+const TEST_MIGRATIONS_SCHEMA = z.object({
+  TEST_D1_MIGRATIONS: z.array(
+    z.object({ name: z.string(), queries: z.array(z.string()) })
+  ),
+})
+
+const { TEST_D1_MIGRATIONS: migrations } = TEST_MIGRATIONS_SCHEMA.parse(env)
 
 beforeAll(async () => {
   await applyD1Migrations(env.DB, migrations)
