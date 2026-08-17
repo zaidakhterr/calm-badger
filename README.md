@@ -111,7 +111,10 @@ browser ──► Worker (assets + /api/*) ──► Workflow (durable orchestra
 - **Persistence** — every workflow step writes its business state to D1 as it
   completes, so the graph the browser polls (about once a second while active)
   reflects durable server state rather than client animation. A run survives
-  refresh, and its evidence outlives the request that produced it.
+  refresh, and its evidence outlives the request that produced it. The
+  Run-step recorder (`worker/run-steps.ts`) is the single writer of step
+  lifecycle state and evidence, and derives the run's workflow state from the
+  step and its outcome.
 - **Provider seams** — OCR, language model, delivery, and analytics each sit
   behind a narrow interface in `worker/providers/` and `worker/adapters.ts`.
   Each has a contract-compatible fake, which is what tests and fixture
