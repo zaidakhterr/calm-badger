@@ -15,7 +15,10 @@ import { loadDocumentEvidence } from "../worker/evidence"
 import {
   estimateOcrCostUsd,
   OcrPageLimitError,
+  OcrProviderError,
+  SANITIZED_OCR_RESPONSE_SCHEMA,
   selectOcrProvider,
+  type OcrRequest,
 } from "../worker/providers/ocr"
 import {
   createMistralOcrProvider,
@@ -617,6 +620,18 @@ describe("a terminal provider failure", () => {
   })
 })
 
+/** One small PDF read, so the provider tests differ only in the response. */
+function pdfRequest(): OcrRequest {
+  return {
+    sourceId: "source-id",
+    label: "quote-request.pdf",
+    mediaType: "application/pdf",
+    bytes: new TextEncoder().encode("%PDF").buffer,
+    maxPages: MAX_OCR_PAGES_PER_RUN,
+    runPageLimit: MAX_OCR_PAGES_PER_RUN,
+  }
+}
+
 describe("selecting the OCR provider", () => {
   it("refuses to build the contract fake in production", () => {
     expect(() =>
@@ -683,6 +698,107 @@ describe("selecting the OCR provider", () => {
       include_image_base64: false,
       include_blocks: false,
     })
+  })
+
+  it("fails as a provider error when the response is not the documented shape", async () => {
+    // A plausible-looking body that is not an OCR response: without a parse at
+    // the boundary this reads as a document with no pages at all.
+    const requestFetch: typeof fetch = () =>
+      Promise.resolve(Response.json({ ok: true, result: "queued" }))
+
+    const provider = createMistralOcrProvider(
+      readConfig(envWith({ MISTRAL_API_KEY: "test-key" })),
+      requestFetch
+    )
+
+    await expect(provider.read(pdfRequest())).rejects.toBeInstanceOf(
+      OcrProviderError
+    )
+    await expect(provider.read(pdfRequest())).rejects.toThrow(
+      /unrecognised shape/
+    )
+  })
+
+  it("fails as a provider error when a page carries no text", async () => {
+    const requestFetch: typeof fetch = () =>
+      Promise.resolve(
+        Response.json({
+          model: "mistral-ocr-test",
+          // `markdown` is what a read is: a page without it cannot be stored
+          // with its provenance, so the run stops instead of reading blanks.
+          pages: [{ index: 0, dimensions: { dpi: 72, height: 11, width: 8 } }],
+          usage_info: { pages_processed: 1, doc_size_bytes: 4 },
+        })
+      )
+
+    const provider = createMistralOcrProvider(
+      readConfig(envWith({ MISTRAL_API_KEY: "test-key" })),
+      requestFetch
+    )
+
+    await expect(provider.read(pdfRequest())).rejects.toBeInstanceOf(
+      OcrProviderError
+    )
+  })
+
+  it("reads a documented response and sanitizes it without image bytes", async () => {
+    const requestFetch: typeof fetch = () =>
+      Promise.resolve(
+        Response.json({
+          model: "mistral-ocr-test",
+          pages: [
+            {
+              index: 0,
+              markdown: "Please quote 4 belts",
+              images: [
+                {
+                  id: "img-0.jpeg",
+                  top_left_x: 1,
+                  top_left_y: 2,
+                  bottom_right_x: 3,
+                  bottom_right_y: 4,
+                  image_base64: "c2VjcmV0",
+                },
+              ],
+              dimensions: { dpi: 72, height: 842, width: 595 },
+            },
+          ],
+          usage_info: { pages_processed: 1, doc_size_bytes: 4 },
+        })
+      )
+
+    const provider = createMistralOcrProvider(
+      readConfig(envWith({ MISTRAL_API_KEY: "test-key" })),
+      requestFetch
+    )
+
+    const document = await provider.read(pdfRequest())
+
+    expect(document.model).toBe("mistral-ocr-test")
+    expect(document.pages).toEqual([
+      {
+        pageNumber: 1,
+        markdown: "Please quote 4 belts",
+        width: 595,
+        height: 842,
+        dpi: 72,
+        regions: [
+          {
+            id: "img-0.jpeg",
+            topLeftX: 1,
+            topLeftY: 2,
+            bottomRightX: 3,
+            bottomRightY: 4,
+          },
+        ],
+      },
+    ])
+    expect(document.usage).toEqual({ pagesProcessed: 1, documentBytes: 4 })
+    expect(
+      SANITIZED_OCR_RESPONSE_SCHEMA.safeParse(document.sanitizedResponse)
+        .success
+    ).toBe(true)
+    expect(JSON.stringify(document.sanitizedResponse)).not.toContain("c2VjcmV0")
   })
 
   it("reports an unknown cost rather than zero when the page price is misconfigured", () => {

@@ -62,6 +62,54 @@ export const STORED_OCR_REGIONS_SCHEMA = z
   })
   .pipe(z.array(OCR_REGION_SCHEMA))
 
+/**
+ * The provider response as evidence keeps it: image payloads removed.
+ *
+ * The shape follows Mistral's documented OCR response — `model`, `pages[]` with
+ * `index`, `markdown`, `images`, and `dimensions`, and `usage_info` — because
+ * that is what the live reader answers with and what the contract fake
+ * imitates. It lives here rather than in either implementation because both
+ * write it and the interface renders it verbatim, so the two must agree.
+ *
+ * Image bytes never appear: `image_base64` is dropped before this value is
+ * built, so stored evidence stays small and carries no document content beyond
+ * the text and the regions the provider located.
+ */
+export const SANITIZED_OCR_IMAGE_SCHEMA = z.object({
+  id: z.string().nullable(),
+  top_left_x: z.number().nullable(),
+  top_left_y: z.number().nullable(),
+  bottom_right_x: z.number().nullable(),
+  bottom_right_y: z.number().nullable(),
+})
+
+export const SANITIZED_OCR_RESPONSE_SCHEMA = z.object({
+  model: z.string().nullable(),
+  pages: z.array(
+    z.object({
+      /** Zero-based, as the provider numbers its own pages. */
+      index: z.number(),
+      markdown: z.string(),
+      images: z.array(SANITIZED_OCR_IMAGE_SCHEMA),
+      dimensions: z
+        .object({
+          dpi: z.number().nullable(),
+          height: z.number().nullable(),
+          width: z.number().nullable(),
+        })
+        .nullable(),
+    })
+  ),
+  usage_info: z
+    .object({
+      pages_processed: z.number().nullable(),
+      doc_size_bytes: z.number().nullable(),
+    })
+    .nullable(),
+})
+
+export type SanitizedOcrResponse = z.infer<typeof SANITIZED_OCR_RESPONSE_SCHEMA>
+
 export type OcrPage = {
   /** One-based, so page provenance reads naturally in the interface. */
   pageNumber: number
@@ -82,8 +130,11 @@ export type OcrDocument = {
   pages: OcrPage[]
   usage: OcrUsage
   latencyMs: number
-  /** Provider response with image payloads and any transport detail removed. */
-  sanitizedResponse: unknown
+  /**
+   * Provider response with image payloads and any transport detail removed.
+   * Null when no provider was asked: the email body is text already.
+   */
+  sanitizedResponse: SanitizedOcrResponse | null
 }
 
 export interface OcrProvider {

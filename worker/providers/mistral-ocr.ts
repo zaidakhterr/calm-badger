@@ -11,6 +11,8 @@
  * logged, never persisted, and never included in stored evidence.
  */
 
+import { z } from "zod"
+
 import type { AppConfig } from "../env"
 
 import {
@@ -21,33 +23,80 @@ import {
   type OcrProvider,
   type OcrRegion,
   type OcrRequest,
+  type SanitizedOcrResponse,
 } from "./ocr"
 
 const OCR_ENDPOINT = "https://api.mistral.ai/v1/ocr"
 const REQUEST_TIMEOUT_MS = 60_000
 const PROVIDER = "mistral"
 
-type MistralOcrImage = {
-  id?: unknown
-  top_left_x?: unknown
-  top_left_y?: unknown
-  bottom_right_x?: unknown
-  bottom_right_y?: unknown
-  image_base64?: unknown
+/** The document as the endpoint takes it: bytes inline, as a data URI. */
+type MistralDocument =
+  | { type: "document_url"; document_url: string }
+  | { type: "image_url"; image_url: string }
+
+type MistralOcrRequest = {
+  model: string
+  document: MistralDocument
+  /** Zero-based page selector. Absent for images, which have one page. */
+  pages?: string
+  include_image_base64: boolean
+  include_blocks: boolean
 }
 
-type MistralOcrPage = {
-  index?: unknown
-  markdown?: unknown
-  images?: unknown
-  dimensions?: { dpi?: unknown; height?: unknown; width?: unknown } | null
-}
+/**
+ * The slice of the documented response this client consumes.
+ *
+ * `pages`, and each page's `index` and `markdown`, are what a read *is*: a
+ * response without them is not a document this reader can describe, and the
+ * run stops with a provider error rather than continuing on empty pages.
+ * Everything around them — the echoed model name, page dimensions, located
+ * image regions, usage accounting — is provenance the reader can do without,
+ * so it is optional and falls back rather than failing the read.
+ *
+ * Unrecognised keys are dropped, which is also how the sanitized copy stays
+ * free of anything the provider may add to a future response.
+ */
+const MISTRAL_OCR_IMAGE_SCHEMA = z.object({
+  id: z.string().nullish(),
+  top_left_x: z.number().nullish(),
+  top_left_y: z.number().nullish(),
+  bottom_right_x: z.number().nullish(),
+  bottom_right_y: z.number().nullish(),
+  /** Requested off, so it is normally absent; never copied onward. */
+  image_base64: z.string().nullish(),
+})
 
-type MistralOcrResponse = {
-  model?: unknown
-  pages?: unknown
-  usage_info?: { pages_processed?: unknown; doc_size_bytes?: unknown } | null
-}
+const MISTRAL_OCR_PAGE_SCHEMA = z.object({
+  index: z.number(),
+  markdown: z.string(),
+  images: z.array(MISTRAL_OCR_IMAGE_SCHEMA).nullish(),
+  dimensions: z
+    .object({
+      dpi: z.number().nullish(),
+      height: z.number().nullish(),
+      width: z.number().nullish(),
+    })
+    .nullish(),
+})
+
+const MISTRAL_OCR_RESPONSE_SCHEMA = z.object({
+  model: z.string().nullish(),
+  pages: z.array(MISTRAL_OCR_PAGE_SCHEMA),
+  usage_info: z
+    .object({
+      pages_processed: z.number().nullish(),
+      doc_size_bytes: z.number().nullish(),
+    })
+    .nullish(),
+})
+
+type MistralOcrResponse = z.infer<typeof MISTRAL_OCR_RESPONSE_SCHEMA>
+
+type MistralOcrPage = z.infer<typeof MISTRAL_OCR_PAGE_SCHEMA>
+
+/** The short reason a rejected request carries, when it carries one. */
+const MISTRAL_ERROR_SCHEMA = z.object({ message: z.string() })
 
 export function createMistralOcrProvider(
   config: AppConfig,
@@ -69,14 +118,25 @@ export function createMistralOcrProvider(
       }
 
       const dataUri = `data:${request.mediaType};base64,${encodeBase64(request.bytes)}`
-      const document =
+      const document: MistralDocument =
         request.mediaType === "application/pdf"
           ? { type: "document_url", document_url: dataUri }
           : { type: "image_url", image_url: dataUri }
-      const pageProbe =
-        request.mediaType === "application/pdf"
-          ? mistralPageProbe(request.maxPages)
-          : undefined
+
+      const requestBody: MistralOcrRequest = {
+        model,
+        document,
+        include_image_base64: false,
+        include_blocks: false,
+      }
+
+      if (request.mediaType === "application/pdf") {
+        // Mistral page numbers are zero-based. Selecting one page beyond the
+        // remaining allowance is a bounded probe: an over-limit PDF returns
+        // that extra page and can be rejected instead of silently truncating,
+        // while provider work stays capped at allowance + 1.
+        requestBody.pages = mistralPageProbe(request.maxPages)
+      }
 
       const startedAt = Date.now()
       let response: Response
@@ -88,17 +148,7 @@ export function createMistralOcrProvider(
             authorization: `Bearer ${apiKey}`,
             "content-type": "application/json",
           },
-          body: JSON.stringify({
-            model,
-            document,
-            // Mistral page numbers are zero-based. Selecting one page beyond
-            // the remaining allowance is a bounded probe: an over-limit PDF
-            // returns that extra page and can be rejected instead of silently
-            // truncating, while provider work stays capped at allowance + 1.
-            ...(pageProbe ? { pages: pageProbe } : {}),
-            include_image_base64: false,
-            include_blocks: false,
-          }),
+          body: JSON.stringify(requestBody),
           signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         })
       } catch {
@@ -119,9 +169,9 @@ export function createMistralOcrProvider(
         )
       }
 
-      let body: MistralOcrResponse
+      let payload: unknown
       try {
-        body = await response.json<MistralOcrResponse>()
+        payload = await response.json()
       } catch {
         throw new OcrProviderError(
           PROVIDER,
@@ -129,6 +179,20 @@ export function createMistralOcrProvider(
           response.status
         )
       }
+
+      // A response this client cannot recognise ends the run as any other
+      // provider failure does. Reading pages out of an unknown shape would
+      // hand the workflow an empty document that looks like a real one.
+      const parsed = MISTRAL_OCR_RESPONSE_SCHEMA.safeParse(payload)
+      if (!parsed.success) {
+        throw new OcrProviderError(
+          PROVIDER,
+          "The document reader returned a response in an unrecognised shape.",
+          response.status
+        )
+      }
+
+      const body = parsed.data
 
       if (exceedsPageBudget(body, request.maxPages)) {
         throw new OcrPageLimitError(PROVIDER, request.runPageLimit)
@@ -144,7 +208,7 @@ export function createMistralOcrProvider(
       }
 
       return {
-        model: typeof body.model === "string" ? body.model : model,
+        model: body.model ?? model,
         pages,
         usage: {
           pagesProcessed:
@@ -173,54 +237,39 @@ function exceedsPageBudget(
   body: MistralOcrResponse,
   maxPages: number
 ): boolean {
-  const pages = Array.isArray(body.pages) ? body.pages : []
   const processed = readInteger(body.usage_info?.pages_processed)
 
-  if (pages.length > maxPages || (processed !== null && processed > maxPages)) {
+  if (
+    body.pages.length > maxPages ||
+    (processed !== null && processed > maxPages)
+  ) {
     return true
   }
 
   // The probe is the zero-based index equal to maxPages. Treat its presence as
-  // overflow even if a malformed usage object under-reports the page count.
-  return pages.some((entry) => {
-    const page = (entry ?? {}) as MistralOcrPage
-    const index = readInteger(page.index)
-    return index !== null && index >= maxPages
-  })
+  // overflow even if a usage object under-reports the page count.
+  return body.pages.some((page) => Math.trunc(page.index) >= maxPages)
 }
 
 function readPages(body: MistralOcrResponse): OcrPage[] {
-  if (!Array.isArray(body.pages)) return []
-
-  return body.pages.map((entry, index) => {
-    const page = (entry ?? {}) as MistralOcrPage
-    const pageIndex = readInteger(page.index)
-
-    return {
-      pageNumber: (pageIndex ?? index) + 1,
-      markdown: typeof page.markdown === "string" ? page.markdown : "",
-      width: readInteger(page.dimensions?.width),
-      height: readInteger(page.dimensions?.height),
-      dpi: readInteger(page.dimensions?.dpi),
-      regions: readRegions(page.images),
-    }
-  })
+  return body.pages.map((page) => ({
+    pageNumber: Math.trunc(page.index) + 1,
+    markdown: page.markdown,
+    width: readInteger(page.dimensions?.width),
+    height: readInteger(page.dimensions?.height),
+    dpi: readInteger(page.dimensions?.dpi),
+    regions: readRegions(page),
+  }))
 }
 
-function readRegions(images: unknown): OcrRegion[] {
-  if (!Array.isArray(images)) return []
-
-  return images.map((entry, index) => {
-    const image = (entry ?? {}) as MistralOcrImage
-
-    return {
-      id: typeof image.id === "string" ? image.id : `region-${index + 1}`,
-      topLeftX: readInteger(image.top_left_x) ?? 0,
-      topLeftY: readInteger(image.top_left_y) ?? 0,
-      bottomRightX: readInteger(image.bottom_right_x) ?? 0,
-      bottomRightY: readInteger(image.bottom_right_y) ?? 0,
-    }
-  })
+function readRegions(page: MistralOcrPage): OcrRegion[] {
+  return (page.images ?? []).map((image, index) => ({
+    id: image.id ?? `region-${index + 1}`,
+    topLeftX: readInteger(image.top_left_x) ?? 0,
+    topLeftY: readInteger(image.top_left_y) ?? 0,
+    bottomRightX: readInteger(image.bottom_right_x) ?? 0,
+    bottomRightY: readInteger(image.bottom_right_y) ?? 0,
+  }))
 }
 
 /**
@@ -231,9 +280,8 @@ async function readProviderMessage(response: Response): Promise<string> {
   const detail = await (async () => {
     try {
       const text = (await response.text()).slice(0, 400)
-      const parsed: unknown = JSON.parse(text)
-      const message = (parsed as { message?: unknown }).message
-      return typeof message === "string" ? message : ""
+      const parsed = MISTRAL_ERROR_SCHEMA.safeParse(JSON.parse(text))
+      return parsed.success ? parsed.data.message : ""
     } catch {
       return ""
     }
@@ -247,30 +295,38 @@ async function readProviderMessage(response: Response): Promise<string> {
 }
 
 /** Drops embedded image payloads so stored evidence stays small and readable. */
-function sanitize(body: MistralOcrResponse): unknown {
-  const pages = Array.isArray(body.pages)
-    ? body.pages.map((entry) => {
-        const page = (entry ?? {}) as MistralOcrPage
-        const images = Array.isArray(page.images)
-          ? page.images.map((image) => {
-              const { image_base64: _omitted, ...rest } = (image ??
-                {}) as MistralOcrImage
-              void _omitted
-              return rest
-            })
-          : []
-
-        return { ...page, images }
-      })
-    : []
-
-  return { model: body.model, pages, usage_info: body.usage_info ?? null }
+function sanitize(body: MistralOcrResponse): SanitizedOcrResponse {
+  return {
+    model: body.model ?? null,
+    pages: body.pages.map((page) => ({
+      index: page.index,
+      markdown: page.markdown,
+      images: (page.images ?? []).map((image) => ({
+        id: image.id ?? null,
+        top_left_x: image.top_left_x ?? null,
+        top_left_y: image.top_left_y ?? null,
+        bottom_right_x: image.bottom_right_x ?? null,
+        bottom_right_y: image.bottom_right_y ?? null,
+      })),
+      dimensions: page.dimensions
+        ? {
+            dpi: page.dimensions.dpi ?? null,
+            height: page.dimensions.height ?? null,
+            width: page.dimensions.width ?? null,
+          }
+        : null,
+    })),
+    usage_info: body.usage_info
+      ? {
+          pages_processed: body.usage_info.pages_processed ?? null,
+          doc_size_bytes: body.usage_info.doc_size_bytes ?? null,
+        }
+      : null,
+  }
 }
 
-function readInteger(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value)
-    ? Math.trunc(value)
-    : null
+function readInteger(value: number | null | undefined): number | null {
+  return value === null || value === undefined ? null : Math.trunc(value)
 }
 
 function encodeBase64(bytes: ArrayBuffer): string {

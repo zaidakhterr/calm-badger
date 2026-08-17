@@ -25,6 +25,7 @@ import {
   type OcrPage,
   type OcrProvider,
   type OcrRequest,
+  type SanitizedOcrResponse,
 } from "./ocr"
 
 const PROVIDER = "contract-fake"
@@ -61,12 +62,20 @@ export function createContractFakeOcrProvider(config: AppConfig): OcrProvider {
           documentBytes: request.bytes.byteLength,
         },
         latencyMs: Math.max(1, Date.now() - startedAt),
+        // The same shape the live reader reports, so the interface renders one
+        // kind of provider evidence and the contract stays honest.
         sanitizedResponse: {
           model,
           pages: pages.map((page) => ({
             index: page.pageNumber - 1,
             markdown: page.markdown,
-            images: page.regions,
+            images: page.regions.map((region) => ({
+              id: region.id,
+              top_left_x: region.topLeftX,
+              top_left_y: region.topLeftY,
+              bottom_right_x: region.bottomRightX,
+              bottom_right_y: region.bottomRightY,
+            })),
             dimensions: {
               dpi: page.dpi,
               height: page.height,
@@ -77,7 +86,7 @@ export function createContractFakeOcrProvider(config: AppConfig): OcrProvider {
             pages_processed: pages.length,
             doc_size_bytes: request.bytes.byteLength,
           },
-        },
+        } satisfies SanitizedOcrResponse,
       })
     },
   }
