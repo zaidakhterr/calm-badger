@@ -541,11 +541,69 @@ async function describeResolution(env: Env, best: Candidate) {
   }
 }
 
+/**
+ * Applies the customer the owner chose in review.
+ *
+ * The chosen identity is a decision, not a guess, so it lands as `resolved` at
+ * full confidence. Contact and location default to the customer's first records
+ * because review chooses a customer, not a desk. Re-applying is a no-op beyond
+ * rewriting the same row. The step's evidence keeps showing what the automatic
+ * resolution saw: this writes the fact pricing reads, not the story of how the
+ * machine got there.
+ */
+export async function applyReviewCustomer(
+  env: Env,
+  runId: string,
+  { customerId }: { customerId: string }
+): Promise<void> {
+  const customer = await env.DB.prepare(
+    `SELECT id FROM catalog_customers WHERE id = ?`
+  )
+    .bind(customerId)
+    .first<{ id: string }>()
+
+  // Review only ever offers catalogue customers, so an unknown id is a bug
+  // upstream. Failing loudly beats persisting a "resolved" run with no customer.
+  if (!customer) {
+    throw new Error(`No catalogue customer ${customerId} to apply.`)
+  }
+
+  const [contact, location] = await Promise.all([
+    env.DB.prepare(
+      `SELECT id FROM catalog_customer_contacts
+        WHERE customer_id = ? ORDER BY id ASC LIMIT 1`
+    )
+      .bind(customerId)
+      .first<{ id: string }>(),
+    env.DB.prepare(
+      `SELECT id FROM catalog_customer_locations
+        WHERE customer_id = ? ORDER BY id ASC LIMIT 1`
+    )
+      .bind(customerId)
+      .first<{ id: string }>(),
+  ])
+
+  await persistResolution(
+    env,
+    runId,
+    {
+      customerId,
+      contactId: contact?.id ?? null,
+      locationId: location?.id ?? null,
+    },
+    { label: "High", score: 1 }
+  )
+}
+
 async function persistResolution(
   env: Env,
   runId: string,
-  best: Candidate | null,
-  confidence: Confidence
+  best: {
+    customerId: string
+    contactId: string | null
+    locationId: string | null
+  } | null,
+  confidence: Pick<Confidence, "label" | "score">
 ): Promise<void> {
   const now = new Date().toISOString()
 
