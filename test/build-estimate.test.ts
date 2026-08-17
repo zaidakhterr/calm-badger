@@ -32,9 +32,17 @@ import {
 import { loadQuote } from "../worker/build-estimate"
 import { deliverRun } from "../worker/deliver"
 import { loadDeliveryEvidence, loadEstimateEvidence } from "../worker/evidence"
-import { QUOTE_SCHEMA, type CanonicalQuote } from "../worker/quote"
+import {
+  CANONICAL_QUOTE_SCHEMA,
+  QUOTE_SCHEMA,
+  type CanonicalQuote,
+} from "../worker/quote"
+import { JSON_TEXT_SCHEMA } from "../worker/rfq-extraction"
 
 const base = "https://example.test"
+
+/** The quote download, as the file a browser receives: JSON text, then the contract. */
+const DOWNLOADED_QUOTE_SCHEMA = JSON_TEXT_SCHEMA.pipe(CANONICAL_QUOTE_SCHEMA)
 
 type RunStep = {
   key: string
@@ -785,8 +793,9 @@ describe("downloading the canonical quote", () => {
     expect(response.headers.get("content-type")).toContain("application/json")
     expect(response.headers.get("content-disposition")).toContain("attachment")
 
-    const text = await response.text()
-    const quote = JSON.parse(text) as CanonicalQuote
+    // The downloaded file is held to the quote contract itself, not to the
+    // handful of fields this test goes on to read.
+    const quote = DOWNLOADED_QUOTE_SCHEMA.parse(await response.text())
 
     expect(response.headers.get("content-disposition")).toContain(
       `${quote.quoteNumber}.json`
