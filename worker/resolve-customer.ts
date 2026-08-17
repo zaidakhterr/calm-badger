@@ -13,8 +13,12 @@
  */
 
 import { labelFor, type Confidence } from "./rfq-extraction"
+import { createRunStepRecorder, type RunStepRecorder } from "./run-steps"
 
 export const RESOLVE_CUSTOMER_STEP_KEY = "resolve-customer"
+
+/** The one kind of evidence this step records. */
+const CUSTOMER_EVIDENCE_KIND = "customer"
 
 /** Fixed weights. They are demo judgement, stated openly in the evidence. */
 const WEIGHTS = {
@@ -68,8 +72,10 @@ export async function resolveCustomer(
   env: Env,
   runId: string
 ): Promise<ResolveCustomerOutcome> {
+  const step = createRunStepRecorder(env, runId, RESOLVE_CUSTOMER_STEP_KEY)
+
   try {
-    return await resolve(env, runId)
+    return await resolve(env, runId, step)
   } catch (error) {
     const message = "The customer could not be resolved."
 
@@ -84,7 +90,7 @@ export async function resolveCustomer(
     )
 
     try {
-      await failStep(env, runId, message)
+      await step.fail(message)
     } catch {
       // Nowhere left to record the failure; returning still stops the workflow.
     }
@@ -95,7 +101,8 @@ export async function resolveCustomer(
 
 async function resolve(
   env: Env,
-  runId: string
+  runId: string,
+  step: RunStepRecorder
 ): Promise<ResolveCustomerOutcome> {
   const rfq = await env.DB.prepare(
     `SELECT company_name, contact_name, contact_email, delivery_location
@@ -106,12 +113,12 @@ async function resolve(
 
   if (!rfq) {
     const message = "No structured request was available to resolve."
-    await failStep(env, runId, message)
+    await step.fail(message)
     return { state: "error", message }
   }
 
   const startedAt = Date.now()
-  await beginStep(env, runId)
+  await step.begin("Matching the sender against catalogue customers…")
 
   const references = await loadReferences(env, runId)
   const candidates = await scoreCandidates(env, rfq, references)
@@ -128,7 +135,7 @@ async function resolve(
 
   await persistResolution(env, runId, resolved ? best : null, confidence)
 
-  await persistEvidence(env, runId, {
+  await step.attachEvidence(CUSTOMER_EVIDENCE_KIND, {
     state: resolved ? "resolved" : "unresolved",
     method: "deterministic-catalog-lookup",
     message: resolved
@@ -152,7 +159,18 @@ async function resolve(
     metrics: { elapsedMs },
   })
 
-  await completeStep(env, runId, resolved ? best : null, confidence)
+  // Two endings, one step: an unresolved run continues, so it is a completion
+  // with its own variant rather than a failure.
+  if (resolved && best) {
+    await step.complete(
+      `Resolved to ${best.name}. Confidence ${confidence.label} (${confidence.score.toFixed(2)}).`
+    )
+  } else {
+    await step.complete(
+      "No catalogue customer matched. The request stays unresolved rather than creating one.",
+      { variant: "unresolved" }
+    )
+  }
 
   console.log(
     JSON.stringify({
@@ -552,98 +570,6 @@ async function persistResolution(
       best?.locationId ?? null,
       confidence.label,
       confidence.score,
-      now
-    )
-    .run()
-}
-
-async function beginStep(env: Env, runId: string): Promise<void> {
-  const now = new Date().toISOString()
-
-  await env.DB.batch([
-    env.DB.prepare(
-      `UPDATE run_steps
-          SET status = 'active',
-              summary = ?,
-              started_at = COALESCE(started_at, ?),
-              updated_at = ?
-        WHERE run_id = ? AND step_key = ?`
-    ).bind(
-      "Matching the sender against catalogue customers…",
-      now,
-      now,
-      runId,
-      RESOLVE_CUSTOMER_STEP_KEY
-    ),
-    env.DB.prepare(
-      `UPDATE runs SET workflow_state = 'resolving_customer', updated_at = ?
-        WHERE id = ?`
-    ).bind(now, runId),
-  ])
-}
-
-async function completeStep(
-  env: Env,
-  runId: string,
-  best: Candidate | null,
-  confidence: Confidence
-): Promise<void> {
-  const now = new Date().toISOString()
-  const summary = best
-    ? `Resolved to ${best.name}. Confidence ${confidence.label} (${confidence.score.toFixed(2)}).`
-    : "No catalogue customer matched. The request stays unresolved rather than creating one."
-
-  await env.DB.batch([
-    env.DB.prepare(
-      `UPDATE run_steps
-          SET status = 'complete', summary = ?, completed_at = ?, updated_at = ?
-        WHERE run_id = ? AND step_key = ?`
-    ).bind(summary, now, now, runId, RESOLVE_CUSTOMER_STEP_KEY),
-    env.DB.prepare(
-      `UPDATE runs SET workflow_state = ?, updated_at = ? WHERE id = ?`
-    ).bind(best ? "customer_resolved" : "customer_unresolved", now, runId),
-  ])
-}
-
-async function failStep(
-  env: Env,
-  runId: string,
-  message: string
-): Promise<void> {
-  const now = new Date().toISOString()
-
-  await env.DB.batch([
-    env.DB.prepare(
-      `UPDATE run_steps
-          SET status = 'error', summary = ?, completed_at = ?, updated_at = ?
-        WHERE run_id = ? AND step_key = ?`
-    ).bind(message, now, now, runId, RESOLVE_CUSTOMER_STEP_KEY),
-    env.DB.prepare(
-      `UPDATE runs SET status = 'error', workflow_state = 'failed', updated_at = ?
-        WHERE id = ?`
-    ).bind(now, runId),
-  ])
-}
-
-async function persistEvidence(
-  env: Env,
-  runId: string,
-  payload: unknown
-): Promise<void> {
-  const now = new Date().toISOString()
-
-  await env.DB.prepare(
-    `INSERT INTO run_step_evidence (id, run_id, step_key, kind, payload, created_at)
-     VALUES (?, ?, ?, 'customer', ?, ?)
-     ON CONFLICT (run_id, step_key, kind) DO UPDATE SET
-       payload = excluded.payload,
-       created_at = excluded.created_at`
-  )
-    .bind(
-      crypto.randomUUID(),
-      runId,
-      RESOLVE_CUSTOMER_STEP_KEY,
-      JSON.stringify(payload),
       now
     )
     .run()
