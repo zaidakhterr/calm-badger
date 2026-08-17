@@ -986,7 +986,9 @@ describe("integrity in isolation", () => {
   })
 
   it("reports schema failures by path and rule only", () => {
-    const checked = validateRerankOutput({ ranked: "the first one" })
+    const checked = validateRerankOutput(
+      JSON.stringify({ ranked: "the first one" })
+    )
 
     expect(checked.state).toBe("invalid")
     if (checked.state !== "invalid") return

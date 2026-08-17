@@ -625,7 +625,7 @@ describe("validation in isolation", () => {
     expect(parsed).toMatchObject({ state: "parsed", repaired: false })
 
     const checked = validateAgainstSchema(
-      parsed.state === "parsed" ? parsed.value : null
+      parsed.state === "parsed" ? parsed.json : ""
     )
     expect(checked.state).toBe("valid")
   })
@@ -647,7 +647,9 @@ describe("validation in isolation", () => {
   })
 
   it("reports schema failures by path and rule only", () => {
-    const checked = validateAgainstSchema({ ...valid, lineItems: "none" })
+    const checked = validateAgainstSchema(
+      JSON.stringify({ ...valid, lineItems: "none" })
+    )
 
     expect(checked.state).toBe("invalid")
     if (checked.state !== "invalid") return
@@ -657,14 +659,16 @@ describe("validation in isolation", () => {
   })
 
   it("strips invented references and unusable quantities", () => {
-    const checked = validateAgainstSchema({
-      ...valid,
-      lineItems: [
-        { ...valid.lineItems[0], catalogSku: "NX-ZZZ-9999" },
-        { ...valid.lineItems[0], position: 2, quantity: 0 },
-        { ...valid.lineItems[0], position: 3, quantity: 2.5 },
-      ],
-    })
+    const checked = validateAgainstSchema(
+      JSON.stringify({
+        ...valid,
+        lineItems: [
+          { ...valid.lineItems[0], catalogSku: "NX-ZZZ-9999" },
+          { ...valid.lineItems[0], position: 2, quantity: 0 },
+          { ...valid.lineItems[0], position: 3, quantity: 2.5 },
+        ],
+      })
+    )
 
     expect(checked.state).toBe("valid")
     if (checked.state !== "valid") return

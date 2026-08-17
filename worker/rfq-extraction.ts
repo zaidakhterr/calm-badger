@@ -41,24 +41,36 @@ const nullableText = (max: number) => z.string().max(max).nullable()
  */
 export const SOURCE_REFERENCES_SCHEMA = z.array(z.string().max(200)).max(20)
 
+/**
+ * The three parts of an extraction that survive business validation untouched.
+ * They are named separately because `structure-rfq.ts` stores exactly these
+ * beside the lines it rewrote, and the stored RFQ must be the same contract
+ * rather than a second description of it.
+ */
+export const RFQ_CUSTOMER_SCHEMA = z.object({
+  companyName: nullableText(200),
+  contactName: nullableText(160),
+  contactEmail: nullableText(200),
+  contactPhone: nullableText(60),
+  deliveryLocation: nullableText(200),
+})
+
+export const RFQ_SOURCE_SCHEMA = z.object({
+  channel: z.enum(["email", "pdf", "image", "mixed"]),
+  subject: nullableText(300),
+  receivedAt: nullableText(60),
+  references: SOURCE_REFERENCES_SCHEMA,
+})
+
+export const RFQ_DEADLINE_SCHEMA = z.object({
+  date: nullableText(40),
+  text: nullableText(120),
+})
+
 export const rfqExtractionSchema = z.object({
-  customer: z.object({
-    companyName: nullableText(200),
-    contactName: nullableText(160),
-    contactEmail: nullableText(200),
-    contactPhone: nullableText(60),
-    deliveryLocation: nullableText(200),
-  }),
-  source: z.object({
-    channel: z.enum(["email", "pdf", "image", "mixed"]),
-    subject: nullableText(300),
-    receivedAt: nullableText(60),
-    references: SOURCE_REFERENCES_SCHEMA,
-  }),
-  deadline: z.object({
-    date: nullableText(40),
-    text: nullableText(120),
-  }),
+  customer: RFQ_CUSTOMER_SCHEMA,
+  source: RFQ_SOURCE_SCHEMA,
+  deadline: RFQ_DEADLINE_SCHEMA,
   lineItems: z
     .array(
       z.object({
@@ -82,7 +94,8 @@ export type RfqExtraction = z.infer<typeof rfqExtractionSchema>
 /* -------------------------------------------------------------------------- */
 
 export type ParseOutcome =
-  | { state: "parsed"; value: unknown; repaired: boolean }
+  /** JSON text, not yet an RFQ: gate two decides whether it says anything. */
+  | { state: "parsed"; json: string; repaired: boolean }
   | { state: "irreparable"; reason: string }
 
 /**
@@ -90,19 +103,19 @@ export type ParseOutcome =
  * made — the common damage is a prose preamble, a fenced code block, or a
  * trailing comma — and its result is final either way. There is no second
  * attempt and no second provider call.
+ *
+ * What comes back is the JSON text that parsed, not a decoded value: the only
+ * thing worth handing on is something a schema has agreed to, and that is the
+ * next gate's answer to give.
  */
 export function parseModelOutput(text: string): ParseOutcome {
-  const direct = tryParse(text)
-  if (direct.ok)
-    return { state: "parsed", value: direct.value, repaired: false }
+  const direct = text.trim()
+  if (isJson(direct)) return { state: "parsed", json: direct, repaired: false }
 
   const repaired = repairJson(text)
 
-  if (repaired !== null) {
-    const second = tryParse(repaired)
-    if (second.ok) {
-      return { state: "parsed", value: second.value, repaired: true }
-    }
+  if (repaired !== null && isJson(repaired)) {
+    return { state: "parsed", json: repaired, repaired: true }
   }
 
   return {
@@ -128,16 +141,30 @@ export function repairJson(text: string): string | null {
   return candidate === text ? null : candidate
 }
 
-function tryParse(text: string): { ok: true; value: unknown } | { ok: false } {
-  const trimmed = text.trim()
-  if (trimmed.length === 0) return { ok: false }
+function isJson(text: string): boolean {
+  if (text.trim().length === 0) return false
 
   try {
-    return { ok: true, value: JSON.parse(trimmed) as unknown }
+    JSON.parse(text)
+    return true
   } catch {
-    return { ok: false }
+    return false
   }
 }
+
+/**
+ * JSON text, decoded. Shared by both model-output gates so "not JSON" and "not
+ * the contract" stay one parse with two named failures.
+ */
+export const JSON_TEXT_SCHEMA = z.string().transform((raw, ctx) => {
+  try {
+    const decoded: unknown = JSON.parse(raw)
+    return decoded
+  } catch {
+    ctx.addIssue({ code: "custom", message: "The text is not JSON." })
+    return z.NEVER
+  }
+})
 
 /* -------------------------------------------------------------------------- */
 /* Gate 2: the schema                                                         */
@@ -147,8 +174,11 @@ export type SchemaOutcome =
   | { state: "valid"; rfq: RfqExtraction }
   | { state: "invalid"; issues: string[] }
 
-export function validateAgainstSchema(value: unknown): SchemaOutcome {
-  const result = rfqExtractionSchema.safeParse(value)
+/** The extraction contract over the JSON text gate one accepted. */
+const RFQ_EXTRACTION_JSON_SCHEMA = JSON_TEXT_SCHEMA.pipe(rfqExtractionSchema)
+
+export function validateAgainstSchema(json: string): SchemaOutcome {
+  const result = RFQ_EXTRACTION_JSON_SCHEMA.safeParse(json)
 
   if (result.success) return { state: "valid", rfq: result.data }
 

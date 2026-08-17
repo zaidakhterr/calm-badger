@@ -48,7 +48,6 @@ import {
   RerankProviderError,
   selectRerankProvider,
   type RerankProvider,
-  type RerankUsage,
 } from "./providers/rerank"
 import {
   CONFIDENCE_SCHEMA,
@@ -218,6 +217,27 @@ type CandidateRow = {
 }
 
 type LineEvidence = MatchesEvidence["lines"][number]
+
+/**
+ * What every ending of one line records regardless of what it decided: where
+ * the line came from, how big its shortlist was, and what the model cost. The
+ * decision itself — method, state, SKU, confidence — is added per ending.
+ */
+type LineEvidenceFacts = Pick<
+  LineEvidence,
+  | "position"
+  | "reference"
+  | "description"
+  | "candidateCount"
+  | "shortlistSize"
+  | "alternatives"
+  | "rejected"
+  | "repaired"
+  | "issues"
+  | "originalOutput"
+  | "latencyMs"
+  | "usage"
+>
 
 export async function matchProducts(
   env: Env,
@@ -391,19 +411,19 @@ async function matchLine(
   const { line, shortlist, products, aliases } = input
   const leading = shortlist[0] ?? null
 
-  const base = {
+  const base: LineEvidenceFacts = {
     position: line.position,
     reference: line.reference,
     description: line.description,
     candidateCount: shortlist.length,
     shortlistSize: shortlist.length,
-    alternatives: [] as MatchAlternative[],
-    rejected: [] as { sku: string; reason: string }[],
+    alternatives: [],
+    rejected: [],
     repaired: false,
-    issues: [] as string[],
-    originalOutput: null as string | null,
-    latencyMs: null as number | null,
-    usage: null as RerankUsage | null,
+    issues: [],
+    originalOutput: null,
+    latencyMs: null,
+    usage: null,
   }
 
   if (!leading) {
@@ -532,7 +552,7 @@ async function matchLine(
     }
   }
 
-  const checked = validateRerankOutput(parsed.value)
+  const checked = validateRerankOutput(parsed.json)
 
   if (checked.state === "invalid") {
     return {

@@ -22,6 +22,7 @@ import { z } from "zod"
 import type { AppConfig } from "./env"
 
 import {
+  JSON_TEXT_SCHEMA,
   labelFor,
   type Confidence,
   type ConfidenceLabel,
@@ -65,9 +66,12 @@ export type RerankSchemaOutcome =
   | { state: "valid"; ranked: RankedCandidate[] }
   | { state: "invalid"; issues: string[] }
 
+/** The ranking contract over the JSON text the repair gate accepted. */
+const RERANK_JSON_SCHEMA = JSON_TEXT_SCHEMA.pipe(rerankSchema)
+
 /** Schema failures are reported by path and rule only: the value is model text. */
-export function validateRerankOutput(value: unknown): RerankSchemaOutcome {
-  const result = rerankSchema.safeParse(value)
+export function validateRerankOutput(json: string): RerankSchemaOutcome {
+  const result = RERANK_JSON_SCHEMA.safeParse(json)
 
   if (result.success) return { state: "valid", ranked: result.data.ranked }
 

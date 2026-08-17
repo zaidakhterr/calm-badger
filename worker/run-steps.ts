@@ -66,8 +66,16 @@ type CompleteRow = {
 
 const DEFAULT_VARIANT = "default"
 
+/**
+ * The four tables below are each keyed by the recorder's own step union and are
+ * sparse on purpose: a step missing from `BeginStateTable` is a step that
+ * cannot begin. Naming them keeps a miss an outcome nobody chose, rather than a
+ * typo that compiles.
+ */
+type BeginStateTable = { readonly [step in RunStepKey]?: string }
+
 /** `(stepKey → workflow_state)` for `begin`. Steps absent here cannot begin. */
-const BEGIN_STATES: Partial<Record<RunStepKey, string>> = {
+const BEGIN_STATES: BeginStateTable = {
   "read-documents": "reading_documents",
   "structure-rfq": "structuring_rfq",
   "resolve-customer": "resolving_customer",
@@ -75,15 +83,21 @@ const BEGIN_STATES: Partial<Record<RunStepKey, string>> = {
   "match-products": "matching_products",
 }
 
+type HoldStateTable = { readonly [step in RunStepKey]?: string }
+
 /** `(stepKey → workflow_state)` for `hold`. Only pricing waits for a human. */
-const HOLD_STATES: Partial<Record<RunStepKey, string>> = {
+const HOLD_STATES: HoldStateTable = {
   "build-estimate": "awaiting_review",
 }
 
+type CompleteRowTable = {
+  readonly [step in RunStepKey]?: {
+    readonly [variant: string]: CompleteRow | undefined
+  }
+}
+
 /** `(stepKey, variant → row)` for `complete`. */
-const COMPLETE_ROWS: Partial<
-  Record<RunStepKey, Partial<Record<string, CompleteRow>>>
-> = {
+const COMPLETE_ROWS: CompleteRowTable = {
   "rfq-received": {
     // The request handler already wrote the receipt row; the durable
     // orchestrator only confirms it owns the run, so neither the summary nor
@@ -209,19 +223,19 @@ const COMPLETE_ROWS: Partial<
   },
 }
 
+/** Where one conditional step is inserted, and what it moves the run to. */
+type ConditionalStep = {
+  /** The step the conditional one is inserted after. */
+  anchorStepKey: RunStepKey
+  /** Used when the anchor is missing, matching the source fallback. */
+  anchorFallbackPosition: number
+  workflowState: string
+}
+
+type ConditionalStepTable = { readonly [step in RunStepKey]?: ConditionalStep }
+
 /** `(stepKey → row)` for `insertConditionalStep`. */
-const CONDITIONAL_STEPS: Partial<
-  Record<
-    RunStepKey,
-    {
-      /** The step the conditional one is inserted after. */
-      anchorStepKey: RunStepKey
-      /** Used when the anchor is missing, matching the source fallback. */
-      anchorFallbackPosition: number
-      workflowState: string
-    }
-  >
-> = {
+const CONDITIONAL_STEPS: ConditionalStepTable = {
   "review-required": {
     anchorStepKey: "match-products",
     anchorFallbackPosition: 5,
@@ -254,8 +268,15 @@ export type RunStepRecorder = {
   ): D1PreparedStatement[]
   /** The step errored, and so did the run. No opt-out. */
   fail(message: string): Promise<void>
-  /** Upserts this step's evidence of `kind`, stringifying the payload. */
-  attachEvidence(kind: string, payload: unknown): Promise<void>
+  /**
+   * Upserts this step's evidence of `kind`, stringifying the payload.
+   *
+   * The evidence type is the caller's: each step owns the schema for what it
+   * writes, exports it, and checks its payload against it with `satisfies` at
+   * the call site, which is what fixes `Evidence` here. The recorder stores
+   * that value and never names it — it is not the recorder's contract to widen.
+   */
+  attachEvidence<Evidence>(kind: string, payload: Evidence): Promise<void>
   /** Inserts the conditional step after its anchor, shifting later steps down. */
   insertConditionalStep(options: {
     title: string
@@ -345,7 +366,7 @@ export function createRunStepRecorder(
     ].filter((assignment) => assignment !== null)
 
     const bindings = [
-      ...(row.setSummary ? [summary as string] : []),
+      ...(row.setSummary ? [summary] : []),
       ...(row.startedAt === "coalesce" ? [now] : []),
       now,
       now,
@@ -418,7 +439,10 @@ export function createRunStepRecorder(
       ])
     },
 
-    async attachEvidence(kind: string, payload: unknown): Promise<void> {
+    async attachEvidence<Evidence>(
+      kind: string,
+      payload: Evidence
+    ): Promise<void> {
       const now = new Date().toISOString()
 
       await write([

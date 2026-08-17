@@ -32,9 +32,12 @@ import {
   applyBusinessRules,
   CONFIDENCE_SCHEMA,
   parseModelOutput,
+  RFQ_CUSTOMER_SCHEMA,
+  RFQ_DEADLINE_SCHEMA,
   RFQ_EXTRACTION_INSTRUCTION,
   RFQ_SCHEMA_DESCRIPTION,
   RFQ_SCHEMA_NAME,
+  RFQ_SOURCE_SCHEMA,
   rfqExtractionSchema,
   scoreExtraction,
   SOURCE_REFERENCES_SCHEMA,
@@ -75,9 +78,9 @@ const VALIDATED_LINE_SCHEMA = z.object({
  * the business rules rewrote.
  */
 const VALIDATED_RFQ_SCHEMA = z.object({
-  customer: rfqExtractionSchema.shape.customer,
-  source: rfqExtractionSchema.shape.source,
-  deadline: rfqExtractionSchema.shape.deadline,
+  customer: RFQ_CUSTOMER_SCHEMA,
+  source: RFQ_SOURCE_SCHEMA,
+  deadline: RFQ_DEADLINE_SCHEMA,
   lineItems: z.array(VALIDATED_LINE_SCHEMA),
 })
 
@@ -272,7 +275,7 @@ async function structure(
     })
   }
 
-  const checked = validateAgainstSchema(parsed.value)
+  const checked = validateAgainstSchema(parsed.json)
 
   if (checked.state === "invalid") {
     return await stopWithValidationFailure(runId, recorder, {
