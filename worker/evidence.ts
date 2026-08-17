@@ -13,6 +13,8 @@
  * which is the order the interface reads them in.
  */
 
+import { z } from "zod"
+
 import {
   ADAPTERS,
   DEFAULT_ADAPTER,
@@ -24,7 +26,12 @@ import {
 import { BUILD_ESTIMATE_STEP_KEY, loadQuote } from "./build-estimate"
 import { DELIVER_STEP_KEY, loadDelivery } from "./deliver"
 import { MATCH_PRODUCTS_STEP_KEY } from "./match-products"
-import { READ_DOCUMENTS_STEP_KEY } from "./read-documents"
+import {
+  DOCUMENTS_EVIDENCE_KIND,
+  DOCUMENTS_EVIDENCE_SCHEMA,
+  READ_DOCUMENTS_STEP_KEY,
+  type DocumentsEvidence,
+} from "./read-documents"
 import { RESOLVE_CUSTOMER_STEP_KEY } from "./resolve-customer"
 import { RETRIEVE_CANDIDATES_STEP_KEY } from "./retrieve-candidates"
 import type { CanonicalQuote } from "./quote"
@@ -140,29 +147,11 @@ export type DocumentEvidenceProjection = {
   sources: SourceProjection[]
 }
 
-type StoredEvidence = {
-  provider?: unknown
-  model?: unknown
-  state?: unknown
-  message?: unknown
-  totals?: unknown
-  sources?: unknown
-}
-
-type StoredSourceEvidence = {
-  sourceId?: unknown
-  reader?: unknown
-  latencyMs?: unknown
-  pagesProcessed?: unknown
-  estimatedCostUsd?: unknown
-  sanitizedResponse?: unknown
-}
-
 export async function loadDocumentEvidence(
   env: Env,
   runId: string
 ): Promise<DocumentEvidenceProjection> {
-  const [sources, pages, evidenceRow] = await Promise.all([
+  const [sources, pages, stored] = await Promise.all([
     loadSources(env, runId),
     env.DB.prepare(
       `SELECT source_id, page_number, markdown, width, height, dpi, regions
@@ -179,31 +168,31 @@ export async function loadDocumentEvidence(
         dpi: number | null
         regions: string
       }>(),
-    env.DB.prepare(
-      `SELECT payload FROM run_step_evidence
-        WHERE run_id = ? AND step_key = ? AND kind = 'documents'`
-    )
-      .bind(runId, READ_DOCUMENTS_STEP_KEY)
-      .first<{ payload: string }>(),
+    readOwnedEvidence(
+      env,
+      runId,
+      READ_DOCUMENTS_STEP_KEY,
+      DOCUMENTS_EVIDENCE_KIND,
+      DOCUMENTS_EVIDENCE_SCHEMA
+    ),
   ])
 
-  const stored = parseEvidence(evidenceRow?.payload)
-  const perSource = new Map<string, StoredSourceEvidence>()
+  const documents = stored.outcome === "read" ? stored.value : null
+  const unreadable = stored.outcome === "unreadable"
 
-  if (Array.isArray(stored?.sources)) {
-    for (const entry of stored.sources as StoredSourceEvidence[]) {
-      if (typeof entry?.sourceId === "string")
-        perSource.set(entry.sourceId, entry)
-    }
-  }
+  const perSource = new Map<string, DocumentsEvidence["sources"][number]>(
+    (documents?.sources ?? []).map((entry) => [entry.sourceId, entry])
+  )
 
   return {
     stepKey: READ_DOCUMENTS_STEP_KEY,
-    state: readState(stored?.state),
-    message: typeof stored?.message === "string" ? stored.message : null,
-    provider: typeof stored?.provider === "string" ? stored.provider : null,
-    model: typeof stored?.model === "string" ? stored.model : null,
-    totals: readTotals(stored?.totals),
+    state: unreadable ? "error" : (documents?.state ?? "pending"),
+    message: unreadable
+      ? UNREADABLE_EVIDENCE_MESSAGE
+      : (documents?.message ?? null),
+    provider: documents?.provider ?? null,
+    model: documents?.model ?? null,
+    totals: documents?.totals ?? null,
     sources: sources.map((source) => {
       const detail = perSource.get(source.id)
 
@@ -213,10 +202,10 @@ export async function loadDocumentEvidence(
         label: source.label,
         mediaType: source.mediaType,
         byteSize: source.byteSize,
-        reader: typeof detail?.reader === "string" ? detail.reader : null,
-        latencyMs: readNumber(detail?.latencyMs),
-        pagesProcessed: readNumber(detail?.pagesProcessed),
-        estimatedCostUsd: readNumber(detail?.estimatedCostUsd),
+        reader: detail?.reader ?? null,
+        latencyMs: detail?.latencyMs ?? null,
+        pagesProcessed: detail?.pagesProcessed ?? null,
+        estimatedCostUsd: detail?.estimatedCostUsd ?? null,
         sanitizedResponse: detail?.sanitizedResponse ?? null,
         pages: pages.results
           .filter((page) => page.source_id === source.id)
@@ -233,33 +222,8 @@ export async function loadDocumentEvidence(
   }
 }
 
-function parseEvidence(payload: string | undefined): StoredEvidence | null {
-  if (!payload) return null
-
-  try {
-    return JSON.parse(payload) as StoredEvidence
-  } catch {
-    return null
-  }
-}
-
 function readState(value: unknown): DocumentEvidenceProjection["state"] {
   return value === "complete" || value === "error" ? value : "pending"
-}
-
-function readTotals(value: unknown): DocumentEvidenceProjection["totals"] {
-  if (typeof value !== "object" || value === null) return null
-
-  const totals = value as Record<string, unknown>
-
-  return {
-    sourceCount: readNumber(totals.sourceCount) ?? 0,
-    pageCount: readNumber(totals.pageCount) ?? 0,
-    pagesProcessed: readNumber(totals.pagesProcessed) ?? 0,
-    providerLatencyMs: readNumber(totals.providerLatencyMs) ?? 0,
-    estimatedCostUsd: readNumber(totals.estimatedCostUsd),
-    elapsedMs: readNumber(totals.elapsedMs) ?? 0,
-  }
 }
 
 function readRegions(raw: string): PageProjection["regions"] {
@@ -985,6 +949,74 @@ export async function loadDeliveryEvidence(
 /* -------------------------------------------------------------------------- */
 /* Shared readers                                                             */
 /* -------------------------------------------------------------------------- */
+
+/**
+ * What a projection says instead of showing evidence it could not read. It
+ * names no field, no value, and no run: everything specific about the failure
+ * goes to the log line, which is not served to anyone.
+ */
+const UNREADABLE_EVIDENCE_MESSAGE =
+  "The stored evidence for this step could not be read."
+
+/**
+ * One evidence row, read with the schema its writing step owns.
+ *
+ * `absent` is the ordinary state of a step that has not written yet. A row that
+ * no longer fits its schema is `unreadable` rather than a throw: whoever is
+ * looking at the run asked to see it, not to run it, and a projection that says
+ * "this step errored" is more use to them than a failed request.
+ */
+type StoredEvidence<Value> =
+  | { outcome: "read"; value: Value }
+  | { outcome: "absent" }
+  | { outcome: "unreadable" }
+
+/** The `payload` column as it is stored: one step's evidence, as JSON text. */
+const PAYLOAD_TEXT_SCHEMA = z.string().transform((raw, ctx) => {
+  try {
+    const decoded: unknown = JSON.parse(raw)
+    return decoded
+  } catch {
+    ctx.addIssue({ code: "custom", message: "The payload is not JSON text." })
+    return z.NEVER
+  }
+})
+
+async function readOwnedEvidence<Schema extends z.ZodType>(
+  env: Env,
+  runId: string,
+  stepKey: string,
+  kind: string,
+  schema: Schema
+): Promise<StoredEvidence<z.output<Schema>>> {
+  const row = await env.DB.prepare(
+    `SELECT payload FROM run_step_evidence
+      WHERE run_id = ? AND step_key = ? AND kind = ?`
+  )
+    .bind(runId, stepKey, kind)
+    .first<{ payload: string }>()
+
+  if (!row) return { outcome: "absent" }
+
+  const decoded = PAYLOAD_TEXT_SCHEMA.safeParse(row.payload)
+  const result = decoded.success ? schema.safeParse(decoded.data) : null
+
+  if (result?.success) return { outcome: "read", value: result.data }
+
+  // The row itself is never logged. A payload can only have come from this
+  // application, but it is still a stored value, and the three identifiers are
+  // enough to find it.
+  console.error(
+    JSON.stringify({
+      event: "evidence_payload_invalid",
+      runId,
+      step: stepKey,
+      kind,
+    })
+  )
+
+  return { outcome: "unreadable" }
+}
 
 async function readStoredEvidence(
   env: Env,

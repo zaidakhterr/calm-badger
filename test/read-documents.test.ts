@@ -8,9 +8,10 @@
  */
 
 import { env, exports } from "cloudflare:workers"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 
 import { readConfig } from "../worker/env"
+import { loadDocumentEvidence } from "../worker/evidence"
 import {
   estimateOcrCostUsd,
   OcrPageLimitError,
@@ -824,6 +825,182 @@ describe("storing source artifacts", () => {
       )
     ).rejects.toBe(failure)
     expect(objects.size).toBe(0)
+  })
+})
+
+/**
+ * Evidence written by a build that is not this one.
+ *
+ * Rows are seeded straight into D1, the way `run-steps.test.ts` does, because
+ * the point is a payload no current code path writes: one that predates a
+ * field, and one whose state the reader's schema does not recognise. Running
+ * the real workflow would only ever produce today's shape.
+ */
+describe("reading stored evidence a different build wrote", () => {
+  const SEEDED_AT = "2026-01-01T00:00:00.000Z"
+
+  async function seedRunWithOneSource(): Promise<{
+    runId: string
+    sourceId: string
+  }> {
+    const runId = crypto.randomUUID()
+    const sourceId = crypto.randomUUID()
+
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO runs (
+           id, view_id, owner_capability_hash, source_kind, scenario_id,
+           status, workflow_instance_id, workflow_state, workspace_hash,
+           created_at, updated_at
+         ) VALUES (?, ?, 'hash', 'curated', 'messy-forwarded-request',
+                   'active', NULL, 'documents_read', NULL, ?, ?)`
+      ).bind(runId, crypto.randomUUID(), SEEDED_AT, SEEDED_AT),
+      env.DB.prepare(
+        `INSERT INTO run_sources (
+           id, run_id, position, kind, label, media_type, byte_size,
+           storage_key, created_at
+         ) VALUES (?, ?, 0, 'attachment', 'own-list.pdf', 'application/pdf',
+                   1024, 'runs/curated/seeded/own-list.pdf', ?)`
+      ).bind(sourceId, runId, SEEDED_AT),
+    ])
+
+    return { runId, sourceId }
+  }
+
+  async function storeDocumentsPayload(
+    runId: string,
+    payload: string
+  ): Promise<void> {
+    await env.DB.prepare(
+      `INSERT INTO run_step_evidence (
+         id, run_id, step_key, kind, payload, created_at
+       ) VALUES (?, ?, 'read-documents', 'documents', ?, ?)`
+    )
+      .bind(crypto.randomUUID(), runId, payload, SEEDED_AT)
+      .run()
+  }
+
+  it("still projects a payload written before the measurements existed", async () => {
+    const { runId, sourceId } = await seedRunWithOneSource()
+
+    await storeDocumentsPayload(
+      runId,
+      // No `latencyMs`, `estimatedCostUsd`, `sanitizedResponse`, or `totals`:
+      // an earlier build did not record them.
+      JSON.stringify({
+        provider: "contract-fake",
+        model: "mistral-ocr-latest-contract-fake",
+        state: "complete",
+        message: null,
+        sources: [
+          {
+            sourceId,
+            label: "own-list.pdf",
+            kind: "attachment",
+            mediaType: "application/pdf",
+            byteSize: 1024,
+            reader: "ocr-provider",
+            pageCount: 1,
+            pagesProcessed: 1,
+          },
+        ],
+      })
+    )
+
+    const evidence = await loadDocumentEvidence(env, runId)
+
+    expect(evidence.state).toBe("complete")
+    expect(evidence.provider).toBe("contract-fake")
+    expect(evidence.model).toContain("mistral-ocr")
+    expect(evidence.totals).toBeNull()
+
+    const [source] = evidence.sources
+    expect(source.label).toBe("own-list.pdf")
+    expect(source.reader).toBe("ocr-provider")
+    expect(source.pagesProcessed).toBe(1)
+    // Not recorded reads as unknown, never as zero.
+    expect(source.latencyMs).toBeNull()
+    expect(source.estimatedCostUsd).toBeNull()
+    expect(source.sanitizedResponse).toBeNull()
+  })
+
+  it("projects an error and logs one line when the state is not one it knows", async () => {
+    const { runId, sourceId } = await seedRunWithOneSource()
+
+    await storeDocumentsPayload(
+      runId,
+      JSON.stringify({
+        provider: "contract-fake",
+        model: "mistral-ocr-latest-contract-fake",
+        state: "finished",
+        message: null,
+        sources: [
+          {
+            sourceId,
+            label: "own-list.pdf",
+            kind: "attachment",
+            mediaType: "application/pdf",
+            byteSize: 1024,
+            reader: "ocr-provider",
+            pageCount: 1,
+            pagesProcessed: 1,
+            latencyMs: 4,
+            estimatedCostUsd: 0.001,
+            sanitizedResponse: null,
+          },
+        ],
+        totals: {
+          sourceCount: 1,
+          pageCount: 1,
+          pagesProcessed: 1,
+          providerLatencyMs: 4,
+          estimatedCostUsd: 0.001,
+          elapsedMs: 6,
+        },
+      })
+    )
+
+    const lines: string[] = []
+    const logged = vi
+      .spyOn(console, "error")
+      .mockImplementation((line: string) => {
+        lines.push(line)
+      })
+
+    try {
+      const evidence = await loadDocumentEvidence(env, runId)
+
+      expect(evidence.state).toBe("error")
+      expect(evidence.message).toBe(
+        "The stored evidence for this step could not be read."
+      )
+      expect(evidence.provider).toBeNull()
+      expect(evidence.model).toBeNull()
+      expect(evidence.totals).toBeNull()
+
+      // The run's own sources still render: the step says it failed, rather
+      // than the projection collapsing to nothing.
+      expect(evidence.sources).toHaveLength(1)
+      expect(evidence.sources[0].label).toBe("own-list.pdf")
+      expect(evidence.sources[0].reader).toBeNull()
+    } finally {
+      logged.mockRestore()
+    }
+
+    const invalid = lines.filter((line) =>
+      line.includes("evidence_payload_invalid")
+    )
+
+    expect(invalid).toHaveLength(1)
+    // Identifiers only: no field name, no stored value, nothing to leak.
+    expect(invalid[0]).toBe(
+      JSON.stringify({
+        event: "evidence_payload_invalid",
+        runId,
+        step: "read-documents",
+        kind: "documents",
+      })
+    )
   })
 })
 
