@@ -41,5 +41,10 @@ export default defineConfig({
   ],
   test: {
     setupFiles: ["./test/apply-migrations.ts"],
+    // Starting a run writes to D1, spawns a workflow, and reads the scenario
+    // attachment through ASSETS. Several tests do that half a dozen times in
+    // sequence, which is fast locally and much slower on a contended CI
+    // runner, so the per-test budget is well above the 5s default.
+    testTimeout: 30_000,
   },
 })
