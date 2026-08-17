@@ -28,6 +28,11 @@ const repoRoot = fileURLToPath(new URL("..", import.meta.url))
 const reportPath = `${repoRoot}worker/evaluation-report.ts`
 const testFile = "test/reference-workflows.test.ts"
 const MARKER = /^RFQ_EVAL_REPORT (.+)$/m
+// Continuous integration asks vitest for colour even though the reporter is
+// writing to a pipe, so the report arrives with escape sequences ahead of it
+// and no longer begins its line. The sequences cannot appear inside the report
+// itself, because JSON escapes an escape byte, so removing them loses nothing.
+const ANSI_ESCAPE = /\u001b\[[0-9;]*m/g
 
 const args = new Set(process.argv.slice(2))
 const live = args.has("--live")
@@ -112,7 +117,7 @@ async function runEvaluation(useLiveProviders) {
     child.on("close", (value) => resolve(value ?? 1))
   })
 
-  const line = MARKER.exec(output)
+  const line = MARKER.exec(output.replace(ANSI_ESCAPE, ""))
 
   return { report: line ? JSON.parse(line[1]) : null, code }
 }
