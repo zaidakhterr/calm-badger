@@ -5,6 +5,7 @@ import { DEFAULT_ADAPTER } from "./adapters"
 import { captureFunnelEvent } from "./analytics"
 import { buildEstimate } from "./build-estimate"
 import { deliverRun } from "./deliver"
+import { ConfigError, readConfig } from "./env"
 import { applyReviewProductDecision, matchProducts } from "./match-products"
 import { readDocuments } from "./read-documents"
 import { applyReviewCustomer, resolveCustomer } from "./resolve-customer"
@@ -47,6 +48,28 @@ export class RfqWorkflow extends WorkflowEntrypoint<Env, RfqWorkflowParams> {
     step: WorkflowStep
   ): Promise<RfqWorkflowResult> {
     const { runId } = event.payload
+
+    // The same fail-fast the Worker does, for the same reason: a run that
+    // cannot be configured correctly must not reach a provider. The instance
+    // ends here, with the run recorded as failed rather than left active.
+    try {
+      readConfig(this.env)
+    } catch (error) {
+      console.error(
+        JSON.stringify({
+          event: "config_invalid",
+          runId,
+          instanceId: event.instanceId,
+          issues: error instanceof ConfigError ? error.issues : [],
+        })
+      )
+
+      await createRunStepRecorder(this.env, runId, "rfq-received").fail(
+        "This deployment is not configured correctly, so the run stopped before it started."
+      )
+
+      return failure(runId, new Date().toISOString())
+    }
 
     const acknowledgedAt = await step.do("record RFQ receipt", async () => {
       const now = new Date().toISOString()

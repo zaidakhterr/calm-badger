@@ -1,7 +1,10 @@
+import { createExecutionContext, waitOnExecutionContext } from "cloudflare:test"
 import { env } from "cloudflare:workers"
 import { describe, expect, it } from "vitest"
+import { z } from "zod"
 
 import { APP_CONFIG_SCHEMA, readConfig } from "../worker/env"
+import worker from "../worker/index"
 
 /**
  * What a deployment is allowed to be configured as.
@@ -183,6 +186,26 @@ describe("reading configuration from the binding object", () => {
     expect(config.ocrProvider).toBe("contract-fake")
     expect(config.analytics).toEqual({ provider: "contract-fake" })
     expect(config.rateLimitSalt).toBe("test-rate-limit-salt")
+  })
+
+  it("fails a misconfigured deployment's first request rather than a run", async () => {
+    const ctx = createExecutionContext()
+    const response = await worker.fetch(
+      new Request("https://example.test/api/health"),
+      envWith({ OCR_PROVIDER: "contract-fake", APP_ENV: "production" }),
+      ctx
+    )
+    await waitOnExecutionContext(ctx)
+
+    expect(response.status).toBe(500)
+
+    // The reviewer-facing body says nothing about the deployment: the variables
+    // that are wrong are in the structured log line, keyed by request id.
+    const body = z
+      .object({ error: z.string(), requestId: z.string().min(1) })
+      .parse(await response.json())
+
+    expect(body.error).toBe("Internal server error")
   })
 
   it("parses once per binding object, and again for an override", () => {

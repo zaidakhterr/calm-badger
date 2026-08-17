@@ -1,6 +1,7 @@
 import { capturePageview, captureFunnelEvent, logRoute } from "./analytics"
 import { loadQuote } from "./build-estimate"
 import { isCatalogueSection, loadCatalogueProjection } from "./catalogue"
+import { ConfigError, readConfig } from "./env"
 import {
   loadCandidateEvidence,
   loadCustomerEvidence,
@@ -72,6 +73,29 @@ export default {
     // anything, so the log records the route that was taken, not the URL that
     // was requested. Operators still get method, route, status, and timing.
     const route = logRoute(url.pathname)
+
+    // Configuration is parsed before anything is routed, so a misconfigured
+    // deployment says so once, on the first request, rather than halfway
+    // through a run that has already spent a provider call. Parsing is
+    // memoized per isolate, so this costs one map lookup afterwards.
+    try {
+      readConfig(env)
+    } catch (error) {
+      console.error(
+        JSON.stringify({
+          event: "config_invalid",
+          requestId,
+          route,
+          // The variables that are wrong and why, never their values.
+          issues: error instanceof ConfigError ? error.issues : [],
+        })
+      )
+
+      return Response.json(
+        { error: "Internal server error", requestId },
+        { status: 500, headers: jsonHeaders }
+      )
+    }
 
     try {
       const response = await routeRequest(request, env, url, ctx)
