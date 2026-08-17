@@ -67,11 +67,6 @@ const WORKFLOW_STEPS = [
     title: "Deliver",
     waiting: "Waiting for the canonical quote.",
   },
-  {
-    key: "delivered",
-    title: "Delivered",
-    waiting: "The simulated external estimate finishes here.",
-  },
 ] as const
 
 export const RFQ_RECEIVED_STEP_KEY = WORKFLOW_STEPS[0].key
@@ -126,15 +121,14 @@ type StepRow = {
   completed_at: string | null
 }
 
-/** Keep step headers destination-neutral, including for deliveries from older builds. */
+/**
+ * Keep step headers destination-neutral, including for deliveries from older
+ * builds, whose `deliver` row may still carry the transformation sentence.
+ */
 function publicStepSummary(step: StepRow): string {
   if (step.status !== "complete") return step.summary
 
   if (step.step_key === "deliver") {
-    return "Canonical quote transformed for simulated webhook delivery."
-  }
-
-  if (step.step_key === "delivered") {
     const externalId = /^Simulated external estimate (\S+) accepted/.exec(
       step.summary
     )?.[1]

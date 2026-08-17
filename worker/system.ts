@@ -133,7 +133,6 @@ export async function loadSystemDetails(env: Env): Promise<SystemDetails> {
         "Review required, when applicable",
         "Build estimate",
         "Deliver",
-        "Delivered",
       ],
     },
     providers: [

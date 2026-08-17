@@ -145,12 +145,6 @@ async function build(
   await step.complete(
     `Priced ${lineCount} ${lineCount === 1 ? "line" : "lines"} to €${formatAmount(quote.totals.totalCents)} including VAT.`
   )
-  // Delivery is the next node to wake up; give it a sentence that says what it
-  // is waiting for now that a quote exists.
-  await step.setWaitingSummary(
-    "deliver",
-    "Ready to send through the simulated Generic ERP Webhook."
-  )
 
   console.log(
     JSON.stringify({

@@ -111,7 +111,7 @@ describe("the three reference workflows", () => {
 
   it("separates extraction, resolution, retrieval, reranking, review, pricing, and export", () => {
     for (const scenario of report.scenarios) {
-      expect(scenario.workflowState).toBe("estimate_built")
+      expect(scenario.workflowState).toBe("delivered")
       expect(scenario.pricing.priced).toBe(true)
       expect(scenario.pricing.vatRateBp).toBe(1900)
       expect(scenario.pricing.subtotalCents).toBeGreaterThan(0)

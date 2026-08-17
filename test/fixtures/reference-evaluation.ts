@@ -37,8 +37,6 @@ export type EvaluationOptions = {
   /** How many times a run is polled before it is called stuck. */
   pollAttempts?: number
   pollIntervalMs?: number
-  /** Adapter the export outcome is measured through. */
-  adapter?: string
 }
 
 export type LineOutcome = {
@@ -278,7 +276,7 @@ type SystemView = {
 }
 
 const SETTLED_STATES = [
-  "estimate_built",
+  "delivered",
   "matches_need_review",
   "review_rejected",
   "review_expired",
@@ -322,7 +320,6 @@ async function evaluateScenario(
   gold: GoldScenario,
   options: EvaluationOptions
 ): Promise<ScenarioEvaluation> {
-  const adapter = options.adapter ?? "generic-erp-webhook"
   const notes: string[] = []
   const startedAt = Date.now()
 
@@ -405,8 +402,8 @@ async function evaluateScenario(
     state = await waitForRun(fetcher, viewId, SETTLED_STATES, options)
   }
 
-  if (state !== "estimate_built") {
-    notes.push(`the run ended in ${state} instead of a priced estimate`)
+  if (state !== "delivered") {
+    notes.push(`the run ended in ${state} instead of a delivered estimate`)
   }
 
   const [documents, structured, customer] = [
@@ -423,25 +420,12 @@ async function evaluateScenario(
     notes.push(`no canonical quote was produced (${quoteResponse.status})`)
   }
 
-  let delivery: DeliveryView["delivery"] = null
-  if (quote) {
-    const delivered = await fetcher(`/api/runs/${viewId}/deliver`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${capability}`,
-      },
-      body: JSON.stringify({ adapter }),
-    })
-
-    if (!delivered.ok) {
-      notes.push(`delivery was refused (${delivered.status})`)
-    }
-
-    delivery = (
-      await read<DeliveryView>(fetcher, `/api/runs/${viewId}/delivery`)
-    ).delivery
-  }
+  // Delivery follows pricing on its own; the workflow has already run it by
+  // the time the run reads `delivered`.
+  const delivery = quote
+    ? (await read<DeliveryView>(fetcher, `/api/runs/${viewId}/delivery`))
+        .delivery
+    : null
 
   const wallClockMs = Date.now() - startedAt
 

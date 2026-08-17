@@ -28,8 +28,76 @@ import { READ_DOCUMENTS_STEP_KEY } from "./read-documents"
 import { RESOLVE_CUSTOMER_STEP_KEY } from "./resolve-customer"
 import { RETRIEVE_CANDIDATES_STEP_KEY } from "./retrieve-candidates"
 import type { CanonicalQuote } from "./quote"
-import { loadSources } from "./sources"
+import { RFQ_RECEIVED_STEP_KEY } from "./runs"
+import { loadSources, MAX_EMAIL_BODY_CHARS } from "./sources"
 import { STRUCTURE_RFQ_STEP_KEY } from "./structure-rfq"
+
+/* -------------------------------------------------------------------------- */
+/* RFQ received                                                               */
+/* -------------------------------------------------------------------------- */
+
+export type ReceivedSourceProjection = {
+  id: string
+  kind: string
+  label: string
+  mediaType: string
+  byteSize: number
+  /** The email body exactly as it was received; `null` for binary sources. */
+  text: string | null
+  /** Worker-served original of a binary source; `null` for the email body. */
+  previewUrl: string | null
+}
+
+/**
+ * What the run was given, before anything read it: the email body verbatim and
+ * every attachment as stored. This is the request itself, so it is available
+ * from the moment the run exists, whether or not reading later succeeds.
+ */
+export type ReceivedEvidenceProjection = {
+  stepKey: string
+  sources: ReceivedSourceProjection[]
+}
+
+export async function loadReceivedEvidence(
+  env: Env,
+  runId: string,
+  viewId: string
+): Promise<ReceivedEvidenceProjection> {
+  const sources = await loadSources(env, runId)
+
+  return {
+    stepKey: RFQ_RECEIVED_STEP_KEY,
+    sources: await Promise.all(
+      sources.map(async (source) => ({
+        id: source.id,
+        kind: source.kind,
+        label: source.label,
+        mediaType: source.mediaType,
+        byteSize: source.byteSize,
+        text:
+          source.mediaType === "text/plain"
+            ? await readStoredText(env, source.storageKey)
+            : null,
+        previewUrl:
+          source.mediaType === "text/plain"
+            ? null
+            : `/api/runs/${encodeURIComponent(viewId)}/sources/${source.id}`,
+      }))
+    ),
+  }
+}
+
+/** The stored email body, bounded by the same limit its upload was. */
+async function readStoredText(env: Env, storageKey: string): Promise<string> {
+  const object = await env.ARTIFACTS.get(storageKey)
+  if (!object) return ""
+
+  return (await object.text()).slice(0, MAX_EMAIL_BODY_CHARS)
+}
+
+/* -------------------------------------------------------------------------- */
+/* Read documents                                                             */
+/* -------------------------------------------------------------------------- */
 
 export type PageProjection = {
   pageNumber: number
@@ -46,8 +114,6 @@ export type SourceProjection = {
   label: string
   mediaType: string
   byteSize: number
-  /** Worker-served preview of the original; absent for text sources. */
-  previewUrl: string | null
   reader: string | null
   latencyMs: number | null
   pagesProcessed: number | null
@@ -94,8 +160,7 @@ type StoredSourceEvidence = {
 
 export async function loadDocumentEvidence(
   env: Env,
-  runId: string,
-  viewId: string
+  runId: string
 ): Promise<DocumentEvidenceProjection> {
   const [sources, pages, evidenceRow] = await Promise.all([
     loadSources(env, runId),
@@ -148,10 +213,6 @@ export async function loadDocumentEvidence(
         label: source.label,
         mediaType: source.mediaType,
         byteSize: source.byteSize,
-        previewUrl:
-          source.mediaType === "text/plain"
-            ? null
-            : `/api/runs/${encodeURIComponent(viewId)}/sources/${source.id}`,
         reader: typeof detail?.reader === "string" ? detail.reader : null,
         latencyMs: readNumber(detail?.latencyMs),
         pagesProcessed: readNumber(detail?.pagesProcessed),

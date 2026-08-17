@@ -91,7 +91,7 @@ export function evaluationSection(summary: ReferenceEvaluationSummary): {
       `Retrieval kept the correct article in the shortlist for ${totals.shortlistHits}/${totals.lines} lines; reranking kept it in the top three for ${totals.topThreeHits}/${totals.lines}.`,
       selectionRow(totals),
       reviewRow(totals),
-      `Pricing and simulated export completed for ${totals.priced}/${totals.scenarios} and ${totals.delivered}/${totals.scenarios} workflows, each released by an owner decision where the run stopped.`,
+      `Pricing and simulated export completed for ${totals.priced}/${totals.scenarios} and ${totals.delivered}/${totals.scenarios} workflows, delivery following pricing automatically once any review was decided.`,
       ...summary.scenarios.map(
         (scenario) =>
           `${SCENARIO_NAMES[scenario.scenarioId] ?? scenario.scenarioId}: ${scenario.selectionCorrect}/${scenario.lines} lines correct, ${scenario.reviewLinesObserved} paused for confirmation.`

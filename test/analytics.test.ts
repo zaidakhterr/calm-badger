@@ -289,23 +289,10 @@ describe("what the funnel records", () => {
     )
 
     expect(approved.status).toBe(200)
-    expect(await waitForState(run.viewId, "estimate_built", "failed")).toBe(
-      "estimate_built"
+    // Delivery follows pricing on its own once the review is decided.
+    expect(await waitForState(run.viewId, "delivered", "failed")).toBe(
+      "delivered"
     )
-
-    const delivered = await exports.default.fetch(
-      `${base}/api/runs/${run.viewId}/deliver`,
-      {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${ownerCapability}`,
-        },
-        body: JSON.stringify({ adapter: "corebridge-sandbox" }),
-      }
-    )
-
-    expect(delivered.status).toBe(200)
 
     const runId = (
       await env.DB.prepare(`SELECT id FROM runs WHERE view_id = ?`)

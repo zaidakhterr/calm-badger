@@ -1,8 +1,6 @@
-import { DEFAULT_ADAPTER } from "./adapters"
 import { capturePageview, captureFunnelEvent, logRoute } from "./analytics"
 import { loadQuote } from "./build-estimate"
 import { isCatalogueSection, loadCatalogueProjection } from "./catalogue"
-import { deliverRun, previewDelivery } from "./deliver"
 import {
   loadCandidateEvidence,
   loadCustomerEvidence,
@@ -10,6 +8,7 @@ import {
   loadDocumentEvidence,
   loadEstimateEvidence,
   loadMatchEvidence,
+  loadReceivedEvidence,
   loadStructureEvidence,
 } from "./evidence"
 import {
@@ -222,13 +221,12 @@ async function routeRequest(
   }
 
   const runMatch =
-    /^\/api\/runs\/([A-Za-z0-9_-]+)(?:\/(reset|deliver|documents|structure|customer|candidates|matches|estimate|delivery|quote|review)|\/delivery\/(preview)|\/review\/(decisions|catalog|customers)|\/sources\/([A-Za-z0-9-]+))?$/.exec(
+    /^\/api\/runs\/([A-Za-z0-9_-]+)(?:\/(reset|received|documents|structure|customer|candidates|matches|estimate|delivery|quote|review)|\/review\/(decisions|catalog|customers)|\/sources\/([A-Za-z0-9-]+))?$/.exec(
       url.pathname
     )
 
   if (runMatch) {
-    const [, viewId, segment, deliveryPreview, reviewSegment, sourceId] =
-      runMatch
+    const [, viewId, segment, reviewSegment, sourceId] = runMatch
 
     if (reviewSegment === "decisions") {
       if (request.method !== "POST") {
@@ -258,22 +256,8 @@ async function routeRequest(
       return resetRunResponse(request, env, viewId)
     }
 
-    if (segment === "deliver") {
-      if (request.method !== "POST") {
-        return methodNotAllowed("POST")
-      }
-
-      return deliverRunResponse(request, env, ctx, viewId)
-    }
-
     if (request.method !== "GET") {
       return methodNotAllowed("GET")
-    }
-
-    // Inspecting an adapter payload before delivery is an owner action, like
-    // delivery itself. What was actually delivered becomes shared evidence.
-    if (deliveryPreview) {
-      return deliveryPreviewResponse(request, env, viewId)
     }
 
     if (segment === "quote") {
@@ -285,6 +269,7 @@ async function routeRequest(
     }
 
     if (
+      segment === "received" ||
       segment === "documents" ||
       segment === "structure" ||
       segment === "customer" ||
@@ -682,6 +667,7 @@ async function stepEvidenceResponse(
   env: Env,
   viewId: string,
   segment:
+    | "received"
     | "documents"
     | "structure"
     | "customer"
@@ -700,19 +686,21 @@ async function stepEvidenceResponse(
   }
 
   const evidence =
-    segment === "documents"
-      ? await loadDocumentEvidence(env, runId, viewId)
-      : segment === "structure"
-        ? await loadStructureEvidence(env, runId)
-        : segment === "customer"
-          ? await loadCustomerEvidence(env, runId)
-          : segment === "candidates"
-            ? await loadCandidateEvidence(env, runId)
-            : segment === "matches"
-              ? await loadMatchEvidence(env, runId)
-              : segment === "estimate"
-                ? await loadEstimateEvidence(env, runId)
-                : await loadDeliveryEvidence(env, runId)
+    segment === "received"
+      ? await loadReceivedEvidence(env, runId, viewId)
+      : segment === "documents"
+        ? await loadDocumentEvidence(env, runId)
+        : segment === "structure"
+          ? await loadStructureEvidence(env, runId)
+          : segment === "customer"
+            ? await loadCustomerEvidence(env, runId)
+            : segment === "candidates"
+              ? await loadCandidateEvidence(env, runId)
+              : segment === "matches"
+                ? await loadMatchEvidence(env, runId)
+                : segment === "estimate"
+                  ? await loadEstimateEvidence(env, runId)
+                  : await loadDeliveryEvidence(env, runId)
 
   return Response.json({ evidence }, { headers: jsonHeaders })
 }
@@ -742,79 +730,6 @@ async function quoteDownloadResponse(
       "content-disposition": `attachment; filename="${quote.quoteNumber}.json"`,
     },
   })
-}
-
-async function deliveryPreviewResponse(
-  request: Request,
-  env: Env,
-  viewId: string
-): Promise<Response> {
-  const authorization = await authorizeOwner(
-    env,
-    viewId,
-    request.headers.get("authorization")
-  )
-
-  if (!authorization.ok) return ownerRejection(authorization.reason)
-
-  const preview = await previewDelivery(env, authorization.runId)
-
-  if (!preview) {
-    return Response.json(
-      { error: "This run has no canonical quote yet" },
-      { status: 409, headers: jsonHeaders }
-    )
-  }
-
-  return Response.json(preview, { headers: jsonHeaders })
-}
-
-/**
- * Delivery is owner-only and deliberate: the capability is checked, the run
- * must already be priced, and a second attempt returns what was delivered
- * rather than delivering twice.
- */
-async function deliverRunResponse(
-  request: Request,
-  env: Env,
-  ctx: ExecutionContext,
-  viewId: string
-): Promise<Response> {
-  const authorization = await authorizeOwner(
-    env,
-    viewId,
-    request.headers.get("authorization")
-  )
-
-  if (!authorization.ok) return ownerRejection(authorization.reason)
-
-  const outcome = await deliverRun(env, authorization.runId)
-
-  if (outcome.state === "not_priced") {
-    return Response.json(
-      { error: "This run has no canonical quote to deliver yet" },
-      { status: 409, headers: jsonHeaders }
-    )
-  }
-
-  if (outcome.state === "already_delivered") {
-    return Response.json(
-      { status: "already_delivered", delivery: outcome.delivery },
-      { status: 409, headers: jsonHeaders }
-    )
-  }
-
-  // The end of the funnel: the fixed destination, and nothing about what was sent.
-  captureFunnelEvent(env, ctx, {
-    event: "rfq_quote_delivered",
-    distinctId: authorization.runId,
-    properties: { adapter: DEFAULT_ADAPTER },
-  })
-
-  return Response.json(
-    { status: "delivered", delivery: outcome.delivery },
-    { headers: jsonHeaders }
-  )
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1024,9 +939,8 @@ async function releaseWorkflow(env: Env, runId: string): Promise<void> {
 }
 
 /**
- * Searching beyond the shortlist. Both searches are owner actions, like the
- * adapter preview: they exist to make a correction possible, and a shared
- * viewer has no correction to make.
+ * Searching beyond the shortlist. Both searches are owner actions: they exist
+ * to make a correction possible, and a shared viewer has no correction to make.
  */
 async function reviewSearchResponse(
   request: Request,

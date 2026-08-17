@@ -8,14 +8,14 @@
  * Runs are seeded straight into D1 rather than through `POST /api/runs`, which
  * starts the real workflow and would rewrite the same step rows underneath
  * these assertions. The seed mirrors `createRun`'s inserts: an active run in
- * `pending`, nine steps at positions 0–8, `rfq-received` already complete.
+ * `pending`, eight steps at positions 0–7, `rfq-received` already complete.
  */
 
 import { env } from "cloudflare:workers"
 import { describe, expect, it } from "vitest"
 
 import { BUILD_ESTIMATE_STEP_KEY } from "../worker/build-estimate"
-import { DELIVER_STEP_KEY, DELIVERED_STEP_KEY } from "../worker/deliver"
+import { DELIVER_STEP_KEY } from "../worker/deliver"
 import { MATCH_PRODUCTS_STEP_KEY } from "../worker/match-products"
 import { READ_DOCUMENTS_STEP_KEY } from "../worker/read-documents"
 import { RESOLVE_CUSTOMER_STEP_KEY } from "../worker/resolve-customer"
@@ -69,11 +69,6 @@ const SEEDED_STEPS: { key: RunStepKey; title: string; waiting: string }[] = [
     key: "deliver",
     title: "Deliver",
     waiting: "Waiting for the canonical quote.",
-  },
-  {
-    key: "delivered",
-    title: "Delivered",
-    waiting: "The simulated estimate ends here.",
   },
 ]
 
@@ -192,7 +187,6 @@ describe("the step keys the recorder writes", () => {
       REVIEW_STEP_KEY,
       BUILD_ESTIMATE_STEP_KEY,
       DELIVER_STEP_KEY,
-      DELIVERED_STEP_KEY,
     ]
 
     expect(published).toEqual([
@@ -205,7 +199,6 @@ describe("the step keys the recorder writes", () => {
       "review-required",
       "build-estimate",
       "deliver",
-      "delivered",
     ])
   })
 })
@@ -261,7 +254,6 @@ describe("beginning a step", () => {
       "review-required",
       "build-estimate",
       "deliver",
-      "delivered",
     ] as RunStepKey[]) {
       await expect(
         createRunStepRecorder(env, runId, stepKey).begin("Working…")
@@ -329,7 +321,7 @@ describe("completing a step", () => {
       stepStatus: "complete",
     },
     {
-      stepKey: "delivered",
+      stepKey: "deliver",
       workflowState: "delivered",
       runStatus: "complete",
       stepStatus: "complete",
@@ -383,7 +375,7 @@ describe("completing a step", () => {
     expect((await readRun(runId)).workflow_state).toBe("accepted")
   })
 
-  it("leaves the run's state to `delivered` when `deliver` completes", async () => {
+  it("finishes the run when `deliver` completes", async () => {
     const runId = await seedRun()
 
     await env.DB.prepare(
@@ -393,16 +385,17 @@ describe("completing a step", () => {
       .run()
 
     await createRunStepRecorder(env, runId, "deliver").complete(
-      "Canonical quote transformed for simulated webhook delivery."
+      "Simulated external estimate ERP-SIM-1 accepted."
     )
 
+    // Delivery has no `begin`, so completion is where `started_at` appears.
     const step = await readStep(runId, "deliver")
     expect(step.status).toBe("complete")
     expect(step.started_at).toBe(step.completed_at)
 
     const run = await readRun(runId)
-    expect(run.status).toBe("active")
-    expect(run.workflow_state).toBe("estimate_built")
+    expect(run.status).toBe("complete")
+    expect(run.workflow_state).toBe("delivered")
   })
 
   it("ends the run on an approved, rejected, or expired review", async () => {
@@ -465,12 +458,12 @@ describe("handing the completion statements to a caller's own batch", () => {
     const runId = await seedRun()
 
     await env.DB.batch(
-      createRunStepRecorder(env, runId, "delivered").completeStatements(
+      createRunStepRecorder(env, runId, "deliver").completeStatements(
         "Simulated external estimate ERP-SIM-1 accepted."
       )
     )
 
-    const step = await readStep(runId, "delivered")
+    const step = await readStep(runId, "deliver")
     expect(step.status).toBe("complete")
     expect(step.summary).toBe("Simulated external estimate ERP-SIM-1 accepted.")
     expect(step.completed_at).not.toBeNull()
@@ -483,38 +476,28 @@ describe("handing the completion statements to a caller's own batch", () => {
   it("pins every timestamp to the moment the caller supplies", async () => {
     const runId = await seedRun()
 
-    await env.DB.batch([
-      ...createRunStepRecorder(env, runId, "deliver").completeStatements(
-        "Canonical quote transformed for simulated webhook delivery.",
-        { at: DELIVERED_AT }
-      ),
-      ...createRunStepRecorder(env, runId, "delivered").completeStatements(
+    await env.DB.batch(
+      createRunStepRecorder(env, runId, "deliver").completeStatements(
         "Simulated external estimate ERP-SIM-1 accepted.",
         { at: DELIVERED_AT }
-      ),
-    ])
+      )
+    )
 
-    // One moment across both steps and the run, which is what lets delivery
-    // tie its graph to the stored `delivered_at`.
-    for (const stepKey of ["deliver", "delivered"] as RunStepKey[]) {
-      const step = await readStep(runId, stepKey)
-      expect(step.started_at).toBe(DELIVERED_AT)
-      expect(step.completed_at).toBe(DELIVERED_AT)
-      expect(step.updated_at).toBe(DELIVERED_AT)
-    }
+    // One moment across the step and the run, which is what lets delivery tie
+    // its graph to the stored `delivered_at`.
+    const step = await readStep(runId, "deliver")
+    expect(step.started_at).toBe(DELIVERED_AT)
+    expect(step.completed_at).toBe(DELIVERED_AT)
+    expect(step.updated_at).toBe(DELIVERED_AT)
 
     expect((await readRun(runId)).updated_at).toBe(DELIVERED_AT)
   })
 
-  it("emits no run statement where the row writes nothing to the run", async () => {
+  it("always emits the step statement and the run statement", async () => {
     const runId = await seedRun()
-    const recorder = createRunStepRecorder(env, runId, "deliver")
 
-    // `deliver` is the one row whose state belongs to a sibling step, so it is
-    // a single statement; `delivered` carries the step and the run.
-    expect(recorder.completeStatements("Transformed.")).toHaveLength(1)
     expect(
-      createRunStepRecorder(env, runId, "delivered").completeStatements(
+      createRunStepRecorder(env, runId, "deliver").completeStatements(
         "Accepted."
       )
     ).toHaveLength(2)
@@ -709,7 +692,6 @@ describe("inserting the conditional review step", () => {
       "review-required",
       "build-estimate",
       "deliver",
-      "delivered",
     ])
 
     const review = await readStep(runId, "review-required")
@@ -745,7 +727,7 @@ describe("inserting the conditional review step", () => {
     })
 
     const steps = await readSteps(runId)
-    expect(steps).toHaveLength(10)
+    expect(steps).toHaveLength(9)
 
     const review = await readStep(runId, "review-required")
     expect(review.summary).toBe("Three matches need a decision.")
@@ -766,41 +748,5 @@ describe("inserting the conditional review step", () => {
         }
       )
     ).rejects.toThrow(/No workflow state is defined/)
-  })
-})
-
-describe("nudging a waiting step's summary", () => {
-  it("tells the next step what it is waiting for", async () => {
-    const runId = await seedRun()
-
-    await createRunStepRecorder(env, runId, "build-estimate").setWaitingSummary(
-      "deliver",
-      "Ready to send through the simulated Generic ERP Webhook."
-    )
-
-    const step = await readStep(runId, "deliver")
-    expect(step.status).toBe("waiting")
-    expect(step.summary).toBe(
-      "Ready to send through the simulated Generic ERP Webhook."
-    )
-    expect(step.updated_at).not.toBe(SEEDED_AT)
-
-    // Nudging a summary is not a transition: the run is untouched.
-    const run = await readRun(runId)
-    expect(run.workflow_state).toBe("pending")
-    expect(run.updated_at).toBe(SEEDED_AT)
-  })
-
-  it("leaves a step that is no longer waiting alone", async () => {
-    const runId = await seedRun()
-
-    await createRunStepRecorder(env, runId, "build-estimate").setWaitingSummary(
-      "rfq-received",
-      "Overwritten."
-    )
-
-    expect((await readStep(runId, "rfq-received")).summary).toBe(
-      RECEIPT_SUMMARY
-    )
   })
 })

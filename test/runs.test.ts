@@ -120,7 +120,6 @@ describe("revisiting a persisted run", () => {
       "Match products",
       "Build estimate",
       "Deliver",
-      "Delivered",
     ])
 
     const [received, documents, ...later] = run.steps

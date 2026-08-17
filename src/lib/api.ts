@@ -82,13 +82,30 @@ export type SourcePage = {
   regions: { id: string; box: [number, number, number, number] }[]
 }
 
-export type EvidenceSource = {
+export type SourceKind = "email_body" | "inline_image" | "attachment"
+
+/** One source exactly as it was received: the email text, or the stored file. */
+export type ReceivedSource = {
   id: string
-  kind: "email_body" | "inline_image" | "attachment"
+  kind: SourceKind
   label: string
   mediaType: string
   byteSize: number
+  text: string | null
   previewUrl: string | null
+}
+
+export type ReceivedEvidence = {
+  stepKey: string
+  sources: ReceivedSource[]
+}
+
+export type EvidenceSource = {
+  id: string
+  kind: SourceKind
+  label: string
+  mediaType: string
+  byteSize: number
   reader: string | null
   latencyMs: number | null
   pagesProcessed: number | null
@@ -752,6 +769,12 @@ async function fetchEvidence<T>(viewId: string, segment: string): Promise<T> {
   return body.evidence
 }
 
+export function fetchReceivedEvidence(
+  viewId: string
+): Promise<ReceivedEvidence> {
+  return fetchEvidence<ReceivedEvidence>(viewId, "received")
+}
+
 export function fetchDocumentEvidence(
   viewId: string
 ): Promise<DocumentEvidence> {
@@ -897,44 +920,6 @@ export async function searchCustomers(
 /** The canonical quote download. Any holder of the run URL may read it. */
 export function quoteDownloadUrl(viewId: string): string {
   return `/api/runs/${encodeURIComponent(viewId)}/quote`
-}
-
-/** Owner-only: what the fixed webhook would send, before anything is sent. */
-export async function fetchAdapterPreview(
-  viewId: string
-): Promise<{ payload: unknown; adapter: DeliveryAdapter }> {
-  const capability = readOwnerCapability(viewId)
-  if (!capability) throw new Error("This browser does not own this run")
-
-  const response = await fetch(
-    `/api/runs/${encodeURIComponent(viewId)}/delivery/preview`,
-    { headers: { authorization: `Bearer ${capability}` } }
-  )
-
-  if (!response.ok) throw new Error(await readError(response))
-
-  return (await response.json()) as {
-    payload: unknown
-    adapter: DeliveryAdapter
-  }
-}
-
-/** Owner-only: runs the simulated delivery. Nothing leaves the application. */
-export async function deliverQuote(viewId: string): Promise<void> {
-  const capability = readOwnerCapability(viewId)
-  if (!capability) throw new Error("This browser does not own this run")
-
-  const response = await fetch(
-    `/api/runs/${encodeURIComponent(viewId)}/deliver`,
-    {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${capability}`,
-      },
-    }
-  )
-
-  if (!response.ok) throw new Error(await readError(response))
 }
 
 /** Reads server state. The owner capability is sent only when this browser holds it. */

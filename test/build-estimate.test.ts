@@ -8,7 +8,8 @@
  * payload each receiving system would see, without knowing anything about the
  * mapping helpers behind them. Everything else drives the public workflow
  * boundary — create a run, wait for the persisted steps, read the evidence,
- * download the quote, deliver it — with the deterministic contract fakes.
+ * download the quote, read what was delivered — with the deterministic
+ * contract fakes.
  *
  * No test reaches a live provider, and no adapter opens a socket: delivery is
  * simulated locally by design.
@@ -169,16 +170,38 @@ async function runIdOf(viewId: string): Promise<string> {
   return row!.id
 }
 
-/** A priced run of the request that needs no human judgement. */
-async function pricedRun() {
+/**
+ * The request that needs no human judgement, run to its end. Delivery follows
+ * pricing on its own, so a settled run is a priced and delivered one.
+ */
+async function deliveredRun() {
   const created = await createCuratedRun("routine-replenishment")
-  const step = await waitForStep(created.run.viewId, "build-estimate", [
+  const step = await waitForStep(created.run.viewId, "deliver", [
     "complete",
     "error",
   ])
 
   expect(step.status).toBe("complete")
   return created
+}
+
+/**
+ * Puts a delivered run back to the moment before delivery, so `deliverRun`
+ * can be driven directly against the state the workflow hands it.
+ */
+async function rewindToPriced(runId: string): Promise<void> {
+  await env.DB.batch([
+    env.DB.prepare(`DELETE FROM run_deliveries WHERE run_id = ?`).bind(runId),
+    env.DB.prepare(
+      `UPDATE run_steps SET status = 'waiting', started_at = NULL,
+              completed_at = NULL
+        WHERE run_id = ? AND step_key = 'deliver'`
+    ).bind(runId),
+    env.DB.prepare(
+      `UPDATE runs SET status = 'active', workflow_state = 'estimate_built'
+        WHERE id = ?`
+    ).bind(runId),
+  ])
 }
 
 /* -------------------------------------------------------------------------- */
@@ -595,7 +618,7 @@ describe("adapter payloads", () => {
 
 describe("pricing a run that needs no review", () => {
   it("prices every accepted line and explains each applied rule", async () => {
-    const { run } = await pricedRun()
+    const { run } = await deliveredRun()
     const evidence = await readEstimate(run.viewId)
     const quote = evidence.quote!
 
@@ -655,7 +678,7 @@ describe("pricing a run that needs no review", () => {
       .bind(supersededCents)
       .run()
 
-    const { run } = await pricedRun()
+    const { run } = await deliveredRun()
     const quote = (await readEstimate(run.viewId)).quote!
     const filter = quote.lines.find((line) => line.sku === "NX-FLT-1120")!
 
@@ -676,7 +699,7 @@ describe("pricing a run that needs no review", () => {
   })
 
   it("persists the estimate as a graph state with stored amounts", async () => {
-    const { run } = await pricedRun()
+    const { run } = await deliveredRun()
     const settled = await readRun(run.viewId)
     const step = settled.steps.find((entry) => entry.key === "build-estimate")!
 
@@ -685,7 +708,7 @@ describe("pricing a run that needs no review", () => {
     expect(step.summary).toContain("including VAT")
     expect(step.startedAt).not.toBeNull()
     expect(step.completedAt).not.toBeNull()
-    expect(settled.workflowState).toBe("estimate_built")
+    expect(settled.workflowState).toBe("delivered")
 
     const stored = await env.DB.prepare(
       `SELECT quote_number, currency, line_count, subtotal_cents, vat_rate_bp,
@@ -750,7 +773,7 @@ describe("pricing a run that needs no review", () => {
 
 describe("downloading the canonical quote", () => {
   it("serves the quote as a JSON file to any holder of the run URL", async () => {
-    const { run } = await pricedRun()
+    const { run } = await deliveredRun()
     const response = await exports.default.fetch(
       `${base}/api/runs/${run.viewId}/quote`,
       { headers: { authorization: "Bearer not-the-owner" } }
@@ -772,7 +795,7 @@ describe("downloading the canonical quote", () => {
   })
 
   it("carries no capability, storage key, prompt, or provider detail", async () => {
-    const { run, ownerCapability } = await pricedRun()
+    const { run, ownerCapability } = await deliveredRun()
     const response = await exports.default.fetch(
       `${base}/api/runs/${run.viewId}/quote`
     )
@@ -799,14 +822,13 @@ describe("downloading the canonical quote", () => {
   })
 })
 
-describe("inspecting the fixed delivery webhook", () => {
+describe("the fixed delivery webhook", () => {
   it("offers only the Generic ERP Webhook", async () => {
-    const { run } = await pricedRun()
+    const { run } = await deliveredRun()
     const evidence = await readDelivery(run.viewId)
 
     expect(evidence.defaultAdapter).toBe("generic-erp-webhook")
     expect(evidence.quoteAvailable).toBe(true)
-    expect(evidence.delivery).toBeNull()
     expect(evidence.adapters.map((adapter) => adapter.id)).toEqual([
       "generic-erp-webhook",
     ])
@@ -818,129 +840,133 @@ describe("inspecting the fixed delivery webhook", () => {
     }
   })
 
-  it("shows the owner the fixed webhook payload before delivery", async () => {
-    const { run, ownerCapability } = await pricedRun()
+  it("no longer offers a delivery action or a payload preview", async () => {
+    const { run, ownerCapability } = await deliveredRun()
 
-    const response = await exports.default.fetch(
+    const deliver = await exports.default.fetch(
+      `${base}/api/runs/${run.viewId}/deliver`,
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${ownerCapability}` },
+      }
+    )
+    const preview = await exports.default.fetch(
       `${base}/api/runs/${run.viewId}/delivery/preview`,
       { headers: { authorization: `Bearer ${ownerCapability}` } }
     )
 
-    expect(response.status).toBe(200)
-    const preview = await response.json<{
-      payload: unknown
-      adapter: { id: string; simulated: boolean }
-    }>()
-
-    expect(preview.adapter.id).toBe("generic-erp-webhook")
-    expect(preview.payload).not.toBeNull()
-
-    // Inspecting delivered nothing: the graph is untouched.
-    const after = await readRun(run.viewId)
-    expect(after.workflowState).toBe("estimate_built")
-    expect(after.steps.find((step) => step.key === "delivered")!.status).toBe(
-      "waiting"
-    )
-  })
-
-  it("withholds the payload preview from a shared viewer", async () => {
-    const { run } = await pricedRun()
-
-    const anonymous = await exports.default.fetch(
-      `${base}/api/runs/${run.viewId}/delivery/preview`
-    )
-    const wrong = await exports.default.fetch(
-      `${base}/api/runs/${run.viewId}/delivery/preview`,
-      { headers: { authorization: "Bearer not-the-owner" } }
-    )
-
-    expect(anonymous.status).toBe(401)
-    expect(wrong.status).toBe(403)
-  })
-
-  it("does not let a query parameter change the fixed destination", async () => {
-    const { run, ownerCapability } = await pricedRun()
-    const response = await exports.default.fetch(
-      `${base}/api/runs/${run.viewId}/delivery/preview?adapter=sap`,
-      { headers: { authorization: `Bearer ${ownerCapability}` } }
-    )
-
-    expect(response.status).toBe(200)
-    const preview = await response.json<{
-      adapter: { id: string }
-    }>()
-    expect(preview.adapter.id).toBe("generic-erp-webhook")
+    expect(deliver.status).toBe(404)
+    expect(preview.status).toBe(404)
   })
 })
 
-describe("delivering the quote", () => {
-  async function deliver(
-    viewId: string,
-    adapter: string,
-    capability: string | null
-  ) {
-    return exports.default.fetch(`${base}/api/runs/${viewId}/deliver`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ...(capability ? { authorization: `Bearer ${capability}` } : {}),
-      },
-      body: JSON.stringify({ adapter }),
-    })
-  }
-
-  it("returns a synthetic identifier and ends the graph at Delivered", async () => {
-    const { run, ownerCapability } = await pricedRun()
-    const response = await deliver(
-      run.viewId,
-      "generic-erp-webhook",
-      ownerCapability
-    )
-
-    expect(response.status).toBe(200)
-
-    const body = await response.json<{
-      status: string
-      delivery: {
-        adapter: { id: string; name: string; simulated: boolean }
-        payload: unknown
-        receipt: {
-          externalEstimateId: string
-          status: string
-          simulated: boolean
-          notice: string
-        }
-      }
-    }>()
-
-    expect(body.status).toBe("delivered")
-    expect(body.delivery.adapter.name).toBe("Generic ERP Webhook")
-    expect(body.delivery.receipt.simulated).toBe(true)
-    expect(body.delivery.receipt.status).toBe("accepted")
-    expect(body.delivery.receipt.externalEstimateId).toMatch(/^ERP-SIM-/)
-    expect(body.delivery.receipt.notice).toContain("Simulated locally")
-
+describe("delivering the quote automatically", () => {
+  it("delivers as soon as the run is priced and ends the graph at Deliver", async () => {
+    const { run } = await deliveredRun()
     const settled = await readRun(run.viewId)
-    const deliverStep = settled.steps.find((step) => step.key === "deliver")!
-    const deliveredStep = settled.steps.find(
-      (step) => step.key === "delivered"
-    )!
+    const evidence = await readDelivery(run.viewId)
 
-    expect(deliverStep.status).toBe("complete")
-    expect(deliverStep.summary).toContain("simulated")
-    expect(deliveredStep.status).toBe("complete")
-    expect(deliveredStep.summary).toContain(
-      body.delivery.receipt.externalEstimateId
+    expect(evidence.delivery).not.toBeNull()
+    expect(evidence.delivery!.adapter).toBe("generic-erp-webhook")
+    expect(evidence.delivery!.adapterName).toBe("Generic ERP Webhook")
+    expect(evidence.delivery!.simulated).toBe(true)
+    expect(evidence.delivery!.receipt.status).toBe("accepted")
+    expect(evidence.delivery!.externalEstimateId).toMatch(/^ERP-SIM-/)
+    expect(JSON.stringify(evidence.delivery!.payload)).toContain(
+      "quote.created"
     )
-    expect(deliveredStep.completedAt).not.toBeNull()
+
+    const deliverStep = settled.steps.find((step) => step.key === "deliver")!
+
+    expect(settled.steps.map((step) => step.key)).not.toContain("delivered")
+    expect(deliverStep.status).toBe("complete")
+    expect(deliverStep.summary).toContain(evidence.delivery!.externalEstimateId)
+    expect(deliverStep.startedAt).not.toBeNull()
+    expect(deliverStep.completedAt).not.toBeNull()
     expect(settled.workflowState).toBe("delivered")
     expect(settled.status).toBe("complete")
     expect(settled.steps.every((step) => step.status !== "active")).toBe(true)
   })
 
-  it("rolls back the delivery row when graph completion fails", async () => {
-    const { run, ownerCapability } = await pricedRun()
+  it("keeps the delivery timestamps tied to the stored row", async () => {
+    const { run } = await deliveredRun()
     const runId = await runIdOf(run.viewId)
+
+    const times = await env.DB.prepare(
+      `SELECT delivery.delivered_at AS delivered_at,
+              deliver_step.started_at AS deliver_started_at,
+              deliver_step.completed_at AS deliver_completed_at,
+              run.updated_at AS run_updated_at
+         FROM run_deliveries delivery
+         JOIN runs run ON run.id = delivery.run_id
+         JOIN run_steps deliver_step
+           ON deliver_step.run_id = delivery.run_id
+          AND deliver_step.step_key = 'deliver'
+        WHERE delivery.run_id = ?`
+    )
+      .bind(runId)
+      .first<{
+        delivered_at: string
+        deliver_started_at: string
+        deliver_completed_at: string
+        run_updated_at: string
+      }>()
+
+    expect(times).toMatchObject({
+      deliver_started_at: times!.delivered_at,
+      deliver_completed_at: times!.delivered_at,
+      run_updated_at: times!.delivered_at,
+    })
+  })
+
+  it("does not deliver the same run twice when the step is replayed", async () => {
+    const { run } = await deliveredRun()
+    const runId = await runIdOf(run.viewId)
+    const before = await readDelivery(run.viewId)
+
+    // A replayed durable step finds the stored delivery and leaves it alone.
+    const outcome = await deliverRun(env, runId)
+
+    expect(outcome.state).toBe("already_delivered")
+
+    const rows = await env.DB.prepare(
+      `SELECT COUNT(*) AS total FROM run_deliveries WHERE run_id = ?`
+    )
+      .bind(runId)
+      .first<{ total: number }>()
+
+    expect(rows!.total).toBe(1)
+    expect((await readDelivery(run.viewId)).delivery).toEqual(before.delivery)
+    expect((await readRun(run.viewId)).workflowState).toBe("delivered")
+  })
+
+  it("does not deliver a run that was never priced", async () => {
+    const unpriced = await createCuratedRun("messy-forwarded-request")
+    await waitForWorkflowState(unpriced.run.viewId, [
+      "awaiting_review",
+      "failed",
+    ])
+
+    const runId = await runIdOf(unpriced.run.viewId)
+    const rows = await env.DB.prepare(
+      `SELECT COUNT(*) AS total FROM run_deliveries WHERE run_id = ?`
+    )
+      .bind(runId)
+      .first<{ total: number }>()
+
+    expect(rows!.total).toBe(0)
+    expect((await readDelivery(unpriced.run.viewId)).delivery).toBeNull()
+    expect(
+      (await readRun(unpriced.run.viewId)).steps.find(
+        (step) => step.key === "deliver"
+      )!.status
+    ).toBe("waiting")
+  })
+
+  it("rolls back the delivery row when graph completion fails", async () => {
+    const { run } = await deliveredRun()
+    const runId = await runIdOf(run.viewId)
+    await rewindToPriced(runId)
 
     await env.DB.prepare(
       `CREATE TRIGGER force_delivery_completion_failure
@@ -951,19 +977,18 @@ describe("delivering the quote", () => {
        END`
     ).run()
 
+    let failed: Awaited<ReturnType<typeof deliverRun>>
     try {
-      const failed = await deliver(
-        run.viewId,
-        "corebridge-sandbox",
-        ownerCapability
-      )
-
-      expect(failed.status).toBe(500)
+      failed = await deliverRun(env, runId)
     } finally {
       await env.DB.exec(
         `DROP TRIGGER IF EXISTS force_delivery_completion_failure`
       )
     }
+
+    // The step ends as a terminal error, like every other step's failure, and
+    // the delivery row is not left behind without its graph.
+    expect(failed!.state).toBe("error")
 
     const storedAfterFailure = await env.DB.prepare(
       `SELECT COUNT(*) AS total FROM run_deliveries WHERE run_id = ?`
@@ -972,163 +997,14 @@ describe("delivering the quote", () => {
       .first<{ total: number }>()
 
     expect(storedAfterFailure!.total).toBe(0)
-    expect((await readRun(run.viewId)).workflowState).toBe("estimate_built")
-
-    const retry = await deliver(
-      run.viewId,
-      "corebridge-sandbox",
-      ownerCapability
-    )
-
-    expect(retry.status).toBe(200)
-    expect((await readRun(run.viewId)).workflowState).toBe("delivered")
-  })
-
-  it("shows the delivered payload and identifier to a shared viewer", async () => {
-    const { run, ownerCapability } = await pricedRun()
-    await deliver(run.viewId, "corebridge-sandbox", ownerCapability)
-
-    const evidence = await readDelivery(run.viewId)
-
-    expect(evidence.delivery!.adapter).toBe("generic-erp-webhook")
-    expect(evidence.delivery!.externalEstimateId).toMatch(/^ERP-SIM-/)
-    expect(evidence.delivery!.simulated).toBe(true)
-    expect(JSON.stringify(evidence.delivery!.payload)).toContain(
-      "quote.created"
-    )
-  })
-
-  it("refuses delivery without the owner capability", async () => {
-    const { run } = await pricedRun()
-
-    expect((await deliver(run.viewId, "corebridge-sandbox", null)).status).toBe(
-      401
-    )
-    expect(
-      (await deliver(run.viewId, "corebridge-sandbox", "not-the-owner")).status
-    ).toBe(403)
-
-    const evidence = await readDelivery(run.viewId)
-    expect(evidence.delivery).toBeNull()
-  })
-
-  it("ignores an adapter body and refuses a run that is not priced", async () => {
-    const { run, ownerCapability } = await pricedRun()
-    expect((await deliver(run.viewId, "sap", ownerCapability)).status).toBe(200)
-    expect((await readDelivery(run.viewId)).delivery!.adapter).toBe(
-      "generic-erp-webhook"
-    )
-
-    const unpriced = await createCuratedRun("messy-forwarded-request")
-    await waitForWorkflowState(unpriced.run.viewId, [
-      "awaiting_review",
-      "failed",
-    ])
-
-    const response = await deliver(
-      unpriced.run.viewId,
-      "corebridge-sandbox",
-      unpriced.ownerCapability
-    )
-
-    expect(response.status).toBe(409)
-  })
-
-  it("does not deliver the same run twice", async () => {
-    const { run, ownerCapability } = await pricedRun()
-
-    const first = await deliver(
-      run.viewId,
-      "corebridge-sandbox",
-      ownerCapability
-    )
-    const second = await deliver(
-      run.viewId,
-      "generic-erp-webhook",
-      ownerCapability
-    )
-
-    expect(first.status).toBe(200)
-    expect(second.status).toBe(409)
-
-    const rows = await env.DB.prepare(
-      `SELECT COUNT(*) AS total FROM run_deliveries WHERE run_id = ?`
-    )
-      .bind(await runIdOf(run.viewId))
-      .first<{ total: number }>()
-
-    expect(rows!.total).toBe(1)
-  })
-
-  it("delivers once when the same run is delivered concurrently", async () => {
-    const { run, ownerCapability } = await pricedRun()
-
-    // Both requests read "not delivered yet" before either writes.
-    const [first, second] = await Promise.all([
-      deliver(run.viewId, "corebridge-sandbox", ownerCapability),
-      deliver(run.viewId, "generic-erp-webhook", ownerCapability),
-    ])
-
-    const statuses = [first.status, second.status].sort()
-
-    // One delivered, one was told it was already delivered. Neither failed.
-    expect(statuses).toEqual([200, 409])
-
-    const rows = await env.DB.prepare(
-      `SELECT COUNT(*) AS total FROM run_deliveries WHERE run_id = ?`
-    )
-      .bind(await runIdOf(run.viewId))
-      .first<{ total: number }>()
-
-    expect(rows!.total).toBe(1)
-  })
-
-  it("keeps same-adapter delivery timestamps tied to the winning row", async () => {
-    const { run, ownerCapability } = await pricedRun()
-    const runId = await runIdOf(run.viewId)
-
-    const responses = await Promise.all([
-      deliver(run.viewId, "corebridge-sandbox", ownerCapability),
-      deliver(run.viewId, "corebridge-sandbox", ownerCapability),
-    ])
-
-    expect(responses.map((response) => response.status).sort()).toEqual([
-      200, 409,
-    ])
-
-    const times = await env.DB.prepare(
-      `SELECT delivery.delivered_at AS delivered_at,
-              deliver_step.completed_at AS deliver_completed_at,
-              delivered_step.completed_at AS delivered_completed_at,
-              run.updated_at AS run_updated_at
-         FROM run_deliveries delivery
-         JOIN runs run ON run.id = delivery.run_id
-         JOIN run_steps deliver_step
-           ON deliver_step.run_id = delivery.run_id
-          AND deliver_step.step_key = 'deliver'
-         JOIN run_steps delivered_step
-           ON delivered_step.run_id = delivery.run_id
-          AND delivered_step.step_key = 'delivered'
-        WHERE delivery.run_id = ?`
-    )
-      .bind(runId)
-      .first<{
-        delivered_at: string
-        deliver_completed_at: string
-        delivered_completed_at: string
-        run_updated_at: string
-      }>()
-
-    expect(times).toMatchObject({
-      deliver_completed_at: times!.delivered_at,
-      delivered_completed_at: times!.delivered_at,
-      run_updated_at: times!.delivered_at,
-    })
+    expect((await readRun(run.viewId)).workflowState).toBe("failed")
   })
 
   it("does not persist a delivery after the run disappears", async () => {
-    const { run } = await pricedRun()
+    const { run } = await deliveredRun()
     const runId = await runIdOf(run.viewId)
+    await rewindToPriced(runId)
+
     let intercepted = false
     const database: D1Database = {
       prepare: (query) => env.DB.prepare(query),
@@ -1159,8 +1035,7 @@ describe("delivering the quote", () => {
   })
 
   it("removes the quote and the delivery when the run is reset", async () => {
-    const { run, ownerCapability } = await pricedRun()
-    await deliver(run.viewId, "corebridge-sandbox", ownerCapability)
+    const { run, ownerCapability } = await deliveredRun()
 
     const runId = await runIdOf(run.viewId)
     const reset = await exports.default.fetch(

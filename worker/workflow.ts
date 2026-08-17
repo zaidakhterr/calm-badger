@@ -1,7 +1,10 @@
 import { WorkflowEntrypoint } from "cloudflare:workers"
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers"
 
+import { DEFAULT_ADAPTER } from "./adapters"
+import { captureFunnelEvent } from "./analytics"
 import { buildEstimate } from "./build-estimate"
+import { deliverRun } from "./deliver"
 import { applyReviewProductDecision, matchProducts } from "./match-products"
 import { readDocuments } from "./read-documents"
 import { applyReviewCustomer, resolveCustomer } from "./resolve-customer"
@@ -25,7 +28,7 @@ export type RfqWorkflowParams = {
 export type RfqWorkflowResult = {
   runId: string
   state:
-    | "estimate_built"
+    | "delivered"
     | "matches_need_review"
     | "review_rejected"
     | "review_expired"
@@ -180,12 +183,42 @@ export class RfqWorkflow extends WorkflowEntrypoint<Env, RfqWorkflowParams> {
       return failure(runId, acknowledgedAt, customerResolved)
     }
 
+    if (estimate.state === "blocked") {
+      return {
+        runId,
+        state: "matches_need_review",
+        acknowledgedAt,
+        customerResolved,
+      }
+    }
+
+    // Delivery needs no one's permission: the quote is priced, so it is
+    // transformed by the fixed simulated webhook and the graph closes. The
+    // step is idempotent, so a replay finds the stored delivery and stops.
+    const delivered = await step.do("deliver", async () =>
+      deliverRun(this.env, runId)
+    )
+
+    if (delivered.state === "delivered") {
+      // The end of the funnel: the fixed destination, and nothing about what
+      // was sent. Captured once, on the replay-safe fresh path only.
+      captureFunnelEvent(this.env, this.ctx, {
+        event: "rfq_quote_delivered",
+        distinctId: runId,
+        properties: { adapter: DEFAULT_ADAPTER },
+      })
+    }
+
+    if (
+      delivered.state !== "delivered" &&
+      delivered.state !== "already_delivered"
+    ) {
+      return failure(runId, acknowledgedAt, customerResolved)
+    }
+
     return {
       runId,
-      state:
-        estimate.state === "complete"
-          ? "estimate_built"
-          : "matches_need_review",
+      state: "delivered",
       acknowledgedAt,
       customerResolved,
     }

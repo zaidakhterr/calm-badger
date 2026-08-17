@@ -69,7 +69,6 @@ type Evidence = {
     label: string
     mediaType: string
     byteSize: number
-    previewUrl: string | null
     reader: string | null
     latencyMs: number | null
     pagesProcessed: number | null
@@ -158,6 +157,29 @@ async function waitForStep(
   }
 
   throw new Error(`Step ${stepKey} never reached ${statuses.join(" or ")}`)
+}
+
+type ReceivedEvidence = {
+  stepKey: string
+  sources: {
+    id: string
+    kind: string
+    label: string
+    mediaType: string
+    byteSize: number
+    text: string | null
+    previewUrl: string | null
+  }[]
+}
+
+async function readReceived(viewId: string): Promise<ReceivedEvidence> {
+  const response = await exports.default.fetch(
+    `${base}/api/runs/${viewId}/received`
+  )
+
+  expect(response.status).toBe(200)
+  const body = await response.json<{ evidence: ReceivedEvidence }>()
+  return body.evidence
 }
 
 async function readEvidence(viewId: string): Promise<Evidence> {
@@ -272,12 +294,10 @@ describe("reading the sources of a curated request", () => {
 
     expect(email.kind).toBe("email_body")
     expect(email.reader).toBe("email-body")
-    expect(email.previewUrl).toBeNull()
     expect(email.pages[0].markdown).toContain("Spandau")
 
     expect(image.kind).toBe("inline_image")
     expect(image.reader).toBe("ocr-provider")
-    expect(image.previewUrl).toBe(`/api/runs/${run.viewId}/sources/${image.id}`)
     expect(image.pages[0].regions.length).toBeGreaterThan(0)
     expect(image.pages[0].regions[0].box).toHaveLength(4)
 
@@ -317,12 +337,40 @@ describe("reading the sources of a curated request", () => {
     expect(pdf.estimatedCostUsd).toBeNull()
   })
 
+  it("shows the request exactly as received, from the moment the run exists", async () => {
+    const { run } = await createCuratedRun("routine-replenishment")
+
+    // No waiting: the request itself is evidence before anything reads it.
+    const received = await readReceived(run.viewId)
+    expect(received.stepKey).toBe("rfq-received")
+
+    const [email, image, pdf] = received.sources
+
+    expect(email.kind).toBe("email_body")
+    expect(email.mediaType).toBe("text/plain")
+    expect(email.previewUrl).toBeNull()
+    expect(email.text).toContain("Spandau")
+
+    expect(image.kind).toBe("inline_image")
+    expect(image.text).toBeNull()
+    expect(image.previewUrl).toBe(`/api/runs/${run.viewId}/sources/${image.id}`)
+
+    expect(pdf.kind).toBe("attachment")
+    expect(pdf.mediaType).toBe("application/pdf")
+    expect(pdf.text).toBeNull()
+    expect(pdf.previewUrl).toBe(`/api/runs/${run.viewId}/sources/${pdf.id}`)
+
+    const serialized = JSON.stringify(received)
+    expect(serialized).not.toContain("storageKey")
+    expect(serialized).not.toContain("capability")
+  })
+
   it("serves the original source through the Worker and never exposes secrets", async () => {
     const { run } = await createCuratedRun()
     await waitForStep(run.viewId, "read-documents", ["complete"])
 
     const evidence = await readEvidence(run.viewId)
-    const image = evidence.sources.find(
+    const image = (await readReceived(run.viewId)).sources.find(
       (source) => source.kind === "inline_image"
     )!
 

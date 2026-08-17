@@ -17,14 +17,13 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router"
 
 import { Button, buttonVariants } from "@/components/ui/button"
 import {
-  deliverQuote,
-  fetchAdapterPreview,
   fetchCandidateEvidence,
   fetchCustomerEvidence,
   fetchDeliveryEvidence,
   fetchDocumentEvidence,
   fetchEstimateEvidence,
   fetchMatchEvidence,
+  fetchReceivedEvidence,
   fetchReview,
   fetchRun,
   fetchStructureEvidence,
@@ -49,9 +48,12 @@ import {
   type MatchEvidence,
   type MatchLine,
   type QuoteLine,
+  type ReceivedEvidence,
+  type ReceivedSource,
   type RunStep,
   type RunView,
   RunNotFoundError,
+  type SourceKind,
   type StructureEvidence,
   type ValidatedLine,
   resetRun,
@@ -60,6 +62,7 @@ import { usePublishRunHeader } from "@/lib/run-header"
 import { forgetRun } from "@/lib/run-store"
 import { cn } from "@/lib/utils"
 
+const RFQ_RECEIVED_STEP = "rfq-received"
 const READ_DOCUMENTS_STEP = "read-documents"
 const STRUCTURE_RFQ_STEP = "structure-rfq"
 const RESOLVE_CUSTOMER_STEP = "resolve-customer"
@@ -68,7 +71,6 @@ const MATCH_PRODUCTS_STEP = "match-products"
 const REVIEW_STEP = "review-required"
 const BUILD_ESTIMATE_STEP = "build-estimate"
 const DELIVER_STEP = "deliver"
-const DELIVERED_STEP = "delivered"
 const EVIDENCE_STEPS = [
   READ_DOCUMENTS_STEP,
   STRUCTURE_RFQ_STEP,
@@ -77,6 +79,7 @@ const EVIDENCE_STEPS = [
   MATCH_PRODUCTS_STEP,
   REVIEW_STEP,
   BUILD_ESTIMATE_STEP,
+  DELIVER_STEP,
 ]
 const POLL_INTERVAL_MS = 1000
 const SLOW_POLL_INTERVAL_MS = 5000
@@ -84,6 +87,7 @@ const SLOW_POLL_INTERVAL_MS = 5000
 const SLOW_POLL_AFTER_MS = 90_000
 
 type RunSnapshot = RunView & {
+  received: ReceivedEvidence | null
   documents: DocumentEvidence | null
   structure: StructureEvidence | null
   customer: CustomerEvidence | null
@@ -102,15 +106,12 @@ async function readRunSnapshot(viewId: string): Promise<RunSnapshot> {
       (entry) => entry.key === key && entry.status !== "waiting"
     )
 
-  // The estimate and fixed delivery destination are read once matching has
-  // finished, so the delivery node can open as soon as the quote exists.
-  const priced = started(MATCH_PRODUCTS_STEP)
-
   // The review node only exists when the run needed one; when it does, it is
   // the node the reader is being asked to act on.
   const paused = view.run.steps.some((entry) => entry.key === REVIEW_STEP)
 
   const [
+    received,
     documents,
     structure,
     customer,
@@ -120,18 +121,21 @@ async function readRunSnapshot(viewId: string): Promise<RunSnapshot> {
     estimate,
     delivery,
   ] = await Promise.all([
+    // The request itself exists from the moment the run does.
+    fetchReceivedEvidence(viewId),
     started(READ_DOCUMENTS_STEP) ? fetchDocumentEvidence(viewId) : null,
     started(STRUCTURE_RFQ_STEP) ? fetchStructureEvidence(viewId) : null,
     started(RESOLVE_CUSTOMER_STEP) ? fetchCustomerEvidence(viewId) : null,
     started(RETRIEVE_CANDIDATES_STEP) ? fetchCandidateEvidence(viewId) : null,
     started(MATCH_PRODUCTS_STEP) ? fetchMatchEvidence(viewId) : null,
     paused ? fetchReview(viewId) : null,
-    priced ? fetchEstimateEvidence(viewId) : null,
-    priced ? fetchDeliveryEvidence(viewId) : null,
+    started(BUILD_ESTIMATE_STEP) ? fetchEstimateEvidence(viewId) : null,
+    started(DELIVER_STEP) ? fetchDeliveryEvidence(viewId) : null,
   ])
 
   return {
     ...view,
+    received,
     documents,
     structure,
     customer,
@@ -331,15 +335,13 @@ function RunPage() {
               step={step}
               isLast={index === run.steps.length - 1}
               nextStatus={run.steps[index + 1]?.status ?? null}
-              isOpen={openSteps[step.key] ?? opensItself(step, snapshot)}
+              isOpen={openSteps[step.key] ?? opensItself(step)}
               onToggle={
                 panel
                   ? () =>
                       setOpenSteps((current) => ({
                         ...current,
-                        [step.key]: !(
-                          current[step.key] ?? opensItself(step, snapshot)
-                        ),
+                        [step.key]: !(current[step.key] ?? opensItself(step)),
                       }))
                   : null
               }
@@ -364,21 +366,8 @@ function RunPage() {
  * A node opens by itself when it is where the run currently is: the step doing
  * the work, the step asking for a decision, or the step it stopped at. Anything
  * the reviewer opened by hand is remembered separately and stays open.
- *
- * Deliver is the exception the graph's own status cannot express. It still
- * reads `waiting` while it holds the only action left in the flow, so once the
- * quote exists and nothing has been delivered yet, the node opens itself rather
- * than hiding the delivery action behind "Show evidence".
  */
-function opensItself(step: RunStep, snapshot: RunSnapshot): boolean {
-  if (
-    step.key === DELIVER_STEP &&
-    snapshot.delivery?.quoteAvailable &&
-    !snapshot.delivery.delivery
-  ) {
-    return true
-  }
-
+function opensItself(step: RunStep): boolean {
   return (
     step.status === "active" ||
     step.status === "review_required" ||
@@ -427,28 +416,15 @@ function evidencePanel(
     )
   }
 
-  // Delivery is the one node that offers an action while it is still waiting.
-  // Once delivered, the terminal node owns the historical delivery evidence.
-  if (
-    step.key === DELIVER_STEP &&
-    snapshot.delivery?.quoteAvailable &&
-    !snapshot.delivery.delivery
-  ) {
-    return (
-      <DeliveryPanel
-        evidence={snapshot.delivery}
-        viewId={viewId}
-        canDeliver={snapshot.viewer.canMutate}
-        onDelivered={onChanged}
-      />
-    )
+  if (step.status === "waiting") return null
+
+  if (step.key === RFQ_RECEIVED_STEP && snapshot.received) {
+    return <ReceivedPanel evidence={snapshot.received} />
   }
 
-  if (step.key === DELIVERED_STEP && snapshot.delivery?.delivery) {
+  if (step.key === DELIVER_STEP && snapshot.delivery) {
     return <DeliveredPanel evidence={snapshot.delivery} viewId={viewId} />
   }
-
-  if (step.status === "waiting") return null
 
   if (step.key === BUILD_ESTIMATE_STEP && snapshot.estimate) {
     return (
@@ -584,21 +560,25 @@ function WorkflowStepRow({
               </p>
             </div>
             <div className="mt-0.5 flex shrink-0 items-center gap-2">
-              <span
-                className={cn(
-                  "inline-flex h-5 items-center rounded-md border px-2 text-[11px] font-medium whitespace-nowrap text-muted-foreground",
-                  isComplete &&
-                    "border-workflow-complete/30 bg-workflow-complete-soft text-workflow-complete",
-                  isActive &&
-                    "border-workflow-active/20 bg-workflow-active-soft text-workflow-active",
-                  isReview &&
-                    "border-workflow-review/30 bg-workflow-review-soft text-workflow-review",
-                  isError &&
-                    "border-destructive/30 bg-destructive/10 text-destructive"
-                )}
-              >
-                {statusLabel(step.status)}
-              </span>
+              {/* A completed node is already told by its check mark and its
+                  "Completed at" line, so it carries no badge. */}
+              {isComplete ? (
+                <span className="sr-only">{statusLabel(step.status)}</span>
+              ) : (
+                <span
+                  className={cn(
+                    "inline-flex h-5 items-center rounded-md border px-2 text-[11px] font-medium whitespace-nowrap text-muted-foreground",
+                    isActive &&
+                      "border-workflow-active/20 bg-workflow-active-soft text-workflow-active",
+                    isReview &&
+                      "border-workflow-review/30 bg-workflow-review-soft text-workflow-review",
+                    isError &&
+                      "border-destructive/30 bg-destructive/10 text-destructive"
+                  )}
+                >
+                  {statusLabel(step.status)}
+                </span>
+              )}
               {onToggle ? (
                 <CaretDownIcon
                   className={cn(
@@ -655,7 +635,7 @@ function DocumentEvidencePanel({ evidence }: { evidence: DocumentEvidence }) {
       ) : null}
 
       <div>
-        <h3 className="text-[13px] leading-4 font-medium">Sources</h3>
+        <h3 className="text-[13px] leading-4 font-medium">What was read</h3>
         <ul className="mt-2 space-y-3">
           {evidence.sources.map((source) => (
             <SourceEvidenceCard key={source.id} source={source} />
@@ -1875,55 +1855,19 @@ function reviewKindLabel(kind: string): string {
   }
 }
 
-function DeliveryPanel({
+/**
+ * Deliver. The terminal node: where the quote went, the synthetic identifier
+ * it came back with, and exactly what was sent.
+ */
+function DeliveredPanel({
   evidence,
   viewId,
-  canDeliver,
-  onDelivered,
 }: {
   evidence: DeliveryEvidence
   viewId: string
-  canDeliver: boolean
-  onDelivered: () => void
 }) {
-  const [preview, setPreview] = useState<string | null>(null)
-  const [isWorking, setIsWorking] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-
   const destination = evidence.adapters[0]
   const delivered = evidence.delivery
-
-  async function handlePreview() {
-    setPreview(null)
-    setError(null)
-    setIsWorking(true)
-
-    try {
-      const result = await fetchAdapterPreview(viewId)
-      setPreview(JSON.stringify(result.payload, null, 2))
-    } catch (cause) {
-      setError(
-        cause instanceof Error ? cause.message : "The payload could not be read"
-      )
-    } finally {
-      setIsWorking(false)
-    }
-  }
-
-  async function handleDeliver() {
-    setError(null)
-    setIsWorking(true)
-
-    try {
-      await deliverQuote(viewId)
-      onDelivered()
-    } catch (cause) {
-      setError(
-        cause instanceof Error ? cause.message : "The quote could not be sent"
-      )
-      setIsWorking(false)
-    }
-  }
 
   return (
     <div className="space-y-4">
@@ -1947,110 +1891,54 @@ function DeliveryPanel({
         </p>
       </div>
 
-      {canDeliver && !delivered ? (
-        <div className="flex flex-wrap items-center gap-2">
-          <Button
-            size="lg"
-            variant="outline"
-            type="button"
-            disabled={isWorking}
-            onClick={() => void handlePreview()}
-          >
-            Inspect payload
-          </Button>
-          <Button
-            size="lg"
-            type="button"
-            disabled={isWorking}
-            onClick={() => void handleDeliver()}
-          >
-            {isWorking ? "Working…" : "Send via simulated webhook"}
-          </Button>
-        </div>
+      {delivered ? (
+        <>
+          <div>
+            <h3 className="text-[13px] leading-4 font-medium">
+              Simulated external estimate
+            </h3>
+            <dl className="mt-2 divide-y rounded-md border text-[13px]">
+              <MetaRow
+                label="External estimate ID"
+                value={delivered.externalEstimateId}
+                mono
+              />
+              <MetaRow
+                label="Accepted"
+                value={formatTimestamp(delivered.deliveredAt)}
+              />
+            </dl>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <a
+              className={buttonVariants({ variant: "outline", size: "lg" })}
+              href={quoteDownloadUrl(viewId)}
+              download={`${evidence.quoteNumber ?? "quote"}.json`}
+            >
+              <DownloadSimpleIcon data-icon="inline-start" />
+              Download canonical quote
+            </a>
+          </div>
+
+          <details className="rounded-md border bg-background">
+            <summary className="cursor-pointer px-3 py-2 text-[13px]">
+              Transformed payload · {destination?.payloadFormat}
+            </summary>
+            <CopyableCode
+              value={JSON.stringify(delivered.payload, null, 2)}
+              codeClassName="max-h-72"
+            />
+          </details>
+
+          <details className="rounded-md border bg-background">
+            <summary className="cursor-pointer px-3 py-2 text-[13px]">
+              Adapter receipt
+            </summary>
+            <CopyableCode value={JSON.stringify(delivered.receipt, null, 2)} />
+          </details>
+        </>
       ) : null}
-
-      {!canDeliver ? (
-        <p className="text-[11px] leading-5 text-muted-foreground">
-          Delivery stays with the browser that started this run. A shared viewer
-          sees the webhook contract and, once it happens, the delivered payload.
-        </p>
-      ) : null}
-
-      {error ? <p className="text-sm text-destructive">{error}</p> : null}
-
-      {preview ? (
-        <details className="rounded-md border bg-background" open>
-          <summary className="cursor-pointer px-3 py-2 text-[13px]">
-            {destination?.name} payload · {destination?.payloadFormat} · not
-            sent yet
-          </summary>
-          <CopyableCode value={preview} codeClassName="max-h-72" />
-        </details>
-      ) : null}
-    </div>
-  )
-}
-
-/** Delivered. The terminal node: the synthetic identifier and what was sent. */
-function DeliveredPanel({
-  evidence,
-  viewId,
-}: {
-  evidence: DeliveryEvidence
-  viewId: string
-}) {
-  const delivered = evidence.delivery
-  if (!delivered) return null
-
-  return (
-    <div className="space-y-4">
-      <div>
-        <h3 className="text-[13px] leading-4 font-medium">
-          Simulated external estimate
-        </h3>
-        <dl className="mt-2 divide-y rounded-md border text-[13px]">
-          <MetaRow
-            label="External estimate ID"
-            value={delivered.externalEstimateId}
-            mono
-          />
-          <MetaRow
-            label="Accepted"
-            value={formatTimestamp(delivered.deliveredAt)}
-          />
-        </dl>
-        <p className="mt-1.5 text-[11px] leading-5 text-muted-foreground">
-          {delivered.notice}
-        </p>
-      </div>
-
-      <div className="flex flex-wrap items-center gap-2">
-        <a
-          className={buttonVariants({ variant: "outline", size: "lg" })}
-          href={quoteDownloadUrl(viewId)}
-          download={`${evidence.quoteNumber ?? "quote"}.json`}
-        >
-          <DownloadSimpleIcon data-icon="inline-start" />
-          Download canonical quote
-        </a>
-      </div>
-
-      <details className="rounded-md border bg-background">
-        <summary className="cursor-pointer px-3 py-2 text-[13px]">
-          Transformed payload
-        </summary>
-        <CopyableCode
-          value={JSON.stringify(delivered.payload, null, 2)}
-          codeClassName="max-h-72"
-        />
-      </details>
-
-      <details className="rounded-md border bg-background">
-        <summary className="cursor-pointer px-3 py-2 text-[13px]">
-          Adapter receipt
-        </summary>
-        <CopyableCode value={JSON.stringify(delivered.receipt, null, 2)} />
-      </details>
     </div>
   )
 }
@@ -2160,54 +2048,82 @@ function ConfidenceBlock({ confidence }: { confidence: Confidence }) {
   )
 }
 
+/**
+ * RFQ received. The request exactly as it arrived: the email body verbatim and
+ * every attachment as stored, before anything read or interpreted them.
+ */
+function ReceivedPanel({ evidence }: { evidence: ReceivedEvidence }) {
+  return (
+    <div>
+      <h3 className="text-[13px] leading-4 font-medium">What was received</h3>
+      <ul className="mt-2 space-y-3">
+        {evidence.sources.map((source) => (
+          <ReceivedSourceCard key={source.id} source={source} />
+        ))}
+      </ul>
+    </div>
+  )
+}
+
+function ReceivedSourceCard({ source }: { source: ReceivedSource }) {
+  return (
+    <li className="rounded-md border">
+      <SourceCardHeader
+        kind={source.kind}
+        label={source.label}
+        detail={formatBytes(source.byteSize)}
+      />
+
+      <div className="p-3">
+        {source.text !== null ? (
+          <pre className="max-h-80 overflow-auto rounded-md border bg-muted/30 px-3 py-2 font-sans text-[13px] leading-6 whitespace-pre-wrap">
+            {source.text}
+          </pre>
+        ) : source.mediaType === "application/pdf" && source.previewUrl ? (
+          <a
+            href={source.previewUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex h-8 items-center gap-2 rounded-md border bg-background px-2.5 text-[13px] hover:bg-muted/40"
+          >
+            <FilePdfIcon className="size-4 text-muted-foreground" aria-hidden />
+            Open the original document
+          </a>
+        ) : source.previewUrl ? (
+          <img
+            src={source.previewUrl}
+            alt={`Original source ${source.label}`}
+            loading="lazy"
+            className="w-full max-w-sm rounded-md border bg-background"
+          />
+        ) : null}
+      </div>
+    </li>
+  )
+}
+
+/**
+ * Read documents. One source as the reader saw it: the text it produced for
+ * each page, and the provider's own response underneath.
+ */
 function SourceEvidenceCard({ source }: { source: EvidenceSource }) {
   return (
     <li className="rounded-md border">
-      <div className="flex items-center justify-between gap-3 border-b px-3 py-2">
-        <span className="flex min-w-0 items-center gap-2 text-[13px]">
-          <SourceIcon kind={source.kind} />
-          <span className="truncate font-medium">{source.label}</span>
-          <span className="shrink-0 text-[11px] text-muted-foreground">
-            {sourceKindLabel(source.kind)}
-          </span>
-        </span>
-        <span className="shrink-0 text-[11px] text-muted-foreground">
-          {formatBytes(source.byteSize)}
-          {source.latencyMs !== null && source.reader === "ocr-provider"
-            ? ` · ${source.latencyMs} ms`
-            : ""}
-        </span>
-      </div>
+      <SourceCardHeader
+        kind={source.kind}
+        label={source.label}
+        detail={
+          source.latencyMs !== null && source.reader === "ocr-provider"
+            ? `${source.latencyMs} ms`
+            : "no provider call"
+        }
+      />
 
       <div className="space-y-3 p-3">
-        {source.previewUrl ? (
-          source.mediaType === "application/pdf" ? (
-            <a
-              href={source.previewUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex h-8 items-center gap-2 rounded-md border bg-background px-2.5 text-[13px] hover:bg-muted/40"
-            >
-              <FilePdfIcon
-                className="size-4 text-muted-foreground"
-                aria-hidden
-              />
-              Open the original document
-            </a>
-          ) : (
-            <img
-              src={source.previewUrl}
-              alt={`Original source ${source.label}`}
-              loading="lazy"
-              className="w-full max-w-sm rounded-md border bg-background"
-            />
-          )
-        ) : null}
-
         {source.pages.map((page) => (
           <div key={page.pageNumber}>
             <p className="text-[11px] text-muted-foreground">
-              {sourceKindLabel(source.kind)} · page {page.pageNumber}
+              Parsed text · page {page.pageNumber}
               {page.width && page.height
                 ? ` · ${page.width} × ${page.height}`
                 : ""}
@@ -2230,10 +2146,16 @@ function SourceEvidenceCard({ source }: { source: EvidenceSource }) {
           </div>
         ))}
 
+        {source.pages.length === 0 ? (
+          <p className="text-[11px] text-muted-foreground">
+            No text was read from this source.
+          </p>
+        ) : null}
+
         {source.sanitizedResponse ? (
           <details className="rounded-md border bg-background">
             <summary className="cursor-pointer px-3 py-2 text-[13px]">
-              Sanitized provider response
+              Provider response
             </summary>
             <CopyableCode
               value={JSON.stringify(source.sanitizedResponse, null, 2)}
@@ -2245,7 +2167,32 @@ function SourceEvidenceCard({ source }: { source: EvidenceSource }) {
   )
 }
 
-function SourceIcon({ kind }: { kind: EvidenceSource["kind"] }) {
+function SourceCardHeader({
+  kind,
+  label,
+  detail,
+}: {
+  kind: SourceKind
+  label: string
+  detail: string
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3 border-b px-3 py-2">
+      <span className="flex min-w-0 items-center gap-2 text-[13px]">
+        <SourceIcon kind={kind} />
+        <span className="truncate font-medium">{label}</span>
+        <span className="shrink-0 text-[11px] text-muted-foreground">
+          {sourceKindLabel(kind)}
+        </span>
+      </span>
+      <span className="shrink-0 text-[11px] text-muted-foreground">
+        {detail}
+      </span>
+    </div>
+  )
+}
+
+function SourceIcon({ kind }: { kind: SourceKind }) {
   const className = "size-4 shrink-0 text-muted-foreground"
 
   if (kind === "email_body") {
@@ -2278,7 +2225,7 @@ function MetaRow({
   )
 }
 
-function sourceKindLabel(kind: EvidenceSource["kind"]): string {
+function sourceKindLabel(kind: SourceKind): string {
   switch (kind) {
     case "email_body":
       return "Email body"

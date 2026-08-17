@@ -159,7 +159,7 @@ async function customPausedRun(marker: string) {
     () => readRun(created.run.viewId),
     (value) =>
       value.workflowState === "awaiting_review" ||
-      value.workflowState === "estimate_built" ||
+      value.workflowState === "delivered" ||
       value.workflowState === "failed",
     "a custom run that stopped for review"
   )
@@ -458,12 +458,11 @@ describe("approving a review", () => {
     const settled = await waitFor(
       () => readRun(run.viewId),
       (value) =>
-        value.workflowState === "estimate_built" ||
-        value.workflowState === "failed",
-      "a priced run"
+        value.workflowState === "delivered" || value.workflowState === "failed",
+      "a delivered run"
     )
 
-    expect(settled.workflowState).toBe("estimate_built")
+    expect(settled.workflowState).toBe("delivered")
     expect(
       settled.steps.find((step) => step.key === "review-required")!.status
     ).toBe("complete")
@@ -521,20 +520,12 @@ describe("approving a review", () => {
       }
     }
 
-    // And delivery still works from there, unchanged.
-    const delivered = await exports.default.fetch(
-      `${base}/api/runs/${run.viewId}/deliver`,
-      {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${ownerCapability}`,
-        },
-        body: JSON.stringify({ adapter: "corebridge-sandbox" }),
-      }
+    // And delivery followed from there on its own, unchanged.
+    const delivered = await readRun(run.viewId)
+    expect(delivered.workflowState).toBe("delivered")
+    expect(delivered.steps.find((step) => step.key === "deliver")!.status).toBe(
+      "complete"
     )
-
-    expect(delivered.status).toBe(200)
   })
 
   it("applies every correction through the step that owns it, then completes the node", async () => {
@@ -567,8 +558,8 @@ describe("approving a review", () => {
 
     const settled = await settledRun(
       run.viewId,
-      "estimate_built",
-      "a priced custom run"
+      "delivered",
+      "a delivered custom run"
     )
 
     // The node's completion is the "applied" marker: it is written after every
@@ -579,7 +570,7 @@ describe("approving a review", () => {
     expect(node.summary).toBe(
       `Owner confirmed ${review.items.length} decisions; the run continues to pricing.`
     )
-    expect(settled.workflowState).toBe("estimate_built")
+    expect(settled.workflowState).toBe("delivered")
 
     const applied = await env.DB.prepare(
       `SELECT (SELECT customer_id FROM run_customer_resolution
@@ -725,9 +716,8 @@ describe("approving a review", () => {
     await waitFor(
       () => readRun(run.viewId),
       (value) =>
-        value.workflowState === "estimate_built" ||
-        value.workflowState === "failed",
-      "a priced run"
+        value.workflowState === "delivered" || value.workflowState === "failed",
+      "a delivered run"
     )
 
     const quote = await (
@@ -802,9 +792,8 @@ describe("approving a review", () => {
     await waitFor(
       () => readRun(run.viewId),
       (value) =>
-        value.workflowState === "estimate_built" ||
-        value.workflowState === "failed",
-      "a priced custom run"
+        value.workflowState === "delivered" || value.workflowState === "failed",
+      "a delivered custom run"
     )
 
     const quote = await (
@@ -962,13 +951,13 @@ describe("repeated, premature, and rejected decisions", () => {
     const settled = await waitFor(
       () => readRun(run.viewId),
       (value) =>
-        value.workflowState === "estimate_built" ||
+        value.workflowState === "delivered" ||
         value.workflowState === "review_rejected" ||
         value.workflowState === "failed",
       "a settled run"
     )
 
-    expect(settled.workflowState).toBe("estimate_built")
+    expect(settled.workflowState).toBe("delivered")
     expect((await readReview(run.viewId)).state).toBe("approved")
 
     // One decision, one progression: the run is priced exactly once.
@@ -983,7 +972,7 @@ describe("repeated, premature, and rejected decisions", () => {
     // And a later decision changes nothing.
     const late = await settle(run.viewId, ownerCapability, "reject")
     expect(late.status).toBe(409)
-    expect((await readRun(run.viewId)).workflowState).toBe("estimate_built")
+    expect((await readRun(run.viewId)).workflowState).toBe("delivered")
   })
 
   it("stops the run where it stands when the owner rejects it", async () => {
@@ -1216,7 +1205,7 @@ describe("what an approved correction teaches", () => {
 
     // The corrections, and the wording they teach, land when the workflow
     // applies the outcome — not while the decision's HTTP response is written.
-    await settledRun(run.viewId, "estimate_built", "a priced run")
+    await settledRun(run.viewId, "delivered", "a delivered run")
 
     const learned = await env.DB.prepare(
       `SELECT sku FROM workspace_product_aliases
@@ -1287,7 +1276,7 @@ describe("what an approved correction teaches", () => {
       () => readRun(repeat.run.viewId),
       (value) =>
         value.workflowState === "awaiting_review" ||
-        value.workflowState === "estimate_built" ||
+        value.workflowState === "delivered" ||
         value.workflowState === "failed",
       "a second run from the same workspace"
     )
@@ -1312,7 +1301,7 @@ describe("what an approved correction teaches", () => {
       () => readRun(stranger.run.viewId),
       (value) =>
         value.workflowState === "awaiting_review" ||
-        value.workflowState === "estimate_built" ||
+        value.workflowState === "delivered" ||
         value.workflowState === "failed",
       "a run from a different workspace"
     )
@@ -1387,7 +1376,7 @@ describe("the settled review, read as a value", () => {
       200
     )
 
-    await settledRun(run.viewId, "estimate_built", "a priced custom run")
+    await settledRun(run.viewId, "delivered", "a delivered custom run")
 
     const final = await readReview(run.viewId)
     const aliasExpiresAt = await retentionOf(runId)
@@ -1476,7 +1465,7 @@ describe("the settled review, read as a value", () => {
       200
     )
 
-    await settledRun(run.viewId, "estimate_built", "a priced run")
+    await settledRun(run.viewId, "delivered", "a delivered run")
 
     const outcome = (await loadReviewOutcome(env, runId))!
     const product = outcome.decisions.find(

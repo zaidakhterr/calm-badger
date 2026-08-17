@@ -127,13 +127,15 @@ attached to them carries the machinery.
 
 ## The workflow
 
-Ten stable step titles, in one strictly linear vertical sequence. Status copy
+Nine stable step titles, in one strictly linear vertical sequence. Status copy
 changes; titles do not, so the graph does not jump while work proceeds.
 
 1. **RFQ received** — the run and its first completed step are persisted before
-   anything else happens.
+   anything else happens. The node shows the request exactly as it arrived: the
+   email body verbatim and every attachment as stored.
 2. **Read documents** — attachments are stored in private R2, read back, and
-   sent to OCR. Page markdown and source provenance are persisted.
+   sent to OCR. Page markdown and source provenance are persisted, and the node
+   shows the text each source was read into alongside the provider's response.
 3. **Structure RFQ** — schema-constrained extraction of customer signals,
    delivery location, and requested lines.
 4. **Resolve customer** — identity, domain, alias, contact, location, and
@@ -146,8 +148,9 @@ changes; titles do not, so the graph does not jump while work proceeds.
    blocks every later step until a decision. The decision itself is claimed
    atomically, so exactly one of two racing owners settles the review.
 8. **Build estimate** — deterministic pricing.
-9. **Deliver** — canonical quote transformed by the fixed simulated webhook.
-10. **Delivered** — synthetic external estimate ID.
+9. **Deliver** — as soon as the quote exists, it is transformed by the fixed
+   simulated webhook and a synthetic external estimate ID is recorded. No one
+   presses a button; the graph closes on its own.
 
 Each node exposes, where relevant: its sources, the validated structured
 result, the decision evidence, the sanitized original model output, and
@@ -220,8 +223,9 @@ VAT, add 19% VAT, and report subtotal and total.
 The result is a **canonical quote**: resolved customer and location, source
 references, selected products, quantities, unit prices, tax, totals, and
 adapter-independent metadata. It is downloadable as JSON. The webhook transforms
-that one stable contract; the transformation is shown before delivery so the
-boundary is inspectable. The webhook is simulated, as described above.
+that one stable contract as soon as the quote exists; the transformed payload
+and the adapter's receipt are shown on the delivery node so the boundary is
+inspectable. The webhook is simulated, as described above.
 
 ## Synthetic dataset and curated scenarios
 
@@ -283,9 +287,8 @@ run starts:
 - `GET /api/runs/:viewId` returns an allowlisted read-only projection to any
   holder of the URL. Sending the owner capability as
   `Authorization: Bearer <capability>` additionally marks the viewer as owner.
-- Mutations — `reset`, `review`, `deliver`, and adapter payload preview —
-  require that capability, scoped to that exact run, and validate the run's
-  state before acting. **The public view identifier is never accepted as
+- Mutations — `reset` and `review` — require that capability, scoped to that
+  exact run, and validate the run's state before acting. **The public view identifier is never accepted as
   authorization.**
 
 The originating browser keeps its owner capability and a short recent-run list

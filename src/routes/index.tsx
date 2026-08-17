@@ -9,6 +9,7 @@ import {
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router"
 
 import { Button } from "@/components/ui/button"
+import { InfoTooltip } from "@/components/ui/tooltip"
 import {
   createCustomRun,
   createRun,
@@ -219,6 +220,11 @@ function LandingPage() {
   )
 }
 
+/**
+ * One choice, kept to a name and a difficulty. What the request contains and
+ * what to expect from it sits behind the info trigger, so three cards read at
+ * a glance and the detail is still one hover away.
+ */
 function ScenarioCard({
   scenario,
   isSelected,
@@ -229,41 +235,41 @@ function ScenarioCard({
   onSelect: () => void
 }) {
   return (
-    <button
-      type="button"
-      aria-pressed={isSelected}
-      onClick={onSelect}
-      className={cn(
-        "relative min-h-40 rounded-lg border bg-card p-4 text-left shadow-xs transition-colors outline-none hover:bg-muted/40 focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30",
-        isSelected && "border-foreground bg-muted/30"
-      )}
-    >
-      <span
-        aria-hidden="true"
+    <div className="relative">
+      <button
+        type="button"
+        aria-pressed={isSelected}
+        onClick={onSelect}
         className={cn(
-          "absolute top-4 right-4 size-3 rounded-full border",
-          isSelected && "border-[3px] border-foreground"
+          "flex min-h-24 w-full flex-col justify-between rounded-lg border bg-card p-4 text-left shadow-xs transition-colors outline-none hover:bg-muted/40 focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30",
+          isSelected && "border-foreground bg-muted/30"
         )}
-      />
-      <span className="block pr-5 text-[13px] leading-4 font-medium">
-        {scenario.name}
-      </span>
-      {scenario.featured ? (
-        <span className="mt-2 inline-flex h-5 items-center rounded-md border border-workflow-active/20 bg-workflow-active-soft px-1.5 text-[11px] font-medium text-workflow-active">
-          Featured
+      >
+        <span
+          aria-hidden="true"
+          className={cn(
+            "absolute top-4 right-4 size-3 rounded-full border",
+            isSelected && "border-[3px] border-foreground"
+          )}
+        />
+        <span className="block pr-5 text-[13px] leading-4 font-medium">
+          {scenario.name}
         </span>
-      ) : null}
-      <span className="mt-2 block text-[13px] leading-5 text-muted-foreground">
-        {scenario.difficulty.summary}
-      </span>
-      <span className="mt-4 block text-[11px] text-muted-foreground">
-        {scenario.sources}
-      </span>
-      <span className="mt-1 block text-[11px] text-muted-foreground">
-        Difficulty {scenario.difficulty.level.toLowerCase()} ·{" "}
-        {scenario.difficulty.expectedReview}
-      </span>
-    </button>
+        <span className="mt-3 block pr-7 text-[11px] text-muted-foreground">
+          Difficulty {scenario.difficulty.level.toLowerCase()} ·{" "}
+          {scenario.sources}
+        </span>
+      </button>
+      <InfoTooltip
+        label={`About ${scenario.name}`}
+        className="absolute right-2.5 bottom-2.5"
+      >
+        <p>{scenario.difficulty.summary}</p>
+        <p className="mt-1.5 text-muted-foreground">
+          {scenario.difficulty.expectedReview}
+        </p>
+      </InfoTooltip>
+    </div>
   )
 }
 
@@ -345,6 +351,19 @@ function CustomSourceForm({
             deleted after seven days.
           </p>
         </div>
+
+        <p className="text-[13px] leading-5 text-muted-foreground">
+          Requests are matched against a small synthetic{" "}
+          <Link
+            to="/catalogue/$section"
+            params={{ section: "products" }}
+            className="font-medium text-foreground underline underline-offset-4 hover:no-underline"
+          >
+            product catalogue
+          </Link>
+          . Your items may not match anything in it, and a run built on them may
+          stop for review or fail to price.
+        </p>
 
         <div>
           <label

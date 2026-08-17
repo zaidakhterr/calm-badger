@@ -2,10 +2,9 @@
  * The Run-step recorder.
  *
  * A run step's lifecycle — `begin`, `hold`, `complete`, `fail`, its evidence,
- * the conditional `Review required` insertion, and the nudge that gives a
- * waiting step a better sentence — is written here and nowhere else. Steps hand
- * over the human summary text; the recorder owns status, timestamps, and the
- * run's `workflow_state`.
+ * and the conditional `Review required` insertion — is written here and
+ * nowhere else. Steps hand over the human summary text; the recorder owns
+ * status, timestamps, and the run's `workflow_state`.
  *
  * `workflow_state` is never named by a step. It is derived from
  * `(stepKey, outcome[, variant])` through the table below, which was captured
@@ -37,7 +36,6 @@ export type RunStepKey =
   | "review-required"
   | "build-estimate"
   | "deliver"
-  | "delivered"
 
 /** Which `complete` a step means, when a step has more than one ending. */
 export type CompleteVariant =
@@ -46,7 +44,7 @@ export type CompleteVariant =
 /**
  * `at` pins every timestamp the completion writes, for a caller that already
  * has the moment the work happened and must bind the same one across several
- * statements (delivery ties its two steps and the run to `delivered_at`).
+ * statements (delivery ties its step and the run to `delivered_at`).
  * Omitted, the recorder takes the current time, as every other method does.
  */
 export type CompleteOptions = { variant?: CompleteVariant; at?: string }
@@ -61,8 +59,7 @@ type CompleteRow = {
   startedAt: "untouched" | "coalesce"
   /** `coalesce` keeps a replayed durable step idempotent. */
   completedAt: "set" | "coalesce"
-  /** `null` where the source batch leaves the run's state to a sibling step. */
-  workflowState: string | null
+  workflowState: string
   /** Set only where the source statement also moves `runs.status`. */
   runStatus?: "error" | "complete"
 }
@@ -198,17 +195,9 @@ const COMPLETE_ROWS: Partial<
     },
   },
   deliver: {
-    // Delivery's two steps commit together in the source batch, and the run's
-    // state belongs to `delivered`, not to this row.
-    [DEFAULT_VARIANT]: {
-      stepStatus: "complete",
-      setSummary: true,
-      startedAt: "coalesce",
-      completedAt: "set",
-      workflowState: null,
-    },
-  },
-  delivered: {
+    // The terminal step. Delivery has no `begin`, so its completion is where
+    // `started_at` first appears, and it is the one completion that also
+    // finishes the run.
     [DEFAULT_VARIANT]: {
       stepStatus: "complete",
       setSummary: true,
@@ -257,8 +246,7 @@ export type RunStepRecorder = {
   /**
    * The statements `complete` would issue, unsent. For the one caller that
    * cannot afford a batch of its own: delivery commits its `run_deliveries`
-   * insert and both step completions together or not at all, in a request
-   * handler that is never retried.
+   * insert and the step's completion together or not at all.
    */
   completeStatements(
     summary: string | null,
@@ -274,8 +262,6 @@ export type RunStepRecorder = {
     summary: string
     blocks?: { stepKey: RunStepKey; summary: string }
   }): Promise<void>
-  /** Gives another still-waiting step a summary that says what it waits for. */
-  setWaitingSummary(stepKey: RunStepKey, summary: string): Promise<void>
 }
 
 /**
@@ -287,26 +273,20 @@ export function createRunStepRecorder(
   runId: string,
   stepKey: RunStepKey
 ): RunStepRecorder {
-  /**
-   * `null` where the row writes nothing to the run at all — `deliver` leaves
-   * that to `delivered`, which the source commits in the same batch.
-   */
   const runsUpdate = (
     now: string,
-    workflowState: string | null,
+    workflowState: string,
     runStatus?: "error" | "complete"
-  ): D1PreparedStatement | null => {
-    if (workflowState === null && !runStatus) return null
-
+  ): D1PreparedStatement => {
     const assignments = [
       runStatus ? "status = ?" : null,
-      workflowState === null ? null : "workflow_state = ?",
+      "workflow_state = ?",
       "updated_at = ?",
     ].filter((assignment) => assignment !== null)
 
     const bindings = [
       ...(runStatus ? [runStatus] : []),
-      ...(workflowState === null ? [] : [workflowState]),
+      workflowState,
       now,
       runId,
     ]
@@ -316,11 +296,9 @@ export function createRunStepRecorder(
     ).bind(...bindings)
   }
 
-  /** One method, one batch. Absent statements are dropped, not sent as no-ops. */
-  const write = async (
-    statements: (D1PreparedStatement | null)[]
-  ): Promise<void> => {
-    await env.DB.batch(statements.filter((statement) => statement !== null))
+  /** One method, one batch. */
+  const write = async (statements: D1PreparedStatement[]): Promise<void> => {
+    await env.DB.batch(statements)
   }
 
   const waitingSummaryUpdate = (
@@ -381,7 +359,7 @@ export function createRunStepRecorder(
             WHERE run_id = ? AND step_key = ?`
       ).bind(...bindings),
       runsUpdate(now, row.workflowState, row.runStatus),
-    ].filter((statement) => statement !== null)
+    ]
   }
 
   return {
@@ -516,15 +494,6 @@ export function createRunStepRecorder(
           : []),
         runsUpdate(now, row.workflowState),
       ])
-    },
-
-    async setWaitingSummary(
-      targetStepKey: RunStepKey,
-      summary: string
-    ): Promise<void> {
-      const now = new Date().toISOString()
-
-      await write([waitingSummaryUpdate(now, targetStepKey, summary)])
     },
   }
 }
