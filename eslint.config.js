@@ -13,6 +13,7 @@ export default defineConfig([
     "dist-worker",
     "worker-configuration.d.ts",
     "src/routeTree.gen.ts",
+    "tools/oxlint/anti-slop",
   ]),
   {
     files: ["**/*.{ts,tsx}"],

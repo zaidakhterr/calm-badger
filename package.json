@@ -24,6 +24,7 @@
     "db:seed:remote:if-empty": "node scripts/seed-remote-if-empty.mjs",
     "deploy": "pnpm build:client && wrangler deploy",
     "lint": "eslint .",
+    "lint:anti-slop": "oxlint src worker test scripts",
     "format": "prettier --write --ignore-unknown README.md package.json pnpm-workspace.yaml components.json eslint.config.js index.html tsconfig*.json vite.config.ts vitest*.config.ts wrangler.jsonc src worker test scripts .github",
     "format:check": "prettier --check --ignore-unknown README.md package.json pnpm-workspace.yaml components.json eslint.config.js index.html tsconfig*.json vite.config.ts vitest*.config.ts wrangler.jsonc src worker test scripts .github",
     "test": "vitest run",
@@ -52,6 +53,7 @@
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.21.1",
     "@eslint/js": "^10",
+    "@oxlint/plugins": "1.78.0",
     "@tanstack/router-plugin": "^1.168.30",
     "@types/node": "^24",
     "@types/react": "^19",
@@ -62,6 +64,7 @@
     "eslint-plugin-react-refresh": "^0.5.2",
     "globals": "^17",
     "jsonc-parser": "^3.3.1",
+    "oxlint": "1.78.0",
     "prettier": "^3.8.3",
     "prettier-plugin-tailwindcss": "^0.8.0",
     "typescript": "~6",
