@@ -70,12 +70,12 @@ type Review = {
 }
 
 async function createRun(scenarioId: string, workspaceId?: string) {
+  const headers = new Headers({ "content-type": "application/json" })
+  if (workspaceId) headers.set("x-workspace-id", workspaceId)
+
   const response = await exports.default.fetch(`${base}/api/runs`, {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-      ...(workspaceId ? { "x-workspace-id": workspaceId } : {}),
-    },
+    headers,
     body: JSON.stringify({ scenarioId }),
   })
 
@@ -178,12 +178,12 @@ function decide(
   capability: string | null,
   decisions: unknown[]
 ) {
+  const headers = new Headers({ "content-type": "application/json" })
+  if (capability) headers.set("authorization", `Bearer ${capability}`)
+
   return exports.default.fetch(`${base}/api/runs/${viewId}/review/decisions`, {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-      ...(capability ? { authorization: `Bearer ${capability}` } : {}),
-    },
+    headers,
     body: JSON.stringify({ decisions }),
   })
 }
@@ -201,12 +201,12 @@ function submitDecisionsBody(viewId: string, capability: string, body: string) {
 }
 
 function settle(viewId: string, capability: string | null, action: string) {
+  const headers = new Headers({ "content-type": "application/json" })
+  if (capability) headers.set("authorization", `Bearer ${capability}`)
+
   return exports.default.fetch(`${base}/api/runs/${viewId}/review`, {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-      ...(capability ? { authorization: `Bearer ${capability}` } : {}),
-    },
+    headers,
     body: JSON.stringify({ action }),
   })
 }
@@ -261,26 +261,20 @@ function environmentThatExpiresBeforeTheClaim(runId: string): Env {
       .run()
   }
 
-  const watch = (statement: D1PreparedStatement): D1PreparedStatement =>
-    new Proxy(statement, {
-      get(target, property, receiver) {
-        if (property === "bind") {
-          return (...values: unknown[]) => watch(target.bind(...values))
-        }
-
-        if (property === "run") {
-          return async () => {
-            await expireNow()
-            return target.run()
-          }
-        }
-
-        const value = Reflect.get(target, property, receiver) as unknown
-        return typeof value === "function"
-          ? (value as (...args: unknown[]) => unknown).bind(target)
-          : value
-      },
-    })
+  /** The claim statement, with the window closing just before it runs. */
+  const watch = (statement: D1PreparedStatement): D1PreparedStatement => ({
+    bind: (...values) => watch(statement.bind(...values)),
+    run: async () => {
+      await expireNow()
+      return statement.run()
+    },
+    first: (colName?: string) =>
+      colName === undefined ? statement.first() : statement.first(colName),
+    all: () => statement.all(),
+    raw: () => {
+      throw new Error("The claim never reads raw rows")
+    },
+  })
 
   const database: D1Database = {
     prepare: (query) => {
