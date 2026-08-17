@@ -16,6 +16,11 @@ const DAY_MS = 24 * HOUR_MS
 
 let addressCounter = 0
 
+/** A binding member the sweep never reaches; reaching it is a bug. */
+function unreachable(member: string): never {
+  throw new Error(`${member} must not be reached`)
+}
+
 /** A fresh client address per run, so retention tests never meet the limiter. */
 function nextAddress(): string {
   addressCounter += 1
@@ -141,45 +146,47 @@ describe("retention windows", () => {
     const calls: string[] = []
     let headsAtFirstBatch: (boolean | null)[] = []
 
-    const artifacts = new Proxy(env.ARTIFACTS, {
-      get(target, property) {
-        const value: unknown = Reflect.get(target, property)
-        if (typeof value !== "function") return value
-
-        const method = value.bind(target) as (...args: unknown[]) => unknown
-
-        if (property !== "delete") return method
-
-        return (...args: unknown[]) => {
-          calls.push("r2:delete")
-          return method(...args)
-        }
+    // The two bindings the sweep is given: every member it uses goes to the
+    // real one, and the two the order is measured on say so before delegating.
+    const artifacts: R2Bucket = {
+      delete(deleted) {
+        calls.push("r2:delete")
+        return env.ARTIFACTS.delete(deleted)
       },
-    })
+      head(key) {
+        return env.ARTIFACTS.head(key)
+      },
+      list(options) {
+        return env.ARTIFACTS.list(options)
+      },
+      get: () => unreachable("R2Bucket.get"),
+      put: () => unreachable("R2Bucket.put"),
+      createMultipartUpload: () =>
+        unreachable("R2Bucket.createMultipartUpload"),
+      resumeMultipartUpload: () =>
+        unreachable("R2Bucket.resumeMultipartUpload"),
+    }
 
-    const db = new Proxy(env.DB, {
-      get(target, property) {
-        const value: unknown = Reflect.get(target, property)
-        if (typeof value !== "function") return value
-
-        const method = value.bind(target) as (...args: unknown[]) => unknown
-
-        if (property !== "batch") return method
-
-        return async (...args: unknown[]) => {
-          if (!calls.includes("d1:batch")) {
-            headsAtFirstBatch = await Promise.all(
-              keys.map(async (key) =>
-                (await env.ARTIFACTS.head(key)) === null ? null : true
-              )
+    const db: D1Database = {
+      prepare(query) {
+        return env.DB.prepare(query)
+      },
+      async batch(statements) {
+        if (!calls.includes("d1:batch")) {
+          headsAtFirstBatch = await Promise.all(
+            keys.map(async (key) =>
+              (await env.ARTIFACTS.head(key)) === null ? null : true
             )
-          }
-
-          calls.push("d1:batch")
-          return method(...args)
+          )
         }
+
+        calls.push("d1:batch")
+        return env.DB.batch(statements)
       },
-    })
+      exec: () => unreachable("D1Database.exec"),
+      dump: () => unreachable("D1Database.dump"),
+      withSession: () => unreachable("D1Database.withSession"),
+    }
 
     await age(runId, new Date(Date.now() - 8 * DAY_MS))
     await runRetentionSweep(
