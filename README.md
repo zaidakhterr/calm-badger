@@ -113,7 +113,8 @@ browser ──► Worker (assets + /api/*) ──► Workflow (durable orchestra
   refresh, and its evidence outlives the request that produced it. The
   Run-step recorder (`worker/run-steps.ts`) is the single writer of step
   lifecycle state and evidence, and derives the run's workflow state from the
-  step and its outcome.
+  step and its outcome. Review writes only the review tables; the corrections
+  it settles are written by the steps that own them.
 - **Provider seams** — OCR, language model, delivery, and analytics each sit
   behind a narrow interface in `worker/providers/` and `worker/adapters.ts`.
   Each has a contract-compatible fake, which is what tests and fixture
@@ -142,7 +143,8 @@ changes; titles do not, so the graph does not jump while work proceeds.
    it is visible that the whole catalogue is never sent to a model.
 6. **Match products** — reranking to a top three with evidence.
 7. **Review required** — appears in the main sequence only when needed, and
-   blocks every later step until a decision.
+   blocks every later step until a decision. The decision itself is claimed
+   atomically, so exactly one of two racing owners settles the review.
 8. **Build estimate** — deterministic pricing.
 9. **Deliver** — canonical quote transformed by the fixed simulated webhook.
 10. **Delivered** — synthetic external estimate ID.
@@ -178,9 +180,12 @@ Human review consolidates every uncertainty — product, customer, quantity,
 extracted field — into one linear node rather than branching the workflow. The
 owner can approve the proposal, choose one of the top three alternatives, search
 the entire catalogue when the shortlist is simply wrong, and correct quantity or
-customer. Creating a product is not offered. An approved correction is
-remembered as an alias inside that browser's anonymous workspace only; it never
-mutates the global catalogue or another visitor's data.
+customer. Creating a product is not offered. Settling the review records the
+decision and nothing else; the workflow then wakes and applies each correction
+through the step that owns it — customer, then lines, then matches — before
+pricing runs. A corrected product is remembered as an alias inside that
+browser's anonymous workspace only; it never mutates the global catalogue or
+another visitor's data.
 
 ## Validation and what the model is not trusted with
 

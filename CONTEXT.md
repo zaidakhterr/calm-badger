@@ -14,6 +14,10 @@ Single bounded context. Terms below are the ubiquitous language; use them in cod
 
 **Workflow state** — the run-level progress string (`accepted`, `reading_documents`, … `delivered`, `failed`) shown to the client. Derived vocabulary of the recorder; steps do not choose it directly.
 
-**Review** — the consolidated human decision point; the workflow hibernates until the owner decides.
+**Review** — the consolidated human decision point; the workflow hibernates until the owner decides, then wakes and applies the outcome. Review itself writes only the review tables and the claim that settles them.
+
+**Review outcome** — the settled result of a Review: `approved | rejected | expired`, when it was decided, and the resolved decisions. Read as a value by the Workflow, which applies it in one durable step. _Avoid_: "approval effects", "settlement effects".
+
+**Correction** — one owner decision from an outcome, applied by the step that owns the affected table: Resolve customer applies a chosen customer, Structure RFQ confirms or corrects a line, Match products applies a product choice and remembers the workspace alias. No step writes another's table.
 
 **Estimate / Quote** — the deterministic priced result; "canonical quote" is what delivery transforms.
