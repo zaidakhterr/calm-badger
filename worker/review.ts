@@ -482,28 +482,38 @@ async function catalogNames(
   return new Map(rows.results.map((row) => [row.sku, row.name]))
 }
 
-function readMatchAlternatives(raw: string): ReviewAlternative[] {
+/**
+ * The one JSON-column parser. Every stored list in this module — reasons,
+ * review alternatives, match alternatives — is a JSON array whose entries are
+ * only as trustworthy as the row they came from, so the shape check lives here
+ * and each caller supplies the mapping for one entry. Anything unparseable or
+ * unrecognised reads as an empty list rather than an error.
+ */
+function readJsonArray<T>(raw: string, entryOf: (entry: unknown) => T[]): T[] {
   try {
     const parsed: unknown = JSON.parse(raw)
-    if (!Array.isArray(parsed)) return []
-
-    return parsed.flatMap((entry) => {
-      const value = entry as Record<string, unknown>
-      const sku = typeof value.sku === "string" ? value.sku : null
-      if (!sku) return []
-
-      return [
-        {
-          value: sku,
-          label: typeof value.name === "string" ? value.name : sku,
-          detail: typeof value.reason === "string" ? value.reason : "",
-          score: typeof value.score === "number" ? value.score : 0,
-        },
-      ]
-    })
+    return Array.isArray(parsed) ? parsed.flatMap(entryOf) : []
   } catch {
     return []
   }
+}
+
+/** Alternatives as `match-products` stores them, keyed by SKU. */
+function readMatchAlternatives(raw: string): ReviewAlternative[] {
+  return readJsonArray(raw, (entry) => {
+    const value = entry as Record<string, unknown>
+    const sku = typeof value.sku === "string" ? value.sku : null
+    if (!sku) return []
+
+    return [
+      {
+        value: sku,
+        label: typeof value.name === "string" ? value.name : sku,
+        detail: typeof value.reason === "string" ? value.reason : "",
+        score: typeof value.score === "number" ? value.score : 0,
+      },
+    ]
+  })
 }
 
 /** The customers resolution scored highest, read back from its own evidence. */
@@ -715,38 +725,26 @@ function projectItem(row: ItemRow): ReviewItemProjection {
 }
 
 function readStrings(raw: string): string[] {
-  try {
-    const parsed: unknown = JSON.parse(raw)
-    return Array.isArray(parsed)
-      ? parsed.filter((entry): entry is string => typeof entry === "string")
-      : []
-  } catch {
-    return []
-  }
+  return readJsonArray(raw, (entry) =>
+    typeof entry === "string" ? [entry] : []
+  )
 }
 
+/** Alternatives as the review node stores them, keyed by `value`. */
 function readAlternatives(raw: string): ReviewAlternative[] {
-  try {
-    const parsed: unknown = JSON.parse(raw)
-    if (!Array.isArray(parsed)) return []
-
-    return parsed.flatMap((entry) => {
-      const value = entry as Record<string, unknown>
-      return typeof value.value === "string"
-        ? [
-            {
-              value: value.value,
-              label:
-                typeof value.label === "string" ? value.label : value.value,
-              detail: typeof value.detail === "string" ? value.detail : "",
-              score: typeof value.score === "number" ? value.score : 0,
-            },
-          ]
-        : []
-    })
-  } catch {
-    return []
-  }
+  return readJsonArray(raw, (entry) => {
+    const value = entry as Record<string, unknown>
+    return typeof value.value === "string"
+      ? [
+          {
+            value: value.value,
+            label: typeof value.label === "string" ? value.label : value.value,
+            detail: typeof value.detail === "string" ? value.detail : "",
+            score: typeof value.score === "number" ? value.score : 0,
+          },
+        ]
+      : []
+  })
 }
 
 async function loadReviewRow(
@@ -773,6 +771,157 @@ export async function readReviewState(
 ): Promise<ReviewState> {
   const review = await loadReviewRow(env, runId)
   return review ? effectiveState(review) : "not_required"
+}
+
+/* -------------------------------------------------------------------------- */
+/* The outcome, as a value                                                    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * One settled correction, carrying the values its owning step needs and
+ * nothing else. Review resolves identifiers; it does not know the columns any
+ * other step keeps them in.
+ */
+export type ResolvedDecision =
+  | { kind: "customer"; customerId: string }
+  | { kind: "quantity"; position: number; quantity: number }
+  | { kind: "field"; position: number }
+  | {
+      kind: "product"
+      position: number
+      sku: string
+      decision: "accepted_proposal" | "chose_alternative" | "chose_catalog"
+      /** The wording the owner corrected, for the workspace alias. */
+      sourcePhrase: string
+      /**
+       * When the alias this correction teaches must be deleted, derived from
+       * the run's own retention. `null` means no alias can be recorded at all.
+       * A deadline already in the past is still returned as it stands: whether
+       * a stale alias is worth writing is the alias owner's rule, not a fact
+       * about the review, and deciding it here would make this read depend on
+       * the clock.
+       */
+      aliasExpiresAt: string | null
+    }
+
+/**
+ * What the owner decided, once, as a value that crosses the seam out of this
+ * module. The workflow applies it by handing each decision to the step that
+ * owns the facts it corrects.
+ */
+export type ReviewOutcome = {
+  state: "approved" | "rejected" | "expired"
+  decidedAt: string
+  /**
+   * Empty unless the review was approved: a rejected or expired review ends
+   * the run where it stands, so its half-made corrections are never applied.
+   */
+  decisions: ResolvedDecision[]
+}
+
+/**
+ * Reads the settled review. Returns `null` while the decision is still the
+ * owner's to make — no review at all, or a row still `pending` — so a caller
+ * has nothing to apply until a transition has actually been persisted.
+ *
+ * A pure read: it writes nothing, including the expiry a closed window implies.
+ * `expireReview` remains the one place that transition is recorded.
+ */
+export async function loadReviewOutcome(
+  env: Env,
+  runId: string
+): Promise<ReviewOutcome | null> {
+  const review = await loadReviewRow(env, runId)
+
+  if (!review || !review.decided_at) return null
+  if (
+    review.state !== "approved" &&
+    review.state !== "rejected" &&
+    review.state !== "expired"
+  ) {
+    return null
+  }
+
+  const outcome: ReviewOutcome = {
+    state: review.state,
+    decidedAt: review.decided_at,
+    decisions: [],
+  }
+
+  if (review.state !== "approved") return outcome
+
+  const [items, run] = await Promise.all([
+    loadSettlementItems(env, runId),
+    env.DB.prepare(`SELECT source_kind, created_at FROM runs WHERE id = ?`)
+      .bind(runId)
+      .first<{ source_kind: string; created_at: string }>(),
+  ])
+
+  const aliasExpiresAt = run
+    ? retentionDeadline(run.source_kind, run.created_at)
+    : null
+
+  outcome.decisions = items.flatMap((item) =>
+    resolvedDecisionOf(item, aliasExpiresAt)
+  )
+
+  return outcome
+}
+
+/**
+ * An item becomes a decision only when it is resolved and carries the value
+ * its kind needs. Anything else is silently dropped, exactly as the guarded
+ * effect statements no-op on such a row today.
+ */
+function resolvedDecisionOf(
+  item: ItemRow,
+  aliasExpiresAt: string | null
+): ResolvedDecision[] {
+  if (item.state !== "resolved") return []
+
+  switch (item.kind) {
+    case "customer":
+      return item.resolved_customer_id
+        ? [{ kind: "customer", customerId: item.resolved_customer_id }]
+        : []
+
+    case "quantity":
+      return item.resolved_quantity !== null
+        ? [
+            {
+              kind: "quantity",
+              position: item.position,
+              quantity: item.resolved_quantity,
+            },
+          ]
+        : []
+
+    case "field":
+      return [{ kind: "field", position: item.position }]
+
+    case "product":
+      return item.resolved_sku
+        ? [
+            {
+              kind: "product",
+              position: item.position,
+              sku: item.resolved_sku,
+              // Anything that is not one of the two named decisions is the
+              // alternative, which is how the stored reason already reads it.
+              decision:
+                item.decision === "accepted_proposal" ||
+                item.decision === "chose_catalog"
+                  ? item.decision
+                  : "chose_alternative",
+              sourcePhrase: item.source_phrase,
+              aliasExpiresAt,
+            },
+          ]
+        : []
+
+    default:
+      return []
+  }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -893,7 +1042,8 @@ export async function recordDecisions(
   return { state: "recorded", review: await loadReviewEvidence(env, runId) }
 }
 
-type ResolvedDecision =
+/** The checked form of one submitted decision, before it is recorded. */
+type DecisionResolution =
   | {
       state: "ok"
       decision: string
@@ -911,7 +1061,7 @@ async function resolveDecision(
   env: Env,
   row: ItemRow,
   decision: DecisionInput
-): Promise<ResolvedDecision> {
+): Promise<DecisionResolution> {
   const alternatives = readAlternatives(row.alternatives)
 
   if (row.kind === "customer") {

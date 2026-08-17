@@ -2,7 +2,8 @@ import { env, exports } from "cloudflare:workers"
 import { describe, expect, it } from "vitest"
 
 import { normaliseText } from "../worker/catalog/retrieval"
-import { settleReview } from "../worker/review"
+import { loadReviewOutcome, settleReview } from "../worker/review"
+import { retentionDeadline } from "../worker/retention-policy"
 
 const base = "https://example.test"
 
@@ -1185,6 +1186,223 @@ describe("what an approved correction teaches", () => {
 
     expect(strangerMatch!.method).not.toBe("known_alias")
     expect(strangerMatch!.state).toBe("review_required")
+  })
+})
+
+/* -------------------------------------------------------------------------- */
+/* The outcome, as a value                                                    */
+/* -------------------------------------------------------------------------- */
+
+async function retentionOf(runId: string): Promise<string | null> {
+  const run = await env.DB.prepare(
+    `SELECT source_kind, created_at FROM runs WHERE id = ?`
+  )
+    .bind(runId)
+    .first<{ source_kind: string; created_at: string }>()
+
+  return retentionDeadline(run!.source_kind, run!.created_at)
+}
+
+describe("the settled review, read as a value", () => {
+  it("has nothing to report while the decision is still the owner's", async () => {
+    expect(await loadReviewOutcome(env, "no-such-run")).toBeNull()
+
+    const { run, ownerCapability, review } = await pausedRun()
+    const runId = await runIdOf(run.viewId)
+
+    expect(await loadReviewOutcome(env, runId)).toBeNull()
+
+    // Recording corrections settles nothing, so there is still no outcome.
+    await decide(run.viewId, ownerCapability, straightforwardDecisions(review))
+    expect(await loadReviewOutcome(env, runId)).toBeNull()
+  })
+
+  it("carries every corrected value the owning steps need", async () => {
+    const { run, ownerCapability, review } = await customPausedRun(
+      "trigger-invalid-quantity"
+    )
+    const runId = await runIdOf(run.viewId)
+
+    const customer = review.items.find((item) => item.kind === "customer")!
+    const decisions = review.items.map((item) =>
+      item.kind === "customer"
+        ? { itemId: item.id, action: "customer", customerId: "CUST-1001" }
+        : item.kind === "quantity"
+          ? { itemId: item.id, action: "quantity", quantity: 7 }
+          : item.kind === "field"
+            ? { itemId: item.id, action: "accept" }
+            : item.proposal.sku
+              ? { itemId: item.id, action: "accept" }
+              : {
+                  itemId: item.id,
+                  action: "alternative",
+                  sku: item.alternatives[0].value,
+                }
+    )
+
+    expect((await decide(run.viewId, ownerCapability, decisions)).status).toBe(
+      200
+    )
+    expect((await settle(run.viewId, ownerCapability, "approve")).status).toBe(
+      200
+    )
+
+    const final = await readReview(run.viewId)
+    const aliasExpiresAt = await retentionOf(runId)
+    const outcome = (await loadReviewOutcome(env, runId))!
+
+    expect(outcome.state).toBe("approved")
+    expect(outcome.decidedAt).toBe(final.decidedAt)
+    expect(outcome.decisions).toHaveLength(final.items.length)
+
+    // Every question the node asked comes back as the value that answers it.
+    for (const item of final.items) {
+      if (item.kind === "customer") {
+        expect(outcome.decisions).toContainEqual({
+          kind: "customer",
+          customerId: item.resolved.customerId,
+        })
+      }
+
+      if (item.kind === "quantity") {
+        expect(outcome.decisions).toContainEqual({
+          kind: "quantity",
+          position: item.position,
+          quantity: item.resolved.quantity,
+        })
+      }
+
+      if (item.kind === "field") {
+        expect(outcome.decisions).toContainEqual({
+          kind: "field",
+          position: item.position,
+        })
+      }
+
+      if (item.kind === "product") {
+        expect(outcome.decisions).toContainEqual({
+          kind: "product",
+          position: item.position,
+          sku: item.resolved.sku,
+          decision: item.decision,
+          sourcePhrase: item.sourcePhrase,
+          aliasExpiresAt,
+        })
+      }
+    }
+
+    expect(customer.resolved.customerId).toBeNull()
+    expect(
+      outcome.decisions.find((entry) => entry.kind === "customer")
+    ).toEqual({ kind: "customer", customerId: "CUST-1001" })
+
+    // The same values the approval wrote into the tables other steps own.
+    const applied = await env.DB.prepare(
+      `SELECT (SELECT customer_id FROM run_customer_resolution
+                WHERE run_id = ?1) AS customer_id,
+              (SELECT quantity FROM run_rfq_line_items
+                WHERE run_id = ?1 AND position = ?2) AS quantity`
+    )
+      .bind(
+        runId,
+        final.items.find((item) => item.kind === "quantity")!.position
+      )
+      .first<{ customer_id: string; quantity: number }>()
+
+    expect(applied).toEqual({ customer_id: "CUST-1001", quantity: 7 })
+
+    for (const decision of outcome.decisions) {
+      if (decision.kind !== "product") continue
+
+      const match = await env.DB.prepare(
+        `SELECT sku FROM run_line_matches WHERE run_id = ? AND position = ?`
+      )
+        .bind(runId, decision.position)
+        .first<{ sku: string }>()
+
+      expect(match!.sku).toBe(decision.sku)
+    }
+  })
+
+  it("dates the alias a product correction teaches by the run's retention", async () => {
+    const workspace = "workspace-outcome-0123456789"
+    const { run, ownerCapability, review } = await pausedRun(workspace)
+    const runId = await runIdOf(run.viewId)
+
+    await decide(run.viewId, ownerCapability, straightforwardDecisions(review))
+    expect((await settle(run.viewId, ownerCapability, "approve")).status).toBe(
+      200
+    )
+
+    const outcome = (await loadReviewOutcome(env, runId))!
+    const product = outcome.decisions.find(
+      (decision) => decision.kind === "product"
+    )!
+
+    expect(product.kind).toBe("product")
+    if (product.kind !== "product") return
+
+    expect(product.aliasExpiresAt).toBe(await retentionOf(runId))
+    expect(product.sourcePhrase.length).toBeGreaterThan(0)
+    expect([
+      "accepted_proposal",
+      "chose_alternative",
+      "chose_catalog",
+    ]).toContain(product.decision)
+
+    const alias = await env.DB.prepare(
+      `SELECT expires_at, alias, sku FROM workspace_product_aliases
+        WHERE workspace_hash = (SELECT workspace_hash FROM runs WHERE id = ?)
+          AND normalised = ?`
+    )
+      .bind(runId, normaliseText(product.sourcePhrase))
+      .first<{ expires_at: string; alias: string; sku: string }>()
+
+    expect(alias).toEqual({
+      expires_at: product.aliasExpiresAt,
+      alias: product.sourcePhrase,
+      sku: product.sku,
+    })
+  })
+
+  it("applies nothing from a rejected review", async () => {
+    const { run, ownerCapability, review } = await pausedRun()
+    const runId = await runIdOf(run.viewId)
+
+    await decide(run.viewId, ownerCapability, straightforwardDecisions(review))
+    expect((await settle(run.viewId, ownerCapability, "reject")).status).toBe(
+      200
+    )
+
+    const outcome = (await loadReviewOutcome(env, runId))!
+
+    expect(outcome.state).toBe("rejected")
+    expect(outcome.decisions).toEqual([])
+    expect(outcome.decidedAt).toBe((await readReview(run.viewId)).decidedAt)
+  })
+
+  it("applies nothing from a review whose window closed", async () => {
+    const { run, ownerCapability, review } = await pausedRun()
+    const runId = await runIdOf(run.viewId)
+
+    await decide(run.viewId, ownerCapability, straightforwardDecisions(review))
+    await env.DB.prepare(
+      `UPDATE run_reviews SET expires_at = ? WHERE run_id = ?`
+    )
+      .bind(new Date(Date.now() - 1_000).toISOString(), runId)
+      .run()
+
+    // The expiry is only an outcome once something has written it down.
+    expect(await loadReviewOutcome(env, runId)).toBeNull()
+    expect((await settle(run.viewId, ownerCapability, "approve")).status).toBe(
+      409
+    )
+
+    const outcome = (await loadReviewOutcome(env, runId))!
+
+    expect(outcome.state).toBe("expired")
+    expect(outcome.decisions).toEqual([])
+    expect(outcome.decidedAt).not.toBeNull()
   })
 })
 
