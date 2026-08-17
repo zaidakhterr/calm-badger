@@ -302,6 +302,67 @@ async function stopWithValidationFailure(
 }
 
 /* -------------------------------------------------------------------------- */
+/* Review outcome                                                             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * One line-level correction the owner made during review, resolved to values.
+ *
+ * `quantity` carries the amount the owner settled on; `field` confirms the line
+ * exactly as extracted. Both are addressed by position within the run, because
+ * that is the identity a line item has once it is persisted.
+ */
+export type ReviewLineDecision =
+  | { position: number; kind: "quantity"; quantity: number }
+  | { position: number; kind: "field" }
+
+/**
+ * Applies one reviewed line decision to this step's own table.
+ *
+ * The caller has already arbitrated the review; nothing here re-checks that a
+ * decision was approved, so the statements are plain updates against resolved
+ * values. Re-running one is harmless: the same values are written again and the
+ * row lands in the same state, which is what lets the workflow retry the apply
+ * step without bookkeeping.
+ *
+ * Unlike the step above, this *does* throw when the addressed line is missing.
+ * It is called from a durable workflow step rather than a paid provider call,
+ * and a silent no-op would let the run record an outcome as applied while a
+ * correction the owner made was quietly dropped.
+ */
+export async function applyReviewLineDecision(
+  env: Env,
+  runId: string,
+  decision: ReviewLineDecision
+): Promise<void> {
+  const statement =
+    decision.kind === "quantity"
+      ? env.DB.prepare(
+          `UPDATE run_rfq_line_items
+              SET quantity = ?,
+                  validation_state = 'accepted',
+                  validation_reason = 'Quantity confirmed by the owner during review.'
+            WHERE run_id = ? AND position = ?
+        RETURNING position`
+        ).bind(decision.quantity, runId, decision.position)
+      : env.DB.prepare(
+          `UPDATE run_rfq_line_items
+              SET validation_state = 'accepted',
+                  validation_reason = 'Confirmed by the owner during review, exactly as extracted.'
+            WHERE run_id = ? AND position = ?
+        RETURNING position`
+        ).bind(runId, decision.position)
+
+  const updated = await statement.first<{ position: number }>()
+
+  if (!updated) {
+    throw new Error(
+      `No line item at position ${decision.position} for run ${runId}.`
+    )
+  }
+}
+
+/* -------------------------------------------------------------------------- */
 /* Reading and writing                                                        */
 /* -------------------------------------------------------------------------- */
 

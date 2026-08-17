@@ -26,7 +26,7 @@ import {
   validateAgainstSchema,
 } from "../worker/rfq-extraction"
 import { SCENARIOS } from "../worker/scenarios"
-import { structureRfq } from "../worker/structure-rfq"
+import { applyReviewLineDecision, structureRfq } from "../worker/structure-rfq"
 import { goldScenario } from "./fixtures/gold-scenarios"
 
 const base = "https://example.test"
@@ -808,6 +808,119 @@ describe("what leaves the system", () => {
       .first<{ rfq: number; lines: number; customer: number }>()
 
     expect(remaining).toEqual({ rfq: 0, lines: 0, customer: 0 })
+  })
+})
+
+describe("applying a reviewed line decision", () => {
+  async function structuredRun(): Promise<{ viewId: string; runId: string }> {
+    const { run } = await createCuratedRun("routine-replenishment")
+    const step = await waitForStep(run.viewId, "structure-rfq", [
+      "complete",
+      "error",
+    ])
+
+    expect(step.status).toBe("complete")
+
+    return { viewId: run.viewId, runId: await runIdOf(run.viewId) }
+  }
+
+  async function readLine(runId: string, position: number) {
+    return await env.DB.prepare(
+      `SELECT quantity, validation_state, validation_reason
+         FROM run_rfq_line_items
+        WHERE run_id = ? AND position = ?`
+    )
+      .bind(runId, position)
+      .first<{
+        quantity: number | null
+        validation_state: string
+        validation_reason: string | null
+      }>()
+  }
+
+  it("writes the quantity the owner settled on and accepts the line", async () => {
+    const { runId } = await structuredRun()
+
+    await applyReviewLineDecision(env, runId, {
+      position: 1,
+      kind: "quantity",
+      quantity: 41,
+    })
+
+    expect(await readLine(runId, 1)).toEqual({
+      quantity: 41,
+      validation_state: "accepted",
+      validation_reason: "Quantity confirmed by the owner during review.",
+    })
+  })
+
+  it("accepts a confirmed line without touching its quantity", async () => {
+    const { runId } = await structuredRun()
+    const before = await readLine(runId, 2)
+
+    await applyReviewLineDecision(env, runId, { position: 2, kind: "field" })
+
+    expect(await readLine(runId, 2)).toEqual({
+      quantity: before!.quantity,
+      validation_state: "accepted",
+      validation_reason:
+        "Confirmed by the owner during review, exactly as extracted.",
+    })
+  })
+
+  it("leaves the other lines of the run alone", async () => {
+    const { runId } = await structuredRun()
+    const before = await readLine(runId, 3)
+
+    await applyReviewLineDecision(env, runId, {
+      position: 1,
+      kind: "quantity",
+      quantity: 7,
+    })
+
+    expect(await readLine(runId, 3)).toEqual(before)
+  })
+
+  it("lands in the same state when the same decision is applied twice", async () => {
+    const { runId } = await structuredRun()
+
+    await applyReviewLineDecision(env, runId, {
+      position: 1,
+      kind: "quantity",
+      quantity: 12,
+    })
+    const once = await readLine(runId, 1)
+
+    await applyReviewLineDecision(env, runId, {
+      position: 1,
+      kind: "quantity",
+      quantity: 12,
+    })
+
+    expect(await readLine(runId, 1)).toEqual(once)
+
+    await applyReviewLineDecision(env, runId, { position: 4, kind: "field" })
+    const fieldOnce = await readLine(runId, 4)
+
+    await applyReviewLineDecision(env, runId, { position: 4, kind: "field" })
+
+    expect(await readLine(runId, 4)).toEqual(fieldOnce)
+  })
+
+  it("refuses a position that this run has no line for", async () => {
+    const { runId } = await structuredRun()
+
+    await expect(
+      applyReviewLineDecision(env, runId, { position: 99, kind: "field" })
+    ).rejects.toThrow("position 99")
+
+    await expect(
+      applyReviewLineDecision(env, runId, {
+        position: 99,
+        kind: "quantity",
+        quantity: 5,
+      })
+    ).rejects.toThrow("position 99")
   })
 })
 
