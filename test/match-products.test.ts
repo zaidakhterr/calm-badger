@@ -28,7 +28,10 @@ import {
 } from "../worker/catalog/retrieval"
 import { readConfig } from "../worker/env"
 import { loadCandidateEvidence, loadMatchEvidence } from "../worker/evidence"
-import { applyReviewProductDecision } from "../worker/match-products"
+import {
+  applyReviewProductDecision,
+  type ReviewProductDecision,
+} from "../worker/match-products"
 import {
   applyIntegrityChecks,
   decideMatch,
@@ -145,12 +148,12 @@ type MatchEvidence = {
 }
 
 async function createCuratedRun(scenarioId: string, workspaceId?: string) {
+  const headers = new Headers({ "content-type": "application/json" })
+  if (workspaceId) headers.set("x-workspace-id", workspaceId)
+
   const response = await exports.default.fetch(`${base}/api/runs`, {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-      ...(workspaceId ? { "x-workspace-id": workspaceId } : {}),
-    },
+    headers,
     body: JSON.stringify({ scenarioId }),
   })
 
@@ -162,9 +165,12 @@ async function createCustomRun(emailBody: string, workspaceId?: string) {
   const form = new FormData()
   form.set("emailBody", emailBody)
 
+  const headers = new Headers()
+  if (workspaceId) headers.set("x-workspace-id", workspaceId)
+
   const response = await exports.default.fetch(`${base}/api/runs`, {
     method: "POST",
-    ...(workspaceId ? { headers: { "x-workspace-id": workspaceId } } : {}),
+    headers,
     body: form,
   })
 
@@ -1225,20 +1231,27 @@ describe("applying an owner's product choice", () => {
       "workspace-apply-product-000002"
     )
 
-    const wording = {
-      accepted_proposal:
+    /** Each offer the owner could take, and the reason the line then carries. */
+    const wording: [ReviewProductDecision, string][] = [
+      [
+        "accepted_proposal",
         "The owner accepted the proposed match to NX-SEA-9120 during review.",
-      chose_alternative:
+      ],
+      [
+        "chose_alternative",
         "The owner chose the alternative NX-SEA-9120 during review.",
-      chose_catalog:
+      ],
+      [
+        "chose_catalog",
         "The owner chose NX-SEA-9120 from the complete catalogue during review.",
-    } as const
+      ],
+    ]
 
-    for (const [decision, reason] of Object.entries(wording)) {
+    for (const [decision, reason] of wording) {
       await applyReviewProductDecision(env, runId, {
         position,
         sku: "NX-SEA-9120",
-        decision: decision as keyof typeof wording,
+        decision,
         sourcePhrase: "wording that is never remembered",
         aliasExpiresAt: null,
       })
