@@ -32,7 +32,7 @@ export default defineConfig({
           // The review window is seconds rather than days here, so the
           // hibernating workflow's own expiry can be driven and observed
           // instead of being described. Every review test decides immediately
-          // after the node opens; only the expiry test waits it out.
+          // after the node opens; only the expiry tests wait it out.
           REVIEW_WINDOW_SECONDS_CURATED: "5",
           REVIEW_WINDOW_SECONDS_CUSTOM: "5",
         },

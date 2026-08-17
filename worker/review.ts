@@ -33,7 +33,6 @@
  * the global dataset or another visitor's run.
  */
 
-import { normaliseText } from "./catalog/retrieval"
 import { retentionDeadline } from "./retention-policy"
 import { MAX_LINE_QUANTITY } from "./rfq-extraction"
 import { createRunStepRecorder } from "./run-steps"
@@ -1225,11 +1224,11 @@ export type ReviewSettlement =
 /**
  * The single transition out of `pending`.
  *
- * Approval applies the owner's corrections to the run's own tables — the
- * quantity a line is priced with, the product a line is matched to, the
- * customer the run resolved to — so the workflow resumes through exactly the
- * same deterministic pricing path with corrected facts. The decision, learned
- * wording, corrected facts, and workflow release commit as one transaction.
+ * It records *what the owner decided*, and nothing about what that decision
+ * means elsewhere. The claim is the race arbiter: whoever changes the row owns
+ * the outcome, and the workflow — released by the caller, or woken by its own
+ * deadline — reads that outcome back and hands each correction to the step
+ * that owns the facts it corrects.
  */
 export async function settleReview(
   env: Env,
@@ -1246,40 +1245,6 @@ export async function settleReview(
     // window that closed while nobody was looking still ends somewhere stable.
     if (review.state === "pending") {
       await expireReview(env, runId)
-    } else if (
-      review.state === "approved" &&
-      decision === "approve" &&
-      (await approvalNeedsRepair(env, runId))
-    ) {
-      const items = await loadSettlementItems(env, runId)
-      const now = new Date().toISOString()
-
-      // Rows approved by an older deployment may have committed before their
-      // effects. Reuse that approval's timestamp as the transaction marker so
-      // a concurrent fresh settlement cannot authorise these repair writes.
-      await commitSettlement(
-        env,
-        runId,
-        "approve",
-        items,
-        now,
-        review.decided_at ?? now
-      )
-
-      console.log(
-        JSON.stringify({
-          event: "review_approval_repaired",
-          runId,
-          step: REVIEW_STEP_KEY,
-          items: items.length,
-        })
-      )
-
-      return {
-        state: "settled",
-        decision,
-        review: await loadReviewEvidence(env, runId),
-      }
     }
 
     return {
@@ -1303,9 +1268,6 @@ export async function settleReview(
 
   const now = new Date().toISOString()
 
-  // D1 batches are transactions. The guarded transition and every effect
-  // therefore become visible together or roll back together, so an approved
-  // row can never get ahead of the facts and workflow node it authorises.
   const claimed = await commitSettlement(env, runId, decision, items, now)
 
   if (claimed !== 1) {
@@ -1377,33 +1339,22 @@ async function loadSettlementItems(
   return rows.results
 }
 
-async function approvalNeedsRepair(env: Env, runId: string): Promise<boolean> {
-  const row = await env.DB.prepare(
-    `SELECT status AS review_step_status
-       FROM run_steps
-      WHERE run_id = ? AND step_key = ?`
-  )
-    .bind(runId, REVIEW_STEP_KEY)
-    .first<{
-      review_step_status: string | null
-    }>()
-
-  // The run may already have progressed beyond `review_approved`; the node is
-  // the durable completion marker that does not change again afterwards.
-  return !row || row.review_step_status !== "complete"
-}
-
 /**
- * Claims a decision and writes all of its durable effects in one D1
- * transaction. The first result reports whether this call won the transition.
+ * Claims the transition out of `pending`. One guarded statement, and its
+ * result is the arbiter: exactly one caller can see a change here, whatever
+ * else is happening at the same moment.
+ *
+ * Nothing else is written. What an approval means for the run's own facts —
+ * the quantity a line is priced with, the article it is matched to, the
+ * customer it resolved to — belongs to the steps that own those facts, and the
+ * workflow applies it to them once this claim has decided who won.
  */
 async function commitSettlement(
   env: Env,
   runId: string,
   decision: ReviewDecision,
   items: ItemRow[],
-  now: string,
-  effectDecisionAt = now
+  now: string
 ): Promise<number> {
   const approvalGuard =
     decision === "approve"
@@ -1432,321 +1383,17 @@ async function commitSettlement(
     ...(decision === "approve" ? [runId, runId] : [])
   )
 
-  // Every decision takes the same read path before competing for the guarded
-  // transition. Besides supplying alias retention, this avoids making approve
-  // artificially slower than reject merely because approval has more effects
-  // to prepare.
-  const run = await env.DB.prepare(
-    `SELECT source_kind, created_at FROM runs WHERE id = ?`
-  )
-    .bind(runId)
-    .first<{ source_kind: string; created_at: string }>()
-  const aliasExpiresAt = run
-    ? retentionDeadline(run.source_kind, run.created_at)
-    : null
-
-  const effects =
-    decision === "approve"
-      ? approvalEffectStatements(
-          env,
-          runId,
-          items,
-          now,
-          effectDecisionAt,
-          aliasExpiresAt
-        )
-      : rejectionEffectStatements(env, runId, now, effectDecisionAt)
-
-  const results = await env.DB.batch([claim, ...effects])
-  return results[0]?.meta.changes ?? 0
+  return (await claim.run()).meta.changes
 }
 
-/** Writes the owner's corrections into the facts pricing reads. */
-function approvalEffectStatements(
-  env: Env,
-  runId: string,
-  items: ItemRow[],
-  now: string,
-  effectDecisionAt: string,
-  aliasExpiresAt: string | null
-): D1PreparedStatement[] {
-  const statements: D1PreparedStatement[] = []
-
-  for (const item of items) {
-    if (item.kind === "customer") {
-      statements.push(
-        env.DB.prepare(
-          `INSERT INTO run_customer_resolution
-             (run_id, state, customer_id, contact_id, location_id,
-              confidence_label, confidence_score, created_at)
-           SELECT ?, 'resolved', item.resolved_customer_id,
-                  (SELECT id FROM catalog_customer_contacts
-                    WHERE customer_id = item.resolved_customer_id
-                    ORDER BY id ASC LIMIT 1),
-                  (SELECT id FROM catalog_customer_locations
-                    WHERE customer_id = item.resolved_customer_id
-                    ORDER BY id ASC LIMIT 1),
-                  'High', 1, ?
-             FROM run_review_items item
-            WHERE item.id = ? AND item.run_id = ?
-              AND item.kind = 'customer' AND item.state = 'resolved'
-              AND item.resolved_customer_id IS NOT NULL
-              AND EXISTS (
-                SELECT 1 FROM run_reviews
-                 WHERE run_id = ? AND state = 'approved'
-              )
-           ON CONFLICT (run_id) DO UPDATE SET
-             state = 'resolved',
-             customer_id = excluded.customer_id,
-             contact_id = excluded.contact_id,
-             location_id = excluded.location_id,
-             confidence_label = 'High',
-             confidence_score = 1`
-        ).bind(runId, now, item.id, runId, runId)
-      )
-    }
-
-    if (item.kind === "quantity") {
-      statements.push(
-        env.DB.prepare(
-          `UPDATE run_rfq_line_items
-              SET quantity = (
-                    SELECT resolved_quantity FROM run_review_items
-                     WHERE id = ? AND run_id = ?
-                  ),
-                  validation_state = 'accepted',
-                  validation_reason = 'Quantity confirmed by the owner during review.'
-            WHERE run_id = ? AND position = ?
-              AND EXISTS (
-                SELECT 1 FROM run_review_items
-                 WHERE id = ? AND run_id = ? AND kind = 'quantity'
-                   AND state = 'resolved' AND resolved_quantity IS NOT NULL
-              )
-              AND EXISTS (
-                SELECT 1 FROM run_reviews
-                 WHERE run_id = ? AND state = 'approved'
-              )`
-        ).bind(item.id, runId, runId, item.position, item.id, runId, runId)
-      )
-    }
-
-    if (item.kind === "field") {
-      statements.push(
-        env.DB.prepare(
-          `UPDATE run_rfq_line_items
-              SET validation_state = 'accepted',
-                  validation_reason = 'Confirmed by the owner during review, exactly as extracted.'
-            WHERE run_id = ? AND position = ?
-              AND EXISTS (
-                SELECT 1 FROM run_review_items
-                 WHERE id = ? AND run_id = ? AND kind = 'field'
-                   AND state = 'resolved'
-              )
-              AND EXISTS (
-                SELECT 1 FROM run_reviews
-                 WHERE run_id = ? AND state = 'approved'
-              )`
-        ).bind(runId, item.position, item.id, runId, runId)
-      )
-    }
-
-    if (item.kind === "product") {
-      statements.push(
-        env.DB.prepare(
-          `UPDATE run_line_matches
-              SET state = 'accepted',
-                  sku = (
-                    SELECT resolved_sku FROM run_review_items
-                     WHERE id = ? AND run_id = ?
-                  ),
-                  method = 'owner_review',
-                  confidence_label = 'High', confidence_score = 1,
-                  winner_gap = 1,
-                  reason = CASE (
-                    SELECT decision FROM run_review_items
-                     WHERE id = ? AND run_id = ?
-                  )
-                    WHEN 'accepted_proposal' THEN
-                      'The owner accepted the proposed match to ' ||
-                      (SELECT resolved_sku FROM run_review_items
-                        WHERE id = ? AND run_id = ?) || ' during review.'
-                    WHEN 'chose_catalog' THEN
-                      'The owner chose ' ||
-                      (SELECT resolved_sku FROM run_review_items
-                        WHERE id = ? AND run_id = ?) ||
-                      ' from the complete catalogue during review.'
-                    ELSE
-                      'The owner chose the alternative ' ||
-                      (SELECT resolved_sku FROM run_review_items
-                        WHERE id = ? AND run_id = ?) || ' during review.'
-                  END
-            WHERE run_id = ? AND position = ?
-              AND EXISTS (
-                SELECT 1 FROM run_review_items
-                 WHERE id = ? AND run_id = ? AND kind = 'product'
-                   AND state = 'resolved' AND resolved_sku IS NOT NULL
-              )
-              AND EXISTS (
-                SELECT 1 FROM run_reviews
-                 WHERE run_id = ? AND state = 'approved'
-              )`
-        ).bind(
-          item.id,
-          runId,
-          item.id,
-          runId,
-          item.id,
-          runId,
-          item.id,
-          runId,
-          item.id,
-          runId,
-          runId,
-          item.position,
-          item.id,
-          runId,
-          runId
-        )
-      )
-    }
-  }
-
-  if (aliasExpiresAt && aliasExpiresAt > now) {
-    for (const item of items) {
-      if (item.kind !== "product") continue
-
-      const normalised = normaliseText(item.source_phrase)
-      if (normalised.length === 0) continue
-
-      // The phrase is one mapping, not a history of contradictory mappings.
-      // Delete and insert share the approval transaction, so retrieval can
-      // never observe the gap or retain an older SKU alongside the correction.
-      statements.push(
-        env.DB.prepare(
-          `DELETE FROM workspace_product_aliases
-            WHERE workspace_hash =
-                  (SELECT workspace_hash FROM runs WHERE id = ?)
-              AND customer_id =
-                  (SELECT customer_id FROM run_customer_resolution
-                    WHERE run_id = ?)
-              AND normalised = ?
-              AND EXISTS (
-                SELECT 1 FROM run_reviews
-                 WHERE run_id = ? AND state = 'approved' AND decided_at = ?
-              )`
-        ).bind(runId, runId, normalised, runId, effectDecisionAt),
-        env.DB.prepare(
-          `INSERT INTO workspace_product_aliases
-             (workspace_hash, customer_id, normalised, alias, sku, created_at,
-              expires_at)
-           SELECT r.workspace_hash, customer.customer_id, ?, item.source_phrase,
-                  item.resolved_sku, ?, ?
-             FROM runs r
-             JOIN run_customer_resolution customer ON customer.run_id = r.id
-             JOIN run_review_items item ON item.run_id = r.id
-            WHERE r.id = ? AND item.id = ? AND item.kind = 'product'
-              AND item.state = 'resolved' AND item.resolved_sku IS NOT NULL
-              AND r.workspace_hash IS NOT NULL
-              AND customer.customer_id IS NOT NULL
-              AND EXISTS (
-                SELECT 1 FROM run_reviews
-                 WHERE run_id = ? AND state = 'approved' AND decided_at = ?
-              )
-           ON CONFLICT (workspace_hash, customer_id, normalised, sku)
-             DO UPDATE SET alias = excluded.alias,
-                           created_at = excluded.created_at,
-                           expires_at = excluded.expires_at`
-        ).bind(
-          normalised,
-          now,
-          aliasExpiresAt,
-          runId,
-          item.id,
-          runId,
-          effectDecisionAt
-        )
-      )
-    }
-  }
-
-  // The two statements below are the one place the run step and the run's
-  // state are written outside the run-step recorder. They stay here because
-  // both properties they carry are lost the moment they move: they are
-  // *composed* into the settlement batch, so they commit with the guarded
-  // claim on `run_reviews` or not at all; and they are *guarded* on that
-  // claim's own result, so a decision that lost the race — or a repair replay,
-  // where the claim matches nothing and the `EXISTS` is the only authority —
-  // writes nothing. The run guard additionally refuses to drag a run that has
-  // already moved past `awaiting_review` back to `review_approved`.
-  statements.push(
-    env.DB.prepare(
-      `UPDATE run_steps
-          SET status = 'complete', summary = ?, completed_at = ?, updated_at = ?
-        WHERE run_id = ? AND step_key = ?
-          AND EXISTS (
-            SELECT 1 FROM run_reviews
-             WHERE run_id = ? AND state = 'approved' AND decided_at = ?
-          )`
-    ).bind(
-      `Owner confirmed ${items.length} ${plural(items.length, "decision", "decisions")}; the run continues to pricing.`,
-      now,
-      now,
-      runId,
-      REVIEW_STEP_KEY,
-      runId,
-      effectDecisionAt
-    ),
-    env.DB.prepare(
-      `UPDATE runs SET workflow_state = 'review_approved', updated_at = ?
-        WHERE id = ? AND workflow_state = 'awaiting_review'
-          AND EXISTS (
-            SELECT 1 FROM run_reviews
-             WHERE run_id = ? AND state = 'approved' AND decided_at = ?
-          )`
-    ).bind(now, runId, runId, effectDecisionAt)
-  )
-
-  return statements
-}
-
-/** Guarded and composed for the same reason as the approval effects above. */
-function rejectionEffectStatements(
-  env: Env,
-  runId: string,
-  now: string,
-  effectDecisionAt: string
-): D1PreparedStatement[] {
-  return [
-    env.DB.prepare(
-      `UPDATE run_steps
-          SET status = 'error', summary = ?, completed_at = ?, updated_at = ?
-        WHERE run_id = ? AND step_key = ?
-          AND EXISTS (
-            SELECT 1 FROM run_reviews
-             WHERE run_id = ? AND state = 'rejected' AND decided_at = ?
-          )`
-    ).bind(
-      "Owner rejected this review, so the run stops here. Nothing was priced or delivered.",
-      now,
-      now,
-      runId,
-      REVIEW_STEP_KEY,
-      runId,
-      effectDecisionAt
-    ),
-    env.DB.prepare(
-      `UPDATE runs
-          SET status = 'error', workflow_state = 'review_rejected', updated_at = ?
-        WHERE id = ?
-          AND EXISTS (
-            SELECT 1 FROM run_reviews
-             WHERE run_id = ? AND state = 'rejected' AND decided_at = ?
-          )`
-    ).bind(now, runId, runId, effectDecisionAt),
-  ]
-}
-
-/** The window closed with nothing decided. A terminal outcome, not a retry. */
+/**
+ * The window closed with nothing decided. A terminal outcome, not a retry.
+ *
+ * Only the review's own row moves here. The run step and the run's state are
+ * the workflow's to record, from the outcome this writes down, so that an
+ * expiry ends the run through exactly the same path an approval or a rejection
+ * does — and is recorded exactly once, whoever noticed the deadline first.
+ */
 export async function expireReview(env: Env, runId: string): Promise<boolean> {
   const now = new Date().toISOString()
 
@@ -1760,14 +1407,6 @@ export async function expireReview(env: Env, runId: string): Promise<boolean> {
     .run()
 
   if (claimed.meta.changes !== 1) return false
-
-  // A rejected or expired review ends the run where it stands. The later nodes
-  // keep their waiting state — the graph simply stops, as the design requires,
-  // and there is no retry.
-  await createRunStepRecorder(env, runId, REVIEW_STEP_KEY).complete(
-    "The review window closed before a decision was made, so this run was never priced.",
-    { variant: "expired" }
-  )
 
   console.log(
     JSON.stringify({ event: "review_expired", runId, step: REVIEW_STEP_KEY })

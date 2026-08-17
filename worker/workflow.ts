@@ -2,19 +2,21 @@ import { WorkflowEntrypoint } from "cloudflare:workers"
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers"
 
 import { buildEstimate } from "./build-estimate"
-import { matchProducts } from "./match-products"
+import { applyReviewProductDecision, matchProducts } from "./match-products"
 import { readDocuments } from "./read-documents"
-import { resolveCustomer } from "./resolve-customer"
+import { applyReviewCustomer, resolveCustomer } from "./resolve-customer"
 import { retrieveCandidates } from "./retrieve-candidates"
+import type { ReviewOutcome } from "./review"
 import {
   expireReview,
+  loadReviewOutcome,
   openReview,
-  readReviewState,
   REVIEW_EVENT_TYPE,
+  REVIEW_STEP_KEY,
 } from "./review"
 import { createRunStepRecorder } from "./run-steps"
 import { RFQ_RECEIVED_STEP_KEY } from "./runs"
-import { structureRfq } from "./structure-rfq"
+import { applyReviewLineDecision, structureRfq } from "./structure-rfq"
 
 export type RfqWorkflowParams = {
   runId: string
@@ -67,11 +69,13 @@ export class RfqWorkflow extends WorkflowEntrypoint<Env, RfqWorkflowParams> {
       return now
     })
 
-    // Every failure path is handled inside each step, which records a terminal
-    // error and returns. Nothing is thrown, so the workflow does not retry a
-    // paid provider call and the graph never stays active forever. A step that
-    // did not complete stops the sequence here, so no later step can build on
-    // data that failed validation.
+    // Every failure path in the steps below is handled inside the step, which
+    // records a terminal error and returns. Nothing is thrown, so the workflow
+    // does not retry a paid provider call and the graph never stays active
+    // forever. A step that did not complete stops the sequence here, so no
+    // later step can build on data that failed validation. (The one step that
+    // deliberately throws is `apply review outcome`: it calls no provider, and
+    // a half-applied correction must be retried, not recorded as a success.)
     const documents = await step.do("read documents", async () =>
       readDocuments(this.env, runId)
     )
@@ -147,9 +151,11 @@ export class RfqWorkflow extends WorkflowEntrypoint<Env, RfqWorkflowParams> {
       }
 
       // The event proves nothing on its own; the persisted review does. A
-      // replayed, forged, or racing event therefore cannot move this run.
-      const settled = await step.do("read review decision", async () =>
-        readReviewState(this.env, runId)
+      // replayed, forged, or racing event therefore cannot move this run — and
+      // whatever the persisted review says is applied here, in one durable
+      // step, before anything downstream reads the corrected facts.
+      const settled = await step.do("apply review outcome", async () =>
+        applyReviewOutcome(this.env, runId)
       )
 
       if (settled !== "approved") {
@@ -184,6 +190,91 @@ export class RfqWorkflow extends WorkflowEntrypoint<Env, RfqWorkflowParams> {
       customerResolved,
     }
   }
+}
+
+/**
+ * Applies what the owner decided, then records the review node's ending.
+ *
+ * Review owns the decision; it does not own the facts a decision corrects. So
+ * each correction is handed to the step that owns those facts — identity to
+ * `resolve-customer`, quantities and confirmed fields to `structure-rfq`, the
+ * chosen article and the wording it teaches to `match-products` — and only
+ * then is the node completed. The completion is the "applied" marker: it is
+ * written last, so a run whose review node reads `complete` has every
+ * correction in place behind it.
+ *
+ * Order matters once: identity first, because the alias a product correction
+ * teaches is scoped to the customer this run resolved to.
+ *
+ * Idempotent, and deliberately not defensive. Every apply is an UPSERT or an
+ * UPDATE to the same values, so a retried step converges; anything genuinely
+ * missing throws, and a durable step that throws is retried rather than
+ * recorded as an applied outcome.
+ */
+async function applyReviewOutcome(
+  env: Env,
+  runId: string
+): Promise<ReviewOutcome["state"] | "pending"> {
+  const outcome = await loadReviewOutcome(env, runId)
+
+  // Woken with nothing persisted: the decision is still the owner's to make,
+  // and this instance has no outcome to apply. The wait has already ended, so
+  // the run stops here exactly as an undecided one does.
+  if (!outcome) return "pending"
+
+  const recorder = createRunStepRecorder(env, runId, REVIEW_STEP_KEY)
+
+  if (outcome.state === "rejected") {
+    await recorder.complete(
+      "Owner rejected this review, so the run stops here. Nothing was priced or delivered.",
+      { variant: "rejected" }
+    )
+    return "rejected"
+  }
+
+  if (outcome.state === "expired") {
+    await recorder.complete(
+      "The review window closed before a decision was made, so this run was never priced.",
+      { variant: "expired" }
+    )
+    return "expired"
+  }
+
+  for (const decision of outcome.decisions) {
+    if (decision.kind === "customer") {
+      await applyReviewCustomer(env, runId, { customerId: decision.customerId })
+    }
+  }
+
+  for (const decision of outcome.decisions) {
+    if (decision.kind === "quantity" || decision.kind === "field") {
+      await applyReviewLineDecision(env, runId, decision)
+    }
+  }
+
+  for (const decision of outcome.decisions) {
+    if (decision.kind === "product") {
+      await applyReviewProductDecision(env, runId, decision)
+    }
+  }
+
+  const count = outcome.decisions.length
+
+  await recorder.complete(
+    `Owner confirmed ${count} ${count === 1 ? "decision" : "decisions"}; the run continues to pricing.`,
+    { variant: "approved" }
+  )
+
+  console.log(
+    JSON.stringify({
+      event: "review_outcome_applied",
+      runId,
+      step: REVIEW_STEP_KEY,
+      decisions: count,
+    })
+  )
+
+  return "approved"
 }
 
 function failure(

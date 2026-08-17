@@ -225,15 +225,58 @@ async function runIdOf(viewId: string): Promise<string> {
   return row!.id
 }
 
-function environmentThatFailsBatches(): Env {
+/**
+ * An environment whose review window closes in the instant between reading the
+ * row and running the claim, so the claim's own deadline check is the only
+ * thing standing between a late decision and a settled review.
+ */
+function environmentThatExpiresBeforeTheClaim(runId: string): Env {
+  let intercepted = false
+
+  const expireNow = async (): Promise<void> => {
+    if (intercepted) return
+    intercepted = true
+
+    await env.DB.prepare(
+      `UPDATE run_reviews SET expires_at = ? WHERE run_id = ?`
+    )
+      .bind(new Date(Date.now() - 1_000).toISOString(), runId)
+      .run()
+  }
+
+  const watch = (statement: D1PreparedStatement): D1PreparedStatement =>
+    new Proxy(statement, {
+      get(target, property, receiver) {
+        if (property === "bind") {
+          return (...values: unknown[]) => watch(target.bind(...values))
+        }
+
+        if (property === "run") {
+          return async () => {
+            await expireNow()
+            return target.run()
+          }
+        }
+
+        const value = Reflect.get(target, property, receiver) as unknown
+        return typeof value === "function"
+          ? (value as (...args: unknown[]) => unknown).bind(target)
+          : value
+      },
+    })
+
   const database: D1Database = {
-    prepare: (query) => env.DB.prepare(query),
+    prepare: (query) => {
+      const statement = env.DB.prepare(query)
+
+      return query.includes("UPDATE run_reviews") &&
+        query.includes("state = 'pending'")
+        ? watch(statement)
+        : statement
+    },
     batch: <T = unknown>(
       statements: D1PreparedStatement[]
-    ): Promise<D1Result<T>[]> => {
-      void statements
-      return Promise.reject(new Error("Forced approval-effects failure"))
-    },
+    ): Promise<D1Result<T>[]> => env.DB.batch<T>(statements),
     exec: (query) => env.DB.exec(query),
     withSession: (constraintOrBookmark) =>
       env.DB.withSession(constraintOrBookmark),
@@ -243,31 +286,15 @@ function environmentThatFailsBatches(): Env {
   return { ...env, DB: database }
 }
 
-function environmentThatExpiresBeforeBatch(runId: string): Env {
-  let intercepted = false
-  const database: D1Database = {
-    prepare: (query) => env.DB.prepare(query),
-    batch: async <T = unknown>(
-      statements: D1PreparedStatement[]
-    ): Promise<D1Result<T>[]> => {
-      if (!intercepted) {
-        intercepted = true
-        await env.DB.prepare(
-          `UPDATE run_reviews SET expires_at = ? WHERE run_id = ?`
-        )
-          .bind(new Date(Date.now() - 1_000).toISOString(), runId)
-          .run()
-      }
-
-      return env.DB.batch<T>(statements)
-    },
-    exec: (query) => env.DB.exec(query),
-    withSession: (constraintOrBookmark) =>
-      env.DB.withSession(constraintOrBookmark),
-    dump: () => env.DB.dump(),
-  }
-
-  return { ...env, DB: database }
+/** The run as the workflow left it once the review stopped being pending. */
+function settledRun(viewId: string, state: string, what: string) {
+  return waitFor(
+    () => readRun(viewId),
+    (value) =>
+      value.workflowState === state || value.workflowState === "failed",
+    what,
+    400
+  )
 }
 
 /* -------------------------------------------------------------------------- */
@@ -507,6 +534,100 @@ describe("approving a review", () => {
     )
 
     expect(delivered.status).toBe(200)
+  })
+
+  it("applies every correction through the step that owns it, then completes the node", async () => {
+    const { run, ownerCapability, review } = await customPausedRun(
+      "trigger-invalid-quantity"
+    )
+    const runId = await runIdOf(run.viewId)
+    const quantity = review.items.find((item) => item.kind === "quantity")!
+
+    const decisions = review.items.map((item) =>
+      item.kind === "customer"
+        ? { itemId: item.id, action: "customer", customerId: "CUST-1001" }
+        : item.kind === "quantity"
+          ? { itemId: item.id, action: "quantity", quantity: 7 }
+          : item.proposal.sku
+            ? { itemId: item.id, action: "accept" }
+            : {
+                itemId: item.id,
+                action: "alternative",
+                sku: item.alternatives[0].value,
+              }
+    )
+
+    expect((await decide(run.viewId, ownerCapability, decisions)).status).toBe(
+      200
+    )
+    expect((await settle(run.viewId, ownerCapability, "approve")).status).toBe(
+      200
+    )
+
+    const settled = await settledRun(
+      run.viewId,
+      "estimate_built",
+      "a priced custom run"
+    )
+
+    // The node's completion is the "applied" marker: it is written after every
+    // correction, so a complete node means the facts below are already in.
+    const node = settled.steps.find((step) => step.key === "review-required")!
+
+    expect(node.status).toBe("complete")
+    expect(node.summary).toBe(
+      `Owner confirmed ${review.items.length} decisions; the run continues to pricing.`
+    )
+    expect(settled.workflowState).toBe("estimate_built")
+
+    const applied = await env.DB.prepare(
+      `SELECT (SELECT customer_id FROM run_customer_resolution
+                WHERE run_id = ?1) AS customer_id,
+              (SELECT state FROM run_customer_resolution
+                WHERE run_id = ?1) AS customer_state,
+              (SELECT quantity FROM run_rfq_line_items
+                WHERE run_id = ?1 AND position = ?2) AS quantity,
+              (SELECT validation_state FROM run_rfq_line_items
+                WHERE run_id = ?1 AND position = ?2) AS validation_state`
+    )
+      .bind(runId, quantity.position)
+      .first<{
+        customer_id: string
+        customer_state: string
+        quantity: number
+        validation_state: string
+      }>()
+
+    expect(applied).toEqual({
+      customer_id: "CUST-1001",
+      customer_state: "resolved",
+      quantity: 7,
+      validation_state: "accepted",
+    })
+
+    const matches = await env.DB.prepare(
+      `SELECT state, method FROM run_line_matches
+        WHERE run_id = ? AND position IN (
+          SELECT position FROM run_review_items
+           WHERE run_id = ? AND kind = 'product'
+        )`
+    )
+      .bind(runId, runId)
+      .all<{ state: string; method: string }>()
+
+    expect(matches.results.length).toBeGreaterThan(0)
+    for (const match of matches.results) {
+      expect(match).toEqual({ state: "accepted", method: "owner_review" })
+    }
+
+    // And the corrected quantity is what pricing read.
+    const quote = await (
+      await exports.default.fetch(`${base}/api/runs/${run.viewId}/quote`)
+    ).json<{ lines: { position: number; quantity: number }[] }>()
+
+    expect(
+      quote.lines.find((line) => line.position === quantity.position)!.quantity
+    ).toBe(7)
   })
 
   it("prices a product the owner found by searching the whole catalogue", async () => {
@@ -807,64 +928,6 @@ describe("repeated, premature, and rejected decisions", () => {
     expect((await readRun(run.viewId)).workflowState).toBe("estimate_built")
   })
 
-  it("keeps approval retryable when applying its effects fails", async () => {
-    const { run, ownerCapability, review } = await pausedRun()
-    const runId = await runIdOf(run.viewId)
-
-    await decide(run.viewId, ownerCapability, straightforwardDecisions(review))
-
-    await expect(
-      settleReview(environmentThatFailsBatches(), runId, "approve")
-    ).rejects.toThrow("Forced approval-effects failure")
-
-    expect((await readReview(run.viewId)).state).toBe("pending")
-    expect((await readRun(run.viewId)).workflowState).toBe("awaiting_review")
-
-    const retried = await settle(run.viewId, ownerCapability, "approve")
-    expect(retried.status).toBe(200)
-
-    const repaired = await readRun(run.viewId)
-    expect(["review_approved", "estimate_built"]).toContain(
-      repaired.workflowState
-    )
-    expect(
-      repaired.steps.find((step) => step.key === "review-required")!.status
-    ).toBe("complete")
-    expect((await readReview(run.viewId)).state).toBe("approved")
-  })
-
-  it("repairs an older approved row whose effects never completed", async () => {
-    const { run, ownerCapability, review } = await pausedRun()
-    const runId = await runIdOf(run.viewId)
-
-    await decide(run.viewId, ownerCapability, straightforwardDecisions(review))
-    await env.DB.prepare(
-      `UPDATE run_reviews
-          SET state = 'approved', decided_at = ?, summary = ?
-        WHERE run_id = ?`
-    )
-      .bind(
-        new Date().toISOString(),
-        "Approval committed by an older deployment.",
-        runId
-      )
-      .run()
-
-    const repaired = await settle(run.viewId, ownerCapability, "approve")
-    expect(repaired.status).toBe(200)
-
-    const repairedRun = await readRun(run.viewId)
-    expect(["review_approved", "estimate_built"]).toContain(
-      repairedRun.workflowState
-    )
-    expect(
-      repairedRun.steps.find((step) => step.key === "review-required")!.status
-    ).toBe("complete")
-
-    const repeated = await settle(run.viewId, ownerCapability, "approve")
-    expect(repeated.status).toBe(409)
-  })
-
   it("stops the run where it stands when the owner rejects it", async () => {
     const { run, ownerCapability, review } = await pausedRun()
 
@@ -885,7 +948,9 @@ describe("repeated, premature, and rejected decisions", () => {
 
     const node = settled.steps.find((step) => step.key === "review-required")!
     expect(node.status).toBe("error")
-    expect(node.summary).toContain("rejected")
+    expect(node.summary).toBe(
+      "Owner rejected this review, so the run stops here. Nothing was priced or delivered."
+    )
 
     // The graph simply stops: nothing below it ran.
     expect(
@@ -945,14 +1010,20 @@ describe("an expired review", () => {
     await decide(run.viewId, ownerCapability, straightforwardDecisions(review))
 
     const outcome = await settleReview(
-      environmentThatExpiresBeforeBatch(runId),
+      environmentThatExpiresBeforeTheClaim(runId),
       runId,
       "approve"
     )
 
     expect(outcome).toMatchObject({ state: "closed" })
     expect((await readReview(run.viewId)).state).toBe("expired")
-    expect((await readRun(run.viewId)).workflowState).toBe("review_expired")
+
+    // The review row is terminal at once; the run reaches its own ending when
+    // the hibernating instance next looks, which is what records the node.
+    expect(
+      (await settledRun(run.viewId, "review_expired", "an expired run"))
+        .workflowState
+    ).toBe("review_expired")
   })
 
   it("refuses a decision made after the window closed", async () => {
@@ -981,11 +1052,18 @@ describe("an expired review", () => {
     expect(approved.status).toBe(409)
     expect((await approved.json<{ status: string }>()).status).toBe("expired")
 
-    const settled = await readRun(run.viewId)
+    const settled = await settledRun(
+      run.viewId,
+      "review_expired",
+      "an expired run"
+    )
+
     expect(settled.workflowState).toBe("review_expired")
     expect(
       settled.steps.find((step) => step.key === "review-required")!.summary
-    ).toContain("window closed")
+    ).toBe(
+      "The review window closed before a decision was made, so this run was never priced."
+    )
     expect(
       settled.steps.find((step) => step.key === "build-estimate")!.status
     ).toBe("waiting")
@@ -1077,6 +1155,10 @@ describe("what an approved correction teaches", () => {
     expect((await settle(run.viewId, ownerCapability, "approve")).status).toBe(
       200
     )
+
+    // The corrections, and the wording they teach, land when the workflow
+    // applies the outcome — not while the decision's HTTP response is written.
+    await settledRun(run.viewId, "estimate_built", "a priced run")
 
     const learned = await env.DB.prepare(
       `SELECT sku FROM workspace_product_aliases
@@ -1247,6 +1329,8 @@ describe("the settled review, read as a value", () => {
       200
     )
 
+    await settledRun(run.viewId, "estimate_built", "a priced custom run")
+
     const final = await readReview(run.viewId)
     const aliasExpiresAt = await retentionOf(runId)
     const outcome = (await loadReviewOutcome(env, runId))!
@@ -1333,6 +1417,8 @@ describe("the settled review, read as a value", () => {
     expect((await settle(run.viewId, ownerCapability, "approve")).status).toBe(
       200
     )
+
+    await settledRun(run.viewId, "estimate_built", "a priced run")
 
     const outcome = (await loadReviewOutcome(env, runId))!
     const product = outcome.decisions.find(
