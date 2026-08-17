@@ -16,10 +16,17 @@ import type { CanonicalQuote } from "./quote"
 
 export const ADAPTER_IDS = ["generic-erp-webhook"] as const
 
-export type AdapterId = (typeof ADAPTER_IDS)[number]
+/**
+ * Which destinations this build simulates. A delivery row written by an earlier
+ * build can name one that is gone, so a stored identifier is parsed rather than
+ * assumed — see `storedAdapterDescription` below.
+ */
+export const ADAPTER_ID_SCHEMA = z.enum(ADAPTER_IDS)
 
-export function isAdapterId(value: unknown): value is AdapterId {
-  return typeof value === "string" && ADAPTER_IDS.includes(value as AdapterId)
+export type AdapterId = z.infer<typeof ADAPTER_ID_SCHEMA>
+
+export function isAdapterId(value: string): value is AdapterId {
+  return ADAPTER_ID_SCHEMA.safeParse(value).success
 }
 
 /** The sole destination used for every new delivery. */
@@ -38,7 +45,7 @@ export type AdapterDescription = {
   notice: string
 }
 
-export const ADAPTERS: Record<AdapterId, AdapterDescription> = {
+export const ADAPTERS = {
   "generic-erp-webhook": {
     id: "generic-erp-webhook",
     name: "Generic ERP Webhook",
@@ -48,7 +55,7 @@ export const ADAPTERS: Record<AdapterId, AdapterDescription> = {
     simulated: true,
     notice: SIMULATION_NOTICE,
   },
-}
+} satisfies Record<AdapterId, AdapterDescription>
 
 /**
  * Exactly what the receiving system would be sent: the Generic ERP Webhook's

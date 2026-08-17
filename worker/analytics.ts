@@ -21,11 +21,14 @@
  * honest cost of not shipping a tracker.
  */
 
+import { z } from "zod"
+
 import { ADAPTER_IDS } from "./adapters"
 import { readConfig } from "./env"
 import {
   selectAnalyticsProvider,
   type AnalyticsEvent,
+  type AnalyticsProvider,
   type AnalyticsValue,
 } from "./providers/analytics"
 import { visitorHash } from "./rate-limit"
@@ -47,26 +50,66 @@ export type FunnelEvent = (typeof FUNNEL_EVENTS)[number]
 const PAGEVIEW_EVENT = "$pageview"
 
 /**
- * The complete property vocabulary, and the only values each key may take.
- * Every one of these is a small closed set: no free text, no identifier, no
- * number that came out of a document.
+ * Why a submission was refused. Only the four codes that name something the
+ * visitor submitted are reported; a transport-level refusal is still counted as
+ * a rejection, but goes out without a reason, exactly as it always has.
  */
-const PROPERTY_BUCKETS: Record<string, readonly string[]> = {
-  source_kind: ["curated", "custom"],
-  scenario_id: [...SCENARIO_IDS, "none"],
-  adapter: [...ADAPTER_IDS],
-  decision: ["approve", "reject"],
-  reason: [
+const REASON_BUCKET = z
+  .enum([
     "unknown_scenario",
     "upload_too_large",
     "unreadable_form",
     "invalid_submission",
-  ],
-  review_required: ["true", "false"],
-  $pathname: ["/", "/runs/[view]", "/[other]"],
-}
+  ])
+  .or(z.string().transform(() => undefined))
 
-export type FunnelProperties = Record<string, string | boolean | undefined>
+/** A flag, sent as the word: the buckets are strings, so a boolean becomes one. */
+const FLAG_BUCKET = z
+  .union([z.boolean(), z.enum(["true", "false"])])
+  .transform((flag): "true" | "false" =>
+    flag === true || flag === "true" ? "true" : "false"
+  )
+
+/**
+ * The complete property vocabulary, and the only values each key may take.
+ * Every one of these is a small closed set: no free text, no identifier, no
+ * number that came out of a document.
+ *
+ * It is a schema rather than a list of allowed words because it is the thing
+ * that decides what leaves: a key that is not declared here is stripped, and a
+ * declared key holding an undeclared value is caught back to nothing. A future
+ * caller passing a richer object therefore sends less, never more.
+ */
+const FUNNEL_PROPERTIES_SCHEMA = z
+  .object({
+    source_kind: z.enum(["curated", "custom"]).optional().catch(undefined),
+    scenario_id: z
+      .enum([...SCENARIO_IDS, "none"])
+      .optional()
+      .catch(undefined),
+    adapter: z.enum(ADAPTER_IDS).optional().catch(undefined),
+    decision: z.enum(["approve", "reject"]).optional().catch(undefined),
+    reason: REASON_BUCKET.optional().catch(undefined),
+    review_required: FLAG_BUCKET.optional().catch(undefined),
+    $pathname: z
+      .enum(["/", "/runs/[view]", "/[other]"])
+      .optional()
+      .catch(undefined),
+  })
+  // A key that was caught to nothing is not a measurement; it leaves as an
+  // absent property rather than as an explicit null on the wire.
+  .transform((properties) => {
+    const declared: Record<string, AnalyticsValue> = {}
+
+    for (const [key, value] of Object.entries(properties)) {
+      if (value !== undefined) declared[key] = value
+    }
+
+    return declared
+  })
+
+/** What a caller may hand `captureFunnelEvent`, before any of it is checked. */
+export type FunnelProperties = z.input<typeof FUNNEL_PROPERTIES_SCHEMA>
 
 /**
  * Records one funnel event. Failures are swallowed on purpose: a measurement
@@ -157,42 +200,35 @@ export function logRoute(pathname: string): string {
 function sanitizeProperties(
   properties: FunnelProperties
 ): Record<string, AnalyticsValue> {
-  const clean: Record<string, AnalyticsValue> = {}
+  const parsed = FUNNEL_PROPERTIES_SCHEMA.safeParse(properties)
 
-  for (const [key, value] of Object.entries(properties)) {
-    if (value === undefined) continue
+  return parsed.success ? parsed.data : {}
+}
 
-    // Own keys only: a property named after something on `Object.prototype`
-    // would otherwise resolve to an inherited function rather than a bucket.
-    if (!Object.hasOwn(PROPERTY_BUCKETS, key)) continue
-
-    const allowed = PROPERTY_BUCKETS[key]
-
-    const candidate = typeof value === "boolean" ? String(value) : value
-    if (!allowed.includes(candidate)) continue
-
-    clean[key] = candidate
+/** Capture never fails a request: a measurement gap is a log line. */
+async function captureQuietly(
+  provider: AnalyticsProvider,
+  event: AnalyticsEvent
+): Promise<void> {
+  try {
+    await provider.capture(event)
+  } catch (error) {
+    console.warn(
+      JSON.stringify({
+        event: "analytics_capture_failed",
+        analyticsEvent: event.event,
+        provider: provider.name,
+        error: error instanceof Error ? error.name : "unknown",
+      })
+    )
   }
-
-  return clean
 }
 
 function send(env: Env, ctx: ExecutionContext, event: AnalyticsEvent): void {
   try {
     const provider = selectAnalyticsProvider(readConfig(env))
 
-    ctx.waitUntil(
-      provider.capture(event).catch((error: unknown) => {
-        console.warn(
-          JSON.stringify({
-            event: "analytics_capture_failed",
-            analyticsEvent: event.event,
-            provider: provider.name,
-            error: error instanceof Error ? error.name : "unknown",
-          })
-        )
-      })
-    )
+    ctx.waitUntil(captureQuietly(provider, event))
   } catch (error) {
     // Selecting a provider can fail on a misconfiguration. Measurement stops;
     // the request it was measuring does not.

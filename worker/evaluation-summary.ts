@@ -60,18 +60,28 @@ export type ReferenceEvaluationSummary = {
   totals: EvaluationTotals
 }
 
-const SCENARIO_NAMES: Record<string, string> = {
-  "routine-replenishment": "Routine replenishment",
-  "messy-forwarded-request": "Messy forwarded request",
-  "ambiguous-replacement-parts": "Ambiguous replacement parts",
-}
+/**
+ * Reviewer-facing names for the scenarios the generated report counts. It is a
+ * lookup rather than a total record because the identifiers arrive from that
+ * generated file: one this build does not recognise falls back to itself.
+ */
+const SCENARIO_NAMES = new Map([
+  ["routine-replenishment", "Routine replenishment"],
+  ["messy-forwarded-request", "Messy forwarded request"],
+  ["ambiguous-replacement-parts", "Ambiguous replacement parts"],
+])
 
-/** How the drawer describes the measurement. Facts only, no marketing. */
-export function evaluationSection(summary: ReferenceEvaluationSummary): {
+/** The scoreboard as System details renders it: a state and its sentences. */
+export type EvaluationSection = {
   state: "planned" | "measured"
   summary: string
   rows: string[]
-} {
+}
+
+/** How the drawer describes the measurement. Facts only, no marketing. */
+export function evaluationSection(
+  summary: ReferenceEvaluationSummary
+): EvaluationSection {
   const { totals } = summary
 
   if (totals.scenarios === 0) {
@@ -94,7 +104,7 @@ export function evaluationSection(summary: ReferenceEvaluationSummary): {
       `Pricing and simulated export completed for ${totals.priced}/${totals.scenarios} and ${totals.delivered}/${totals.scenarios} workflows, delivery following pricing automatically once any review was decided.`,
       ...summary.scenarios.map(
         (scenario) =>
-          `${SCENARIO_NAMES[scenario.scenarioId] ?? scenario.scenarioId}: ${scenario.selectionCorrect}/${scenario.lines} lines correct, ${scenario.reviewLinesObserved} paused for confirmation.`
+          `${SCENARIO_NAMES.get(scenario.scenarioId) ?? scenario.scenarioId}: ${scenario.selectionCorrect}/${scenario.lines} lines correct, ${scenario.reviewLinesObserved} paused for confirmation.`
       ),
       "Live provider evaluation runs the same scoring through pnpm eval:live and is never part of continuous integration.",
     ],

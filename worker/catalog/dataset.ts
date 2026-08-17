@@ -112,11 +112,11 @@ export type Catalog = {
   orders: Order[]
 }
 
-export const TIER_DISCOUNT_BP: Record<CustomerTier, number> = {
+export const TIER_DISCOUNT_BP = {
   standard: 0,
   preferred: 300,
   key: 650,
-}
+} satisfies Record<CustomerTier, number>
 
 const PRODUCT_TARGET = 250
 const CUSTOMER_TARGET = 25
@@ -1374,12 +1374,18 @@ function generatePriceOverrides(
   return overrides
 }
 
+/** What one line was charged, and which of the four rules decided it. */
+type LinePrice = {
+  unitPriceCents: number
+  appliedRule: OrderLine["appliedRule"]
+}
+
 function priceFor(
   product: Product,
   customer: Customer,
   quantity: number,
   overrides: PriceOverride[]
-): { unitPriceCents: number; appliedRule: OrderLine["appliedRule"] } {
+): LinePrice {
   const override = overrides.find(
     (entry) =>
       entry.active &&

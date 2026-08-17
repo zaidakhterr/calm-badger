@@ -104,7 +104,12 @@ export async function runRetentionSweep(
       purged += 1
     } catch (error) {
       failed += 1
-      await recordPurgeFailure(env, run.id, error)
+      // The name of the failure, never its message: see the recorder below.
+      await recordPurgeFailure(
+        env,
+        run.id,
+        error instanceof Error ? error.name : "unknown"
+      )
     }
   }
 
@@ -218,10 +223,8 @@ async function purgeRun(
 async function recordPurgeFailure(
   env: Env,
   runId: string,
-  error: unknown
+  name: string
 ): Promise<void> {
-  const name = error instanceof Error ? error.name : "unknown"
-
   console.error(
     JSON.stringify({ event: "run_expiry_failed", runId, error: name })
   )

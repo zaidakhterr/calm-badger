@@ -126,7 +126,12 @@ type StepRow = {
   step_key: string
   title: string
   position: number
-  status: string
+  /**
+   * Written by the Run-step recorder and by the seeding batch above, both of
+   * which pick from `RunStepStatus`, so the row names the union the column
+   * actually holds rather than widening it back to text.
+   */
+  status: RunStepStatus
   summary: string
   started_at: string | null
   completed_at: string | null
@@ -297,7 +302,7 @@ export async function loadRun(
       key: step.step_key,
       title: step.title,
       position: step.position,
-      status: step.status as RunStepStatus,
+      status: step.status,
       summary: publicStepSummary(step),
       startedAt: step.started_at,
       completedAt: step.completed_at,
