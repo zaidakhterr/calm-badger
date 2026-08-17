@@ -24,8 +24,12 @@ import {
   type Candidate,
   type LineRetrieval,
 } from "./catalog/retrieval"
+import { createRunStepRecorder, type RunStepRecorder } from "./run-steps"
 
 export const RETRIEVE_CANDIDATES_STEP_KEY = "retrieve-candidates"
+
+/** The evidence this step attaches to itself. */
+const EVIDENCE_KIND = "candidates"
 
 export type RetrieveCandidatesOutcome =
   | {
@@ -49,8 +53,10 @@ export async function retrieveCandidates(
   env: Env,
   runId: string
 ): Promise<RetrieveCandidatesOutcome> {
+  const step = createRunStepRecorder(env, runId, RETRIEVE_CANDIDATES_STEP_KEY)
+
   try {
-    return await retrieve(env, runId)
+    return await retrieve(env, runId, step)
   } catch (error) {
     const message = "Catalogue candidates could not be retrieved."
 
@@ -65,7 +71,7 @@ export async function retrieveCandidates(
     )
 
     try {
-      await failStep(env, runId, message)
+      await step.fail(message)
     } catch {
       // Nowhere left to record the failure; returning still stops the workflow.
     }
@@ -76,18 +82,21 @@ export async function retrieveCandidates(
 
 async function retrieve(
   env: Env,
-  runId: string
+  runId: string,
+  step: RunStepRecorder
 ): Promise<RetrieveCandidatesOutcome> {
   const lines = await loadLines(env, runId)
 
   if (lines.length === 0) {
     const message = "No requested lines were available to match."
-    await failStep(env, runId, message)
+    await step.fail(message)
     return { state: "error", message }
   }
 
   const startedAt = Date.now()
-  await beginStep(env, runId, lines.length)
+  await step.begin(
+    `Searching the catalogue for ${lines.length} requested ${lines.length === 1 ? "line" : "lines"}…`
+  )
   await ensureCatalogIndexes(env)
 
   const customerId = await resolvedCustomerId(env, runId)
@@ -119,7 +128,7 @@ async function retrieve(
   )
 
   await persistCandidates(env, runId, retrievals)
-  await persistEvidence(env, runId, {
+  await step.attachEvidence(EVIDENCE_KIND, {
     state: "complete",
     method: "exact-evidence-then-d1-full-text",
     message: null,
@@ -136,12 +145,12 @@ async function retrieve(
     },
   })
 
-  await completeStep(env, runId, {
-    lineCount: lines.length,
-    exactCount,
-    candidateCount,
-    elapsedMs,
-  })
+  await step.complete(
+    `Retrieved ${candidateCount} ${candidateCount === 1 ? "candidate" : "candidates"} ` +
+      `for ${lines.length} ${lines.length === 1 ? "line" : "lines"}: ` +
+      `${exactCount} settled by exact evidence, ` +
+      `${lines.length - exactCount} shortlisted for reranking.`
+  )
 
   console.log(
     JSON.stringify({
@@ -302,108 +311,4 @@ async function persistCandidates(
   for (let index = 0; index < statements.length; index += 200) {
     await env.DB.batch(statements.slice(index, index + 200))
   }
-}
-
-async function beginStep(
-  env: Env,
-  runId: string,
-  lineCount: number
-): Promise<void> {
-  const now = new Date().toISOString()
-
-  await env.DB.batch([
-    env.DB.prepare(
-      `UPDATE run_steps
-          SET status = 'active',
-              summary = ?,
-              started_at = COALESCE(started_at, ?),
-              updated_at = ?
-        WHERE run_id = ? AND step_key = ?`
-    ).bind(
-      `Searching the catalogue for ${lineCount} requested ${lineCount === 1 ? "line" : "lines"}…`,
-      now,
-      now,
-      runId,
-      RETRIEVE_CANDIDATES_STEP_KEY
-    ),
-    env.DB.prepare(
-      `UPDATE runs SET workflow_state = 'retrieving_candidates', updated_at = ?
-        WHERE id = ?`
-    ).bind(now, runId),
-  ])
-}
-
-async function completeStep(
-  env: Env,
-  runId: string,
-  totals: {
-    lineCount: number
-    exactCount: number
-    candidateCount: number
-    elapsedMs: number
-  }
-): Promise<void> {
-  const now = new Date().toISOString()
-  const retrieved = totals.lineCount - totals.exactCount
-  const summary =
-    `Retrieved ${totals.candidateCount} ${totals.candidateCount === 1 ? "candidate" : "candidates"} ` +
-    `for ${totals.lineCount} ${totals.lineCount === 1 ? "line" : "lines"}: ` +
-    `${totals.exactCount} settled by exact evidence, ` +
-    `${retrieved} shortlisted for reranking.`
-
-  await env.DB.batch([
-    env.DB.prepare(
-      `UPDATE run_steps
-          SET status = 'complete', summary = ?, completed_at = ?, updated_at = ?
-        WHERE run_id = ? AND step_key = ?`
-    ).bind(summary, now, now, runId, RETRIEVE_CANDIDATES_STEP_KEY),
-    env.DB.prepare(
-      `UPDATE runs SET workflow_state = 'candidates_retrieved', updated_at = ?
-        WHERE id = ?`
-    ).bind(now, runId),
-  ])
-}
-
-async function failStep(
-  env: Env,
-  runId: string,
-  message: string
-): Promise<void> {
-  const now = new Date().toISOString()
-
-  await env.DB.batch([
-    env.DB.prepare(
-      `UPDATE run_steps
-          SET status = 'error', summary = ?, completed_at = ?, updated_at = ?
-        WHERE run_id = ? AND step_key = ?`
-    ).bind(message, now, now, runId, RETRIEVE_CANDIDATES_STEP_KEY),
-    env.DB.prepare(
-      `UPDATE runs SET status = 'error', workflow_state = 'failed', updated_at = ?
-        WHERE id = ?`
-    ).bind(now, runId),
-  ])
-}
-
-async function persistEvidence(
-  env: Env,
-  runId: string,
-  payload: unknown
-): Promise<void> {
-  const now = new Date().toISOString()
-
-  await env.DB.prepare(
-    `INSERT INTO run_step_evidence (id, run_id, step_key, kind, payload, created_at)
-     VALUES (?, ?, ?, 'candidates', ?, ?)
-     ON CONFLICT (run_id, step_key, kind) DO UPDATE SET
-       payload = excluded.payload,
-       created_at = excluded.created_at`
-  )
-    .bind(
-      crypto.randomUUID(),
-      runId,
-      RETRIEVE_CANDIDATES_STEP_KEY,
-      JSON.stringify(payload),
-      now
-    )
-    .run()
 }
