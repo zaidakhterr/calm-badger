@@ -21,6 +21,7 @@ import {
   type OcrDocument,
   type OcrPage,
 } from "./providers/ocr"
+import { createRunStepRecorder, type RunStepRecorder } from "./run-steps"
 import {
   loadSources,
   MAX_OCR_PAGES_PER_RUN,
@@ -28,6 +29,9 @@ import {
 } from "./sources"
 
 export const READ_DOCUMENTS_STEP_KEY = "read-documents"
+
+/** The one kind of evidence this step attaches. */
+const DOCUMENTS_EVIDENCE_KIND = "documents"
 
 type SourceEvidence = {
   sourceId: string
@@ -65,8 +69,10 @@ export async function readDocuments(
   env: Env,
   runId: string
 ): Promise<ReadDocumentsOutcome> {
+  const recorder = createRunStepRecorder(env, runId, READ_DOCUMENTS_STEP_KEY)
+
   try {
-    return await readAllSources(env, runId)
+    return await readAllSources(env, runId, recorder)
   } catch (error) {
     const message = "The documents could not be read."
 
@@ -81,7 +87,7 @@ export async function readDocuments(
     )
 
     try {
-      await failStep(env, runId, message)
+      await recorder.fail(message)
     } catch {
       // The database itself is unreachable, so there is nowhere left to record
       // the failure. Returning still stops the workflow rather than retrying.
@@ -93,17 +99,20 @@ export async function readDocuments(
 
 async function readAllSources(
   env: Env,
-  runId: string
+  runId: string,
+  recorder: RunStepRecorder
 ): Promise<ReadDocumentsOutcome> {
   const sources = await loadSources(env, runId)
 
   if (sources.length === 0) {
-    await failStep(env, runId, "No source documents were stored for this run.")
+    await recorder.fail("No source documents were stored for this run.")
     return { state: "error", message: "No source documents were stored" }
   }
 
   const startedAt = Date.now()
-  await beginStep(env, runId, sources.length)
+  await recorder.begin(
+    `Reading ${sources.length} ${sources.length === 1 ? "source" : "sources"}…`
+  )
 
   const provider = selectOcrProvider(env)
   const evidence: SourceEvidence[] = []
@@ -150,7 +159,7 @@ async function readAllSources(
         })
       )
 
-      await persistEvidence(env, runId, {
+      await recorder.attachEvidence(DOCUMENTS_EVIDENCE_KIND, {
         provider: provider.name,
         model: provider.model,
         state: "error",
@@ -159,7 +168,7 @@ async function readAllSources(
         totals: totalsOf(evidence, Date.now() - startedAt),
       })
 
-      await failStep(env, runId, message)
+      await recorder.fail(message)
 
       return { state: "error", message }
     }
@@ -168,7 +177,7 @@ async function readAllSources(
   const elapsedMs = Date.now() - startedAt
 
   await persistPages(env, runId, pageRows)
-  await persistEvidence(env, runId, {
+  await recorder.attachEvidence(DOCUMENTS_EVIDENCE_KIND, {
     provider: provider.name,
     model: provider.model,
     state: "complete",
@@ -177,11 +186,11 @@ async function readAllSources(
     totals: totalsOf(evidence, elapsedMs),
   })
 
-  await completeStep(env, runId, {
-    sourceCount: sources.length,
-    pageCount: pageRows.length,
-    elapsedMs,
-  })
+  await recorder.complete(
+    `Read ${sources.length} ${sources.length === 1 ? "source" : "sources"} ` +
+      `into ${pageRows.length} ${pageRows.length === 1 ? "page" : "pages"} ` +
+      `in ${formatSeconds(elapsedMs)}.`
+  )
 
   console.log(
     JSON.stringify({
@@ -322,79 +331,6 @@ function totalsOf(sources: SourceEvidence[], elapsedMs: number) {
   }
 }
 
-async function beginStep(
-  env: Env,
-  runId: string,
-  sourceCount: number
-): Promise<void> {
-  const now = new Date().toISOString()
-
-  await env.DB.batch([
-    env.DB.prepare(
-      `UPDATE run_steps
-          SET status = 'active',
-              summary = ?,
-              started_at = COALESCE(started_at, ?),
-              updated_at = ?
-        WHERE run_id = ? AND step_key = ?`
-    ).bind(
-      `Reading ${sourceCount} ${sourceCount === 1 ? "source" : "sources"}…`,
-      now,
-      now,
-      runId,
-      READ_DOCUMENTS_STEP_KEY
-    ),
-    env.DB.prepare(
-      `UPDATE runs SET workflow_state = 'reading_documents', updated_at = ?
-        WHERE id = ?`
-    ).bind(now, runId),
-  ])
-}
-
-async function completeStep(
-  env: Env,
-  runId: string,
-  totals: { sourceCount: number; pageCount: number; elapsedMs: number }
-): Promise<void> {
-  const now = new Date().toISOString()
-  const summary =
-    `Read ${totals.sourceCount} ${totals.sourceCount === 1 ? "source" : "sources"} ` +
-    `into ${totals.pageCount} ${totals.pageCount === 1 ? "page" : "pages"} ` +
-    `in ${formatSeconds(totals.elapsedMs)}.`
-
-  await env.DB.batch([
-    env.DB.prepare(
-      `UPDATE run_steps
-          SET status = 'complete', summary = ?, completed_at = ?, updated_at = ?
-        WHERE run_id = ? AND step_key = ?`
-    ).bind(summary, now, now, runId, READ_DOCUMENTS_STEP_KEY),
-    env.DB.prepare(
-      `UPDATE runs SET workflow_state = 'documents_read', updated_at = ?
-        WHERE id = ?`
-    ).bind(now, runId),
-  ])
-}
-
-async function failStep(
-  env: Env,
-  runId: string,
-  message: string
-): Promise<void> {
-  const now = new Date().toISOString()
-
-  await env.DB.batch([
-    env.DB.prepare(
-      `UPDATE run_steps
-          SET status = 'error', summary = ?, completed_at = ?, updated_at = ?
-        WHERE run_id = ? AND step_key = ?`
-    ).bind(message, now, now, runId, READ_DOCUMENTS_STEP_KEY),
-    env.DB.prepare(
-      `UPDATE runs SET status = 'error', workflow_state = 'failed', updated_at = ?
-        WHERE id = ?`
-    ).bind(now, runId),
-  ])
-}
-
 async function persistPages(
   env: Env,
   runId: string,
@@ -428,30 +364,6 @@ async function persistPages(
       )
     )
   )
-}
-
-async function persistEvidence(
-  env: Env,
-  runId: string,
-  payload: unknown
-): Promise<void> {
-  const now = new Date().toISOString()
-
-  await env.DB.prepare(
-    `INSERT INTO run_step_evidence (id, run_id, step_key, kind, payload, created_at)
-     VALUES (?, ?, ?, 'documents', ?, ?)
-     ON CONFLICT (run_id, step_key, kind) DO UPDATE SET
-       payload = excluded.payload,
-       created_at = excluded.created_at`
-  )
-    .bind(
-      crypto.randomUUID(),
-      runId,
-      READ_DOCUMENTS_STEP_KEY,
-      JSON.stringify(payload),
-      now
-    )
-    .run()
 }
 
 function formatSeconds(elapsedMs: number): string {
