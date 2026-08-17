@@ -13,12 +13,17 @@
 import { env, exports } from "cloudflare:workers"
 import { describe, expect, it, vi } from "vitest"
 
+import { z } from "zod"
+
 import { readConfig } from "../worker/env"
 import { loadCustomerEvidence, loadStructureEvidence } from "../worker/evidence"
 import {
   estimateExtractionCostUsd,
+  ExtractionProviderError,
   selectExtractionProvider,
+  type ExtractionRequest,
 } from "../worker/providers/extraction"
+import { createOpenRouterExtractionProvider } from "../worker/providers/openrouter-extraction"
 import { resolveCustomer } from "../worker/resolve-customer"
 import {
   applyBusinessRules,
@@ -681,6 +686,25 @@ describe("validation in isolation", () => {
   })
 })
 
+/** One small extraction call, so the provider tests differ only in the answer. */
+function extractionRequest(): ExtractionRequest {
+  return {
+    runId: "run-id",
+    instruction: "Answer with the probe object.",
+    documents: [
+      {
+        label: "Email body",
+        kind: "email_body",
+        pageNumber: 1,
+        markdown: "Please quote 4 belts",
+      },
+    ],
+    schema: z.object({ ok: z.boolean() }),
+    schemaName: "probe",
+    schemaDescription: "A probe answer, so no run data reaches the stub.",
+  }
+}
+
 describe("selecting the extraction provider", () => {
   it("refuses to build the contract fake in production", () => {
     expect(() =>
@@ -703,6 +727,83 @@ describe("selecting the extraction provider", () => {
     )
 
     expect(provider.name).toBe("contract-fake")
+  })
+
+  it("reads a documented completion, its token counts, and its cost", async () => {
+    const requestFetch: typeof fetch = () =>
+      Promise.resolve(
+        Response.json({
+          id: "gen-1",
+          model: "openrouter/probe",
+          choices: [
+            {
+              index: 0,
+              message: { role: "assistant", content: '{"ok":true}' },
+              finish_reason: "stop",
+            },
+          ],
+          usage: {
+            prompt_tokens: 11,
+            completion_tokens: 7,
+            total_tokens: 18,
+            cost: 0.000123,
+          },
+        })
+      )
+
+    const provider = createOpenRouterExtractionProvider(
+      readConfig(envWith({ OPENROUTER_API_KEY: "test-key" })),
+      requestFetch
+    )
+
+    const result = await provider.extract(extractionRequest())
+
+    expect(result.text).toBe('{"ok":true}')
+    expect(result.usage).toEqual({
+      inputTokens: 11,
+      outputTokens: 7,
+      totalTokens: 18,
+    })
+    expect(result.finishReason).toBe("stop")
+    expect(result.reportedCostUsd).toBe(0.000123)
+  })
+
+  it("fails as a provider error when the response is not a completion", async () => {
+    // Without a parse at the boundary this is an extraction of empty text with
+    // no tokens, which reads downstream exactly like a model that said nothing.
+    const requestFetch: typeof fetch = () =>
+      Promise.resolve(Response.json({ ok: true, result: "queued" }))
+
+    const provider = createOpenRouterExtractionProvider(
+      readConfig(envWith({ OPENROUTER_API_KEY: "test-key" })),
+      requestFetch
+    )
+
+    await expect(provider.extract(extractionRequest())).rejects.toBeInstanceOf(
+      ExtractionProviderError
+    )
+  })
+
+  it("carries the status of a rejected request and nothing else", async () => {
+    const requestFetch: typeof fetch = () =>
+      Promise.resolve(
+        Response.json(
+          { error: { message: "upstream is on fire", code: 500 } },
+          { status: 500 }
+        )
+      )
+
+    const provider = createOpenRouterExtractionProvider(
+      readConfig(envWith({ OPENROUTER_API_KEY: "test-key" })),
+      requestFetch
+    )
+
+    await expect(provider.extract(extractionRequest())).rejects.toThrow(
+      /rejected the request \(500\)/
+    )
+    await expect(provider.extract(extractionRequest())).rejects.not.toThrow(
+      /upstream is on fire/
+    )
   })
 
   it("reports an unknown cost rather than zero when prices are misconfigured", () => {

@@ -11,12 +11,20 @@
  * downstream is genuinely exercised rather than short-circuited.
  * `selectExtractionProvider` refuses to build it when `APP_ENV` is production.
  *
+ * The payload it renders `satisfies RfqExtraction`: the same contract the live
+ * client asks the model to constrain its response to, and the same one the
+ * step validates with. A deliberate violation is still written as a violation —
+ * the `trigger-schema-violation` marker damages the rendered text, not the
+ * payload — so the step's gates decide what a bad response means, as they do
+ * for a real model.
+ *
  * Test hooks: a request whose document text contains one of the `trigger-…`
  * markers below produces the corresponding failure, which is how the provider,
  * repair, schema, and business-validation contracts are exercised.
  */
 
 import type { AppConfig } from "../env"
+import type { RfqExtraction } from "../rfq-extraction"
 
 import {
   ExtractionProviderError,
@@ -116,7 +124,7 @@ export function createContractFakeExtractionProvider(
 function buildPayload(
   documents: ExtractionDocument[],
   corpus: string
-): Record<string, unknown> {
+): RfqExtraction {
   const emailText = documents
     .filter((document) => document.kind === "email_body")
     .map((document) => document.markdown)
@@ -137,13 +145,13 @@ function buildPayload(
     source: readSource(emailText, documents),
     deadline: readDeadline(emailText),
     lineItems: lines,
-  }
+  } satisfies RfqExtraction
 }
 
 function readCustomer(
   emailText: string,
   documents: ExtractionDocument[]
-): Record<string, unknown> {
+): RfqExtraction["customer"] {
   const sender = /^From:\s*(.+?)\s*<([^>]+)>\s*$/im.exec(emailText)
   const bareSender = /^From:\s*([^\s<>@]+@[^\s<>]+)\s*$/im.exec(emailText)
   const company = /^Company:\s*(.+)$/im.exec(emailText)
@@ -182,7 +190,7 @@ function readDeliveryLocation(
 function readSource(
   emailText: string,
   documents: ExtractionDocument[]
-): Record<string, unknown> {
+): RfqExtraction["source"] {
   const subject = /^Subject:\s*(.+)$/im.exec(emailText)
   const received = /^Received:\s*(.+)$/im.exec(emailText)
   const kinds = new Set(documents.map((document) => document.kind))
@@ -210,7 +218,7 @@ function readSource(
   }
 }
 
-function readDeadline(emailText: string): Record<string, unknown> {
+function readDeadline(emailText: string): RfqExtraction["deadline"] {
   const isoDate = /\b(\d{4}-\d{2}-\d{2})\b/.exec(stripHeaders(emailText))
   const relative = /\b((?:next|this) week|by \d{1,2}\s+[A-Za-z]+)\b/i.exec(
     emailText
@@ -390,7 +398,7 @@ function titleCase(value: string): string {
  * reproduce the three shapes the workflow has to survive: valid JSON, JSON that
  * one repair attempt can rescue, and output that nothing can rescue.
  */
-function renderText(payload: Record<string, unknown>, corpus: string): string {
+function renderText(payload: RfqExtraction, corpus: string): string {
   if (corpus.includes(TRIGGERS.unparsable)) {
     return "I could not read the attached documents well enough to answer."
   }

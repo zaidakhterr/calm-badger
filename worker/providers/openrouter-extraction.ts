@@ -16,6 +16,13 @@
  * `NoObjectGeneratedError`, which still carries the generated text, so that
  * response follows exactly the same validation path as a well-formed one.
  *
+ * What the SDK hands back is still a provider response, so the slice this
+ * client consumes — text, finish reason, usage, and OpenRouter's own usage
+ * accounting — is parsed with `openrouter-response.ts`'s schema. A result that
+ * does not fit becomes an `ExtractionProviderError` rather than an extraction
+ * of empty text. `requestFetch` is injectable for exactly the same reason the
+ * OCR client's is: so that contract can be tested without a network.
+ *
  * `maxRetries: 0` is set explicitly. The AI SDK retries twice by default, which
  * would turn one failing extraction into three paid calls and three times the
  * latency; this demo has no retry story, so a failure is reported once.
@@ -26,7 +33,7 @@
  */
 
 import { createOpenRouter } from "@openrouter/ai-sdk-provider"
-import { generateText, NoObjectGeneratedError, Output } from "ai"
+import { APICallError, generateText, NoObjectGeneratedError, Output } from "ai"
 
 import type { AppConfig } from "../env"
 
@@ -36,15 +43,23 @@ import {
   type ExtractionProvider,
   type ExtractionRequest,
   type ExtractionResult,
-  type ExtractionUsage,
 } from "./extraction"
+import {
+  OPENROUTER_RESULT_SCHEMA,
+  readReportedCostUsd,
+  readTokenUsage,
+} from "./openrouter-response"
 
 const PROVIDER = "openrouter"
 const REQUEST_TIMEOUT_MS = 60_000
 const MAX_OUTPUT_TOKENS = 4_000
 
+const UNRECOGNISED_RESPONSE =
+  "The extraction model returned a response in an unrecognised shape."
+
 export function createOpenRouterExtractionProvider(
-  config: AppConfig
+  config: AppConfig,
+  requestFetch: typeof fetch = fetch
 ): ExtractionProvider {
   const model = config.extractionModel
 
@@ -62,7 +77,7 @@ export function createOpenRouterExtractionProvider(
         )
       }
 
-      const openrouter = createOpenRouter({ apiKey })
+      const openrouter = createOpenRouter({ apiKey, fetch: requestFetch })
       const languageModel = openrouter.chat(model, {
         usage: { include: true },
       })
@@ -70,7 +85,7 @@ export function createOpenRouterExtractionProvider(
       const startedAt = Date.now()
 
       try {
-        const result = await generateText({
+        const generated = await generateText({
           model: languageModel,
           system: request.instruction,
           prompt: renderDocuments(request.documents),
@@ -85,33 +100,68 @@ export function createOpenRouterExtractionProvider(
           abortSignal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         })
 
+        // The one boundary this client reads the provider across. A result
+        // that does not fit ends the run as any other provider failure does,
+        // rather than reaching the workflow as empty text and zero tokens.
+        const parsed = OPENROUTER_RESULT_SCHEMA.safeParse({
+          text: generated.text,
+          finishReason: generated.finishReason,
+          usage: generated.usage,
+          providerMetadata: generated.providerMetadata,
+        })
+
+        if (!parsed.success) {
+          throw new ExtractionProviderError(PROVIDER, UNRECOGNISED_RESPONSE)
+        }
+
         return {
           model,
-          text: result.text,
-          usage: readUsage(result.usage),
+          text: parsed.data.text,
+          usage: readTokenUsage(parsed.data),
           latencyMs: Date.now() - startedAt,
-          finishReason: result.finishReason,
-          reportedCostUsd: readReportedCost(result.providerMetadata),
+          finishReason: parsed.data.finishReason,
+          reportedCostUsd: readReportedCostUsd(parsed.data),
         }
       } catch (error) {
+        // A response that did not fit the schema is already this provider's
+        // error; describing it again would report it as a transport failure.
+        if (error instanceof ExtractionProviderError) throw error
+
         if (NoObjectGeneratedError.isInstance(error)) {
           // Unparseable output is a validation outcome, not a transport
           // failure: hand the text on so the step's single repair attempt and
           // the schema decide whether the run can continue.
+          const parsed = OPENROUTER_RESULT_SCHEMA.safeParse({
+            text: error.text ?? "",
+            finishReason: error.finishReason ?? "error",
+            usage: error.usage,
+            providerMetadata: null,
+          })
+
+          if (!parsed.success) {
+            throw new ExtractionProviderError(PROVIDER, UNRECOGNISED_RESPONSE)
+          }
+
           return {
             model,
-            text: error.text ?? "",
-            usage: readUsage(error.usage),
+            text: parsed.data.text,
+            usage: readTokenUsage(parsed.data),
             latencyMs: Date.now() - startedAt,
-            finishReason: error.finishReason ?? "error",
+            finishReason: parsed.data.finishReason,
             reportedCostUsd: null,
           }
         }
 
+        const status = APICallError.isInstance(error)
+          ? (error.statusCode ?? null)
+          : null
+
+        const timedOut = error instanceof Error && error.name === "TimeoutError"
+
         throw new ExtractionProviderError(
           PROVIDER,
-          describeFailure(error),
-          readStatus(error)
+          describeFailure(status, timedOut),
+          status
         )
       }
     },
@@ -134,60 +184,19 @@ function renderDocuments(documents: ExtractionDocument[]): string {
   return rendered.join("\n\n")
 }
 
-function readUsage(usage: unknown): ExtractionUsage {
-  const value = (usage ?? {}) as Record<string, unknown>
-  const inputTokens = readInteger(value.inputTokens) ?? 0
-  const outputTokens = readInteger(value.outputTokens) ?? 0
-
-  return {
-    inputTokens,
-    outputTokens,
-    totalTokens: readInteger(value.totalTokens) ?? inputTokens + outputTokens,
-  }
-}
-
-/** OpenRouter usage accounting reports credits under `openrouter.usage.cost`. */
-function readReportedCost(metadata: unknown): number | null {
-  if (typeof metadata !== "object" || metadata === null) return null
-
-  const openrouter = (metadata as Record<string, unknown>).openrouter
-  if (typeof openrouter !== "object" || openrouter === null) return null
-
-  const usage = (openrouter as Record<string, unknown>).usage
-  if (typeof usage !== "object" || usage === null) return null
-
-  const cost = (usage as Record<string, unknown>).cost
-  return typeof cost === "number" && Number.isFinite(cost) ? cost : null
-}
-
 /**
  * Provider failures are reduced to a short sentence. The error cause can carry
- * the request body and headers, so nothing from it is propagated beyond a
- * status code.
+ * the request body and headers, so nothing from it is propagated beyond the
+ * status code the SDK's own `APICallError` names.
  */
-function describeFailure(error: unknown): string {
-  const status = readStatus(error)
-
+function describeFailure(status: number | null, timedOut: boolean): string {
   if (status !== null) {
     return `The extraction model rejected the request (${status}).`
   }
 
-  if (error instanceof Error && error.name === "TimeoutError") {
+  if (timedOut) {
     return "The extraction model did not respond in time."
   }
 
   return "The extraction model could not be reached."
-}
-
-function readStatus(error: unknown): number | null {
-  if (typeof error !== "object" || error === null) return null
-
-  const status = (error as { statusCode?: unknown }).statusCode
-  return typeof status === "number" && Number.isFinite(status) ? status : null
-}
-
-function readInteger(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value)
-    ? Math.trunc(value)
-    : null
 }
