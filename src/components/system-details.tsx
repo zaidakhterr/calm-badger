@@ -111,6 +111,22 @@ function SystemDetailsBody({
 }) {
   return (
     <div className="space-y-6">
+      <a
+        href={REPOSITORY_URL}
+        target="_blank"
+        rel="noreferrer"
+        className="flex h-10 items-center gap-3 rounded-md border px-3 text-[13px] transition-colors outline-none hover:bg-muted/40 focus-visible:ring-2 focus-visible:ring-ring/30"
+      >
+        <GithubLogoIcon className="size-4 shrink-0" aria-hidden />
+        <span className="truncate">
+          {REPOSITORY_URL.replace("https://", "")}
+        </span>
+        <ArrowSquareOutIcon
+          className="ml-auto size-3.5 shrink-0 text-muted-foreground"
+          aria-hidden
+        />
+      </a>
+
       <Section title="Architecture">
         <p className="text-sm leading-6 text-muted-foreground">
           {details.architecture.summary}
@@ -262,28 +278,6 @@ function SystemDetailsBody({
             <li key={row}>· {row}</li>
           ))}
         </ul>
-      </Section>
-
-      <Section title="Source">
-        <p className="text-[13px] leading-5 text-muted-foreground">
-          The whole application — Worker, workflow, catalogue generator, tests,
-          and this interface — is open source.
-        </p>
-        <a
-          href={REPOSITORY_URL}
-          target="_blank"
-          rel="noreferrer"
-          className="mt-2 flex h-10 items-center gap-3 rounded-md border px-3 text-[13px] transition-colors outline-none hover:bg-muted/40 focus-visible:ring-2 focus-visible:ring-ring/30"
-        >
-          <GithubLogoIcon className="size-4 shrink-0" aria-hidden />
-          <span className="truncate">
-            {REPOSITORY_URL.replace("https://", "")}
-          </span>
-          <ArrowSquareOutIcon
-            className="ml-auto size-3.5 shrink-0 text-muted-foreground"
-            aria-hidden
-          />
-        </a>
       </Section>
     </div>
   )
