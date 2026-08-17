@@ -1,5 +1,6 @@
 import { env, exports } from "cloudflare:workers"
 import { beforeAll, describe, expect, it } from "vitest"
+import { z } from "zod"
 
 import { REFERENCE_EVALUATION } from "../worker/evaluation-report"
 import {
@@ -25,19 +26,33 @@ import {
 
 const base = "https://example.test"
 
+/**
+ * What a scored scenario has to say, whatever the answer is.
+ *
+ * The report's type names these fields; the parse is what holds the scoring to
+ * them at runtime, so a judgement that goes missing — or arrives as something
+ * other than a decided yes or no — fails the run rather than reading as false.
+ */
+const SCENARIO_JUDGEMENTS_SCHEMA = z.object({
+  resolution: z.object({
+    customerCorrect: z.boolean(),
+    locationCorrect: z.boolean(),
+  }),
+  extraction: z.object({ deliveryLocationCarried: z.boolean() }),
+  lines: z.array(z.object({ finalSku: z.string() })),
+  review: z.object({ occurred: z.boolean(), occursInGold: z.boolean() }),
+})
+
 /** A distinct address per scenario, so the public run limit is not the thing under test. */
 let address = 10
 
 const fetcher = (path: string, init?: RequestInit) => {
   if (init?.method === "POST" && path === "/api/runs") {
     address += 1
-    return exports.default.fetch(`${base}${path}`, {
-      ...init,
-      headers: {
-        ...(init.headers as Record<string, string>),
-        "cf-connecting-ip": `203.0.113.${address}`,
-      },
-    })
+    const headers = new Headers(init.headers)
+    headers.set("cf-connecting-ip", `203.0.113.${address}`)
+
+    return exports.default.fetch(`${base}${path}`, { ...init, headers })
   }
 
   return exports.default.fetch(`${base}${path}`, init)
@@ -79,15 +94,16 @@ describe("the three reference workflows", () => {
     ])
 
     for (const scenario of report.scenarios) {
+      // Every judgement the report makes is answered either way, never left
+      // absent or carried as some other kind of value.
+      SCENARIO_JUDGEMENTS_SCHEMA.parse(scenario)
+
       // Customer resolution.
       expect(scenario.resolution.customerId).not.toBeNull()
-      expect(typeof scenario.resolution.customerCorrect).toBe("boolean")
-      expect(typeof scenario.resolution.locationCorrect).toBe("boolean")
 
       // The fields the structured RFQ had to carry through.
       expect(scenario.extraction.lineCount).toBeGreaterThan(0)
       expect(scenario.extraction.sources.length).toBeGreaterThan(0)
-      expect(typeof scenario.extraction.deliveryLocationCarried).toBe("boolean")
 
       // Top-three candidate recall, and the final product selection.
       expect(scenario.retrieval.lines).toBe(scenario.selection.lines)
@@ -98,14 +114,9 @@ describe("the three reference workflows", () => {
       // catalogue SKU. `finalSku` is the one the quote charges for, so assert
       // that directly rather than letting an earlier candidate stand in for it.
       for (const line of scenario.lines) {
-        expect(typeof line.finalSku).toBe("string")
         expect(line.finalSku).not.toBe("")
         expect(line.quantity).toBeGreaterThan(0)
       }
-
-      // Whether review should occur, and whether it did.
-      expect(typeof scenario.review.occurred).toBe("boolean")
-      expect(typeof scenario.review.occursInGold).toBe("boolean")
     }
   })
 
