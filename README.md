@@ -384,11 +384,13 @@ pnpm lint
 pnpm format:check
 pnpm wizard:check
 pnpm data:check
-pnpm test
 pnpm build
+pnpm test
 ```
 
-`pnpm check` runs all of these, and is what CI runs.
+`pnpm check` runs all of these, and is what CI runs. The build comes before the
+tests: the Worker integration tests serve scenario attachments and the SPA
+fallback through the `ASSETS` binding, which needs a built `dist/`.
 
 ## Evaluation
 
@@ -499,8 +501,9 @@ Both workflows use pnpm with a frozen lockfile.
 
 **`.github/workflows/validate.yml`** — pull requests and every branch except
 `main`: `pnpm check` (format, lint, wizard structural check, generated-data
-check, Worker integration tests, `wrangler types --check`, `tsc`, client build,
-and `wrangler deploy --dry-run`), then the deterministic fixture evaluation.
+check, `wrangler types --check`, `tsc`, client build, `wrangler deploy
+--dry-run`, and the Worker integration tests), then the deterministic fixture
+evaluation.
 
 **`.github/workflows/deploy.yml`** — pushes to `main` and manual dispatch, in
 the `production` environment, with a `production` concurrency group so

@@ -12,7 +12,7 @@
     "dev:worker": "pnpm build:client && wrangler dev --local",
     "build": "pnpm typecheck && pnpm build:client && wrangler deploy --dry-run --outdir dist-worker",
     "build:client": "vite build",
-    "check": "pnpm format:check && pnpm lint && pnpm wizard:check && pnpm data:check && pnpm test && pnpm build",
+    "check": "pnpm format:check && pnpm lint && pnpm wizard:check && pnpm data:check && pnpm build && pnpm test",
     "cf:types": "wrangler types --env-file .dev.vars.example",
     "data:check": "node --test test/catalog-seed.node.mjs test/remote-seed-readiness.node.mjs test/scenario-assets.node.mjs",
     "seed:build": "node scripts/build-catalog-seed.mjs",
