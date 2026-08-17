@@ -24,6 +24,7 @@ import {
   SHORTLIST_SIZE,
   type LineRetrieval,
 } from "../worker/catalog/retrieval"
+import { readConfig } from "../worker/env"
 import { applyReviewProductDecision } from "../worker/match-products"
 import {
   applyIntegrityChecks,
@@ -720,13 +721,17 @@ describe("model output that has to be validated", () => {
   it("refuses to build the contract fake in production", () => {
     expect(() =>
       selectRerankProvider(
-        envWith({ RERANK_PROVIDER: "contract-fake", APP_ENV: "production" })
+        readConfig(
+          envWith({ RERANK_PROVIDER: "contract-fake", APP_ENV: "production" })
+        )
       )
     ).toThrow(/not allowed in production/)
 
     expect(
       selectRerankProvider(
-        envWith({ RERANK_PROVIDER: "contract-fake", APP_ENV: "test" })
+        readConfig(
+          envWith({ RERANK_PROVIDER: "contract-fake", APP_ENV: "test" })
+        )
       ).name
     ).toBe("contract-fake")
   })

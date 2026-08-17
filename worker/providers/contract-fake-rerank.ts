@@ -24,6 +24,8 @@
  * schema, and integrity contracts are exercised.
  */
 
+import type { AppConfig } from "../env"
+
 import {
   RerankProviderError,
   type RerankCandidate,
@@ -56,8 +58,10 @@ const STOP_WORDS = new Set([
   "with",
 ])
 
-export function createContractFakeRerankProvider(env: Env): RerankProvider {
-  const model = `${env.OPENROUTER_RERANK_MODEL}-contract-fake`
+export function createContractFakeRerankProvider(
+  config: AppConfig
+): RerankProvider {
+  const model = `${config.rerankModel}-contract-fake`
 
   return {
     name: PROVIDER,

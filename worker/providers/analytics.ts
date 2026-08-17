@@ -14,6 +14,8 @@
  * finished, already-sanitized envelope to whichever provider is selected.
  */
 
+import type { AppConfig } from "../env"
+
 import { createContractFakeAnalyticsProvider } from "./contract-fake-analytics"
 import { createPosthogAnalyticsProvider } from "./posthog-analytics"
 
@@ -46,45 +48,41 @@ const noopProvider: AnalyticsProvider = {
 /** Said once per isolate: a disabled provider should not narrate every event. */
 let disabledOutsideProductionLogged = false
 
-export function selectAnalyticsProvider(env: Env): AnalyticsProvider {
-  const configured: string = env.ANALYTICS_PROVIDER
-  const appEnv: string = env.APP_ENV
+/**
+ * Which implementation this deployment measures with. Whether a key is present
+ * and whether this isolate may use it are settled by the configuration schema,
+ * which is why a live target arrives here already carrying its key: "PostHog
+ * without a project key" is not a shape this function can be handed.
+ */
+export function selectAnalyticsProvider(config: AppConfig): AnalyticsProvider {
+  const target = config.analytics
 
-  if (configured === "none") return noopProvider
-
-  if (configured === "contract-fake") {
-    if (appEnv === "production") {
-      throw new Error(
-        "The contract fake analytics provider is not allowed in production"
-      )
-    }
-
+  if (target.provider === "contract-fake") {
     return createContractFakeAnalyticsProvider()
   }
 
-  // An unconfigured project key is the ordinary state of a local checkout and
-  // of a fork. It disables measurement rather than failing a request.
-  if (!env.POSTHOG_API_KEY?.trim()) return noopProvider
-
-  // A key is present, so the only remaining question is whether this isolate is
-  // allowed to use it. It is not, outside production: a local checkout or a
-  // preview otherwise sends real traffic — and real pageviews from a developer
-  // reloading a page — into the deployed project, where it is indistinguishable
-  // from public usage. The key stays configured and unused.
-  if (appEnv !== "production") {
-    if (!disabledOutsideProductionLogged) {
-      disabledOutsideProductionLogged = true
-      console.log(
-        JSON.stringify({
-          event: "analytics_disabled_outside_production",
-          appEnv,
-          detail: "a project key is configured but only production may send",
-        })
-      )
-    }
-
-    return noopProvider
+  if (target.provider === "posthog") {
+    return createPosthogAnalyticsProvider(target)
   }
 
-  return createPosthogAnalyticsProvider(env)
+  // A key is configured but this isolate may not use it: a local checkout or a
+  // preview would otherwise send real traffic — and real pageviews from a
+  // developer reloading a page — into the deployed project, where it is
+  // indistinguishable from public usage. Said once per isolate, because a
+  // disabled provider should not narrate every event.
+  if (
+    target.reason === "outside_production" &&
+    !disabledOutsideProductionLogged
+  ) {
+    disabledOutsideProductionLogged = true
+    console.log(
+      JSON.stringify({
+        event: "analytics_disabled_outside_production",
+        appEnv: config.appEnv,
+        detail: "a project key is configured but only production may send",
+      })
+    )
+  }
+
+  return noopProvider
 }

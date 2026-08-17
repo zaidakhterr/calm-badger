@@ -27,6 +27,7 @@ import {
   normaliseText,
   type CatalogProduct,
 } from "./catalog/retrieval"
+import { readConfig } from "./env"
 import {
   applyIntegrityChecks,
   decideMatch,
@@ -165,7 +166,7 @@ async function match(
     `Ranking shortlisted products for ${lines.length} ${lines.length === 1 ? "line" : "lines"}…`
   )
 
-  const provider = selectRerankProvider(env)
+  const provider = selectRerankProvider(readConfig(env))
   const heuristics = readMatchHeuristics(env)
   const skus = [...new Set(candidates.map((candidate) => candidate.sku))]
   const [products, aliases] = await Promise.all([

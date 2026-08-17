@@ -2,6 +2,7 @@ import { env, exports } from "cloudflare:workers"
 import { beforeEach, describe, expect, it } from "vitest"
 
 import { bucketPath, FUNNEL_EVENTS, logRoute } from "../worker/analytics"
+import { readConfig } from "../worker/env"
 import { selectAnalyticsProvider } from "../worker/providers/analytics"
 import {
   capturedAnalyticsEvents,
@@ -326,26 +327,44 @@ describe("which analytics provider a deployment gets", () => {
     return { ...env, ...overrides }
   }
 
+  /**
+   * A deployed configuration. The test isolate selects the deterministic fake
+   * for every seam, and production refuses all of them, so a case about the
+   * analytics variables has to name the live providers it is not testing.
+   */
+  function deployedEnvWith(overrides: Record<string, string>): Env {
+    return envWith({
+      APP_ENV: "production",
+      OCR_PROVIDER: "mistral",
+      EXTRACTION_PROVIDER: "openrouter",
+      RERANK_PROVIDER: "openrouter",
+      ...overrides,
+    })
+  }
+
   it("refuses to send from anywhere but production, even with a key", () => {
     // A local checkout carries a real project key in `.dev.vars`, and
     // `APP_ENV` comes from `wrangler.jsonc`. Without this guard a developer's
     // own traffic lands in the deployed project as public usage.
     const local = selectAnalyticsProvider(
-      envWith({
-        ANALYTICS_PROVIDER: "posthog",
-        POSTHOG_API_KEY: "phc-a-real-looking-project-key",
-        APP_ENV: "development",
-      })
+      readConfig(
+        envWith({
+          ANALYTICS_PROVIDER: "posthog",
+          POSTHOG_API_KEY: "phc-a-real-looking-project-key",
+          APP_ENV: "development",
+        })
+      )
     )
 
     expect(local.name).toBe("none")
 
     const deployed = selectAnalyticsProvider(
-      envWith({
-        ANALYTICS_PROVIDER: "posthog",
-        POSTHOG_API_KEY: "phc-a-real-looking-project-key",
-        APP_ENV: "production",
-      })
+      readConfig(
+        deployedEnvWith({
+          ANALYTICS_PROVIDER: "posthog",
+          POSTHOG_API_KEY: "phc-a-real-looking-project-key",
+        })
+      )
     )
 
     expect(deployed.name).toBe("posthog-eu")
@@ -354,29 +373,32 @@ describe("which analytics provider a deployment gets", () => {
   it("still disables measurement rather than failing when nothing is configured", () => {
     expect(
       selectAnalyticsProvider(
-        envWith({
-          ANALYTICS_PROVIDER: "posthog",
-          POSTHOG_API_KEY: "",
-          APP_ENV: "production",
-        })
+        readConfig(
+          deployedEnvWith({
+            ANALYTICS_PROVIDER: "posthog",
+            POSTHOG_API_KEY: "",
+          })
+        )
       ).name
     ).toBe("none")
 
     expect(
-      selectAnalyticsProvider(envWith({ ANALYTICS_PROVIDER: "none" })).name
+      selectAnalyticsProvider(
+        readConfig(envWith({ ANALYTICS_PROVIDER: "none" }))
+      ).name
     ).toBe("none")
   })
 
   it("refuses the deterministic recorder in production", () => {
     expect(() =>
-      selectAnalyticsProvider(
-        envWith({ ANALYTICS_PROVIDER: "contract-fake", APP_ENV: "production" })
-      )
+      readConfig(deployedEnvWith({ ANALYTICS_PROVIDER: "contract-fake" }))
     ).toThrow()
 
     expect(
       selectAnalyticsProvider(
-        envWith({ ANALYTICS_PROVIDER: "contract-fake", APP_ENV: "test" })
+        readConfig(
+          envWith({ ANALYTICS_PROVIDER: "contract-fake", APP_ENV: "test" })
+        )
       ).name
     ).toBe("contract-fake")
   })

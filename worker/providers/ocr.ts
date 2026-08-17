@@ -9,6 +9,8 @@
  * production and no test can reach the network.
  */
 
+import type { AppConfig } from "../env"
+
 import { createContractFakeOcrProvider } from "./contract-fake-ocr"
 import { createMistralOcrProvider } from "./mistral-ocr"
 
@@ -94,21 +96,15 @@ export class OcrPageLimitError extends OcrProviderError {
   }
 }
 
-export function selectOcrProvider(env: Env): OcrProvider {
-  // Read as a plain string: tests select the fake through a binding override.
-  const configured: string = env.OCR_PROVIDER
-
-  if (configured === "contract-fake") {
-    if (env.APP_ENV === "production") {
-      throw new Error(
-        "The contract fake OCR provider is not allowed in production"
-      )
-    }
-
-    return createContractFakeOcrProvider(env)
-  }
-
-  return createMistralOcrProvider(env)
+/**
+ * Which implementation this deployment reads documents with. The fake is
+ * refused in production by the configuration schema, so the choice here is
+ * between two providers rather than between a provider and a policy.
+ */
+export function selectOcrProvider(config: AppConfig): OcrProvider {
+  return config.ocrProvider === "contract-fake"
+    ? createContractFakeOcrProvider(config)
+    : createMistralOcrProvider(config)
 }
 
 /**

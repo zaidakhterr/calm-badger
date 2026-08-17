@@ -10,6 +10,7 @@
 import { env, exports } from "cloudflare:workers"
 import { describe, expect, it } from "vitest"
 
+import { readConfig } from "../worker/env"
 import {
   estimateOcrCostUsd,
   OcrPageLimitError,
@@ -619,14 +620,16 @@ describe("selecting the OCR provider", () => {
   it("refuses to build the contract fake in production", () => {
     expect(() =>
       selectOcrProvider(
-        envWith({ OCR_PROVIDER: "contract-fake", APP_ENV: "production" })
+        readConfig(
+          envWith({ OCR_PROVIDER: "contract-fake", APP_ENV: "production" })
+        )
       )
     ).toThrow(/not allowed in production/)
   })
 
   it("builds the contract fake outside production", () => {
     const provider = selectOcrProvider(
-      envWith({ OCR_PROVIDER: "contract-fake", APP_ENV: "test" })
+      readConfig(envWith({ OCR_PROVIDER: "contract-fake", APP_ENV: "test" }))
     )
 
     expect(provider.name).toBe("contract-fake")
@@ -659,7 +662,7 @@ describe("selecting the OCR provider", () => {
       )
     }) as typeof fetch
     const provider = createMistralOcrProvider(
-      envWith({ MISTRAL_API_KEY: "test-key" }),
+      readConfig(envWith({ MISTRAL_API_KEY: "test-key" })),
       requestFetch
     )
 

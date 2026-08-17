@@ -22,6 +22,7 @@
  */
 
 import { ADAPTER_IDS } from "./adapters"
+import { readConfig } from "./env"
 import {
   selectAnalyticsProvider,
   type AnalyticsEvent,
@@ -178,7 +179,7 @@ function sanitizeProperties(
 
 function send(env: Env, ctx: ExecutionContext, event: AnalyticsEvent): void {
   try {
-    const provider = selectAnalyticsProvider(env)
+    const provider = selectAnalyticsProvider(readConfig(env))
 
     ctx.waitUntil(
       provider.capture(event).catch((error: unknown) => {

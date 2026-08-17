@@ -13,6 +13,7 @@
 import { env, exports } from "cloudflare:workers"
 import { describe, expect, it } from "vitest"
 
+import { readConfig } from "../worker/env"
 import {
   estimateExtractionCostUsd,
   selectExtractionProvider,
@@ -683,14 +684,21 @@ describe("selecting the extraction provider", () => {
   it("refuses to build the contract fake in production", () => {
     expect(() =>
       selectExtractionProvider(
-        envWith({ EXTRACTION_PROVIDER: "contract-fake", APP_ENV: "production" })
+        readConfig(
+          envWith({
+            EXTRACTION_PROVIDER: "contract-fake",
+            APP_ENV: "production",
+          })
+        )
       )
     ).toThrow(/not allowed in production/)
   })
 
   it("builds the contract fake outside production", () => {
     const provider = selectExtractionProvider(
-      envWith({ EXTRACTION_PROVIDER: "contract-fake", APP_ENV: "test" })
+      readConfig(
+        envWith({ EXTRACTION_PROVIDER: "contract-fake", APP_ENV: "test" })
+      )
     )
 
     expect(provider.name).toBe("contract-fake")

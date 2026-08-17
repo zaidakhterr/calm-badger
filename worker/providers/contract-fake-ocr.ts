@@ -16,6 +16,8 @@
  * provider error, which is how the failure contract is exercised.
  */
 
+import type { AppConfig } from "../env"
+
 import {
   OcrPageLimitError,
   OcrProviderError,
@@ -28,8 +30,8 @@ import {
 const PROVIDER = "contract-fake"
 const FAILURE_LABEL = "trigger-provider-error"
 
-export function createContractFakeOcrProvider(env: Env): OcrProvider {
-  const model = `${env.MISTRAL_OCR_MODEL}-contract-fake`
+export function createContractFakeOcrProvider(config: AppConfig): OcrProvider {
+  const model = `${config.mistralOcrModel}-contract-fake`
 
   return {
     name: PROVIDER,

@@ -16,6 +16,8 @@
  * repair, schema, and business-validation contracts are exercised.
  */
 
+import type { AppConfig } from "../env"
+
 import {
   ExtractionProviderError,
   type ExtractionDocument,
@@ -65,9 +67,9 @@ type DraftLine = {
 }
 
 export function createContractFakeExtractionProvider(
-  env: Env
+  config: AppConfig
 ): ExtractionProvider {
-  const model = `${env.OPENROUTER_EXTRACTION_MODEL}-contract-fake`
+  const model = `${config.extractionModel}-contract-fake`
 
   return {
     name: PROVIDER,

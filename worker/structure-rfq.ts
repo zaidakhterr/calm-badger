@@ -18,6 +18,7 @@
  * while it still reads `active`.
  */
 
+import { readConfig } from "./env"
 import {
   estimateExtractionCostUsd,
   ExtractionProviderError,
@@ -103,7 +104,7 @@ async function structure(
   const startedAt = Date.now()
   await recorder.begin("Extracting customer, source, deadline, and line items…")
 
-  const provider = selectExtractionProvider(env)
+  const provider = selectExtractionProvider(readConfig(env))
   let result: ExtractionResult
 
   try {

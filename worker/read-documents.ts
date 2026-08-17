@@ -13,6 +13,7 @@
  * by the same outer boundary, so the step can never be abandoned mid-flight.
  */
 
+import { readConfig } from "./env"
 import {
   estimateOcrCostUsd,
   OcrPageLimitError,
@@ -114,7 +115,7 @@ async function readAllSources(
     `Reading ${sources.length} ${sources.length === 1 ? "source" : "sources"}…`
   )
 
-  const provider = selectOcrProvider(env)
+  const provider = selectOcrProvider(readConfig(env))
   const evidence: SourceEvidence[] = []
   const pageRows: { source: StoredSource; page: OcrPage }[] = []
   let ocrPagesUsed = 0

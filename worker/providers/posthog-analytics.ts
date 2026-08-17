@@ -13,11 +13,14 @@
  * The identifier itself is either a run id or a hash that rotates hourly.
  */
 
+import type { PosthogTarget } from "../env"
+
 import type { AnalyticsEvent, AnalyticsProvider } from "./analytics"
 
-export function createPosthogAnalyticsProvider(env: Env): AnalyticsProvider {
-  const host = env.POSTHOG_HOST.replace(/\/+$/, "")
-  const apiKey = env.POSTHOG_API_KEY
+export function createPosthogAnalyticsProvider(
+  target: PosthogTarget
+): AnalyticsProvider {
+  const { host, apiKey } = target
 
   return {
     name: "posthog-eu",

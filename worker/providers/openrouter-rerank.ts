@@ -29,6 +29,8 @@
 import { createOpenRouter } from "@openrouter/ai-sdk-provider"
 import { generateText, NoObjectGeneratedError, Output } from "ai"
 
+import type { AppConfig } from "../env"
+
 import {
   RerankProviderError,
   type RerankProvider,
@@ -41,15 +43,17 @@ const PROVIDER = "openrouter"
 const REQUEST_TIMEOUT_MS = 45_000
 const MAX_OUTPUT_TOKENS = 1_500
 
-export function createOpenRouterRerankProvider(env: Env): RerankProvider {
-  const model = env.OPENROUTER_RERANK_MODEL
+export function createOpenRouterRerankProvider(
+  config: AppConfig
+): RerankProvider {
+  const model = config.rerankModel
 
   return {
     name: PROVIDER,
     model,
 
     async rerank(request: RerankRequest): Promise<RerankResult> {
-      const apiKey = env.OPENROUTER_API_KEY?.trim()
+      const apiKey = config.openRouterApiKey
 
       if (!apiKey) {
         throw new RerankProviderError(

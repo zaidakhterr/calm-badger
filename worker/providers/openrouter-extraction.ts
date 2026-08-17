@@ -28,6 +28,8 @@
 import { createOpenRouter } from "@openrouter/ai-sdk-provider"
 import { generateText, NoObjectGeneratedError, Output } from "ai"
 
+import type { AppConfig } from "../env"
+
 import {
   ExtractionProviderError,
   type ExtractionDocument,
@@ -42,16 +44,16 @@ const REQUEST_TIMEOUT_MS = 60_000
 const MAX_OUTPUT_TOKENS = 4_000
 
 export function createOpenRouterExtractionProvider(
-  env: Env
+  config: AppConfig
 ): ExtractionProvider {
-  const model = env.OPENROUTER_EXTRACTION_MODEL
+  const model = config.extractionModel
 
   return {
     name: PROVIDER,
     model,
 
     async extract(request: ExtractionRequest): Promise<ExtractionResult> {
-      const apiKey = env.OPENROUTER_API_KEY?.trim()
+      const apiKey = config.openRouterApiKey
 
       if (!apiKey) {
         throw new ExtractionProviderError(

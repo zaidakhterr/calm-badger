@@ -22,6 +22,8 @@
 
 import type { z } from "zod"
 
+import type { AppConfig } from "../env"
+
 import { createContractFakeRerankProvider } from "./contract-fake-rerank"
 import { estimateOpenRouterCostUsd } from "./openrouter-cost"
 import { createOpenRouterRerankProvider } from "./openrouter-rerank"
@@ -95,21 +97,15 @@ export class RerankProviderError extends Error {
   }
 }
 
-export function selectRerankProvider(env: Env): RerankProvider {
-  // Read as a plain string: tests select the fake through a binding override.
-  const configured: string = env.RERANK_PROVIDER
-
-  if (configured === "contract-fake") {
-    if (env.APP_ENV === "production") {
-      throw new Error(
-        "The contract fake rerank provider is not allowed in production"
-      )
-    }
-
-    return createContractFakeRerankProvider(env)
-  }
-
-  return createOpenRouterRerankProvider(env)
+/**
+ * Which implementation this deployment reranks with. The fake is refused in
+ * production by the configuration schema, so the choice here is between two
+ * providers rather than between a provider and a policy.
+ */
+export function selectRerankProvider(config: AppConfig): RerankProvider {
+  return config.rerankProvider === "contract-fake"
+    ? createContractFakeRerankProvider(config)
+    : createOpenRouterRerankProvider(config)
 }
 
 /** Estimated spend for one reranking call, in USD. */

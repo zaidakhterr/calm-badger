@@ -11,6 +11,8 @@
  * logged, never persisted, and never included in stored evidence.
  */
 
+import type { AppConfig } from "../env"
+
 import {
   OcrPageLimitError,
   OcrProviderError,
@@ -48,17 +50,17 @@ type MistralOcrResponse = {
 }
 
 export function createMistralOcrProvider(
-  env: Env,
+  config: AppConfig,
   requestFetch: typeof fetch = fetch
 ): OcrProvider {
-  const model = env.MISTRAL_OCR_MODEL
+  const model = config.mistralOcrModel
 
   return {
     name: PROVIDER,
     model,
 
     async read(request: OcrRequest): Promise<OcrDocument> {
-      const apiKey = env.MISTRAL_API_KEY?.trim()
+      const apiKey = config.mistralApiKey
       if (!apiKey) {
         throw new OcrProviderError(
           PROVIDER,

@@ -17,6 +17,8 @@
 
 import type { z } from "zod"
 
+import type { AppConfig } from "../env"
+
 import { createContractFakeExtractionProvider } from "./contract-fake-extraction"
 import { estimateOpenRouterCostUsd } from "./openrouter-cost"
 import { createOpenRouterExtractionProvider } from "./openrouter-extraction"
@@ -81,21 +83,17 @@ export class ExtractionProviderError extends Error {
   }
 }
 
-export function selectExtractionProvider(env: Env): ExtractionProvider {
-  // Read as a plain string: tests select the fake through a binding override.
-  const configured: string = env.EXTRACTION_PROVIDER
-
-  if (configured === "contract-fake") {
-    if (env.APP_ENV === "production") {
-      throw new Error(
-        "The contract fake extraction provider is not allowed in production"
-      )
-    }
-
-    return createContractFakeExtractionProvider(env)
-  }
-
-  return createOpenRouterExtractionProvider(env)
+/**
+ * Which implementation this deployment structures requests with. The fake is
+ * refused in production by the configuration schema, so the choice here is
+ * between two providers rather than between a provider and a policy.
+ */
+export function selectExtractionProvider(
+  config: AppConfig
+): ExtractionProvider {
+  return config.extractionProvider === "contract-fake"
+    ? createContractFakeExtractionProvider(config)
+    : createOpenRouterExtractionProvider(config)
 }
 
 /** Estimated spend for one extraction call. Shared with reranking. */
