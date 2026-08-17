@@ -25,7 +25,7 @@ import {
   type LineRetrieval,
 } from "../worker/catalog/retrieval"
 import { readConfig } from "../worker/env"
-import { loadCandidateEvidence } from "../worker/evidence"
+import { loadCandidateEvidence, loadMatchEvidence } from "../worker/evidence"
 import { applyReviewProductDecision } from "../worker/match-products"
 import {
   applyIntegrityChecks,
@@ -1406,6 +1406,146 @@ describe("reading stored candidate evidence a different build wrote", () => {
         runId,
         step: "retrieve-candidates",
         kind: "candidates",
+      })
+    )
+  })
+})
+
+describe("reading stored match evidence a different build wrote", () => {
+  const line = {
+    position: 1,
+    reference: "NX-FLT-1120",
+    description: "Filter cartridge",
+    method: "exact_sku",
+    state: "accepted",
+    sku: "NX-FLT-1120",
+    productName: "Filter cartridge",
+    decisionEvidence: "The request prints the current article number.",
+    candidateCount: 1,
+    shortlistSize: 1,
+    alternatives: [
+      {
+        sku: "NX-FLT-1121",
+        name: "Filter cartridge, wide",
+        score: 0.4,
+        reason: "Retrieved from the active catalogue.",
+        nearDuplicateOf: null,
+      },
+    ],
+    rejected: [],
+    confidence: {
+      label: "High",
+      score: 1,
+      heuristic: "Deterministic catalogue evidence.",
+    },
+    winnerScore: 1,
+    winnerGap: 1,
+    repaired: false,
+    issues: [],
+    originalOutput: null,
+  }
+
+  it("still projects a payload written before the provider measurements existed", async () => {
+    const runId = await seedRun()
+
+    // No `latencyMs`, `usage`, `heuristics`, or `totals`: an earlier build did
+    // not record them. The decision itself is untouched.
+    await storeEvidence(
+      runId,
+      "match-products",
+      "matches",
+      JSON.stringify({
+        state: "complete",
+        message: null,
+        provider: "contract-fake",
+        model: "rerank-contract-fake",
+        lines: [line],
+      })
+    )
+
+    const evidence = await loadMatchEvidence(env, runId)
+
+    expect(evidence.state).toBe("complete")
+    expect(evidence.provider).toBe("contract-fake")
+    expect(evidence.lines).toHaveLength(1)
+    expect(evidence.lines[0].sku).toBe("NX-FLT-1120")
+    expect(evidence.lines[0].confidence!.label).toBe("High")
+    expect(evidence.lines[0].alternatives[0].sku).toBe("NX-FLT-1121")
+    // Not recorded reads as unknown, never as zero.
+    expect(evidence.lines[0].latencyMs).toBeNull()
+    expect(evidence.lines[0].usage).toBeNull()
+    expect(evidence.heuristics).toBeNull()
+    expect(evidence.totals).toBeNull()
+  })
+
+  it("projects an error and logs one line when an alternative names no product", async () => {
+    const runId = await seedRun()
+
+    await storeEvidence(
+      runId,
+      "match-products",
+      "matches",
+      JSON.stringify({
+        state: "complete",
+        message: null,
+        provider: "contract-fake",
+        model: "rerank-contract-fake",
+        heuristics: {
+          winnerStrength: 0.6,
+          winnerGap: 0.15,
+          note: "Demo heuristics.",
+        },
+        lines: [
+          {
+            ...line,
+            alternatives: [
+              {
+                name: "Filter cartridge, wide",
+                score: 0.4,
+                reason: "Retrieved from the active catalogue.",
+                nearDuplicateOf: null,
+              },
+            ],
+            latencyMs: 4,
+            usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+          },
+        ],
+        totals: {
+          lineCount: 1,
+          acceptedCount: 1,
+          reviewCount: 0,
+          deterministicCount: 1,
+          rerankedCount: 0,
+          modelCalls: 0,
+          providerLatencyMs: 4,
+          usage: null,
+          estimatedCostUsd: null,
+          elapsedMs: 6,
+        },
+      })
+    )
+
+    const logged = await captureErrors(async () => {
+      const evidence = await loadMatchEvidence(env, runId)
+
+      expect(evidence.state).toBe("error")
+      expect(evidence.message).toBe(
+        "The stored evidence for this step could not be read."
+      )
+      expect(evidence.lines).toEqual([])
+      expect(evidence.provider).toBeNull()
+      expect(evidence.heuristics).toBeNull()
+      expect(evidence.totals).toBeNull()
+    })
+
+    expect(logged).toHaveLength(1)
+    // Identifiers only: no field name, no stored value, nothing to leak.
+    expect(logged[0]).toBe(
+      JSON.stringify({
+        event: "evidence_payload_invalid",
+        runId,
+        step: "match-products",
+        kind: "matches",
       })
     )
   })

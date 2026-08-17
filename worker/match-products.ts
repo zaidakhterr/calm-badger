@@ -21,6 +21,8 @@
  * this node reading `active` forever.
  */
 
+import { z } from "zod"
+
 import {
   loadActiveProducts,
   loadGlobalAliases,
@@ -48,12 +50,111 @@ import {
   type RerankProvider,
   type RerankUsage,
 } from "./providers/rerank"
-import { labelFor, parseModelOutput, type Confidence } from "./rfq-extraction"
+import {
+  CONFIDENCE_SCHEMA,
+  labelFor,
+  parseModelOutput,
+  type Confidence,
+} from "./rfq-extraction"
 import { createRunStepRecorder, type RunStepRecorder } from "./run-steps"
 
 export const MATCH_PRODUCTS_STEP_KEY = "match-products"
 
-const MATCHES_EVIDENCE_KIND = "matches"
+export const MATCHES_EVIDENCE_KIND = "matches"
+
+/** What the reranker reported it spent on one line, or nothing. */
+const RERANK_USAGE_SCHEMA = z.object({
+  inputTokens: z.number(),
+  outputTokens: z.number(),
+  totalTokens: z.number(),
+})
+
+/**
+ * The decision for one requested line, and everything it was decided on.
+ *
+ * `method` and `state` stay open strings because the matching module owns
+ * those two vocabularies. The confidence is required rather than defaulted:
+ * unlike a latency, it is not a measurement taken alongside the decision, it
+ * is the decision's own justification, and a line without one is not a line
+ * this step wrote. What the provider cost and answered does default, so
+ * evidence from an earlier build still renders.
+ */
+const MATCH_LINE_SCHEMA = z.object({
+  position: z.number(),
+  reference: z.string(),
+  description: z.string(),
+  method: z.string(),
+  state: z.string(),
+  sku: z.string().nullable(),
+  productName: z.string().nullable(),
+  decisionEvidence: z.string(),
+  candidateCount: z.number(),
+  shortlistSize: z.number(),
+  alternatives: z.array(
+    z.object({
+      sku: z.string(),
+      name: z.string(),
+      score: z.number(),
+      reason: z.string(),
+      /** Set when the catalogue records this product as a near duplicate. */
+      nearDuplicateOf: z.string().nullable(),
+    })
+  ),
+  rejected: z.array(z.object({ sku: z.string(), reason: z.string() })),
+  confidence: CONFIDENCE_SCHEMA,
+  winnerScore: z.number(),
+  winnerGap: z.number(),
+  repaired: z.boolean(),
+  issues: z.array(z.string()),
+  /** Model text as returned, truncated. It never held a prompt or a key. */
+  originalOutput: z.string().nullable(),
+  latencyMs: z.number().nullable().catch(null),
+  usage: RERANK_USAGE_SCHEMA.nullable().catch(null),
+})
+
+/**
+ * The evidence this step writes, and therefore owns. The projection in
+ * `evidence.ts` parses stored rows with this schema rather than guessing at
+ * their shape, so writer and reader cannot drift apart without the build
+ * saying so.
+ *
+ * The decisions are the evidence and are required, down to each alternative's
+ * SKU. The thresholds they were taken against and the arithmetic over them
+ * default to `null`.
+ */
+export const MATCHES_EVIDENCE_SCHEMA = z.object({
+  state: z.enum(["complete", "error"]),
+  message: z.string().nullable(),
+  provider: z.string(),
+  model: z.string(),
+  heuristics: z
+    .object({
+      winnerStrength: z.number(),
+      winnerGap: z.number(),
+      note: z.string(),
+    })
+    .nullable()
+    .catch(null),
+  lines: z.array(MATCH_LINE_SCHEMA),
+  totals: z
+    .object({
+      lineCount: z.number(),
+      acceptedCount: z.number(),
+      reviewCount: z.number(),
+      deterministicCount: z.number(),
+      rerankedCount: z.number(),
+      modelCalls: z.number(),
+      providerLatencyMs: z.number(),
+      usage: RERANK_USAGE_SCHEMA.nullable(),
+      /** `null` when no model was called; never a silently invented zero. */
+      estimatedCostUsd: z.number().nullable(),
+      elapsedMs: z.number(),
+    })
+    .nullable()
+    .catch(null),
+})
+
+export type MatchesEvidence = z.infer<typeof MATCHES_EVIDENCE_SCHEMA>
 
 /** Model text is stored for inspection, but never unbounded. */
 const MAX_STORED_OUTPUT_CHARS = 4_000
@@ -91,28 +192,7 @@ type CandidateRow = {
   score: number
 }
 
-type LineEvidence = {
-  position: number
-  reference: string
-  description: string
-  method: string
-  state: string
-  sku: string | null
-  productName: string | null
-  decisionEvidence: string
-  candidateCount: number
-  shortlistSize: number
-  alternatives: MatchAlternative[]
-  rejected: { sku: string; reason: string }[]
-  confidence: Confidence
-  winnerScore: number
-  winnerGap: number
-  repaired: boolean
-  issues: string[]
-  originalOutput: string | null
-  latencyMs: number | null
-  usage: RerankUsage | null
-}
+type LineEvidence = MatchesEvidence["lines"][number]
 
 export async function matchProducts(
   env: Env,
@@ -215,7 +295,7 @@ async function match(
         heuristics: describeHeuristics(heuristics),
         lines: evidence,
         totals: totalsOf(evidence, env, Date.now() - startedAt),
-      })
+      } satisfies MatchesEvidence)
 
       await step.fail(message)
       return { state: "error", message }
@@ -237,7 +317,7 @@ async function match(
     heuristics: describeHeuristics(heuristics),
     lines: evidence,
     totals: totalsOf(evidence, env, elapsedMs),
-  })
+  } satisfies MatchesEvidence)
 
   await step.complete(
     `Matched ${acceptedCount} ${acceptedCount === 1 ? "line" : "lines"} to catalogue products` +

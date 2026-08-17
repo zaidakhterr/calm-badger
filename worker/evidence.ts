@@ -25,7 +25,11 @@ import {
 } from "./adapters"
 import { BUILD_ESTIMATE_STEP_KEY, loadQuote } from "./build-estimate"
 import { DELIVER_STEP_KEY, loadDelivery } from "./deliver"
-import { MATCH_PRODUCTS_STEP_KEY } from "./match-products"
+import {
+  MATCH_PRODUCTS_STEP_KEY,
+  MATCHES_EVIDENCE_KIND,
+  MATCHES_EVIDENCE_SCHEMA,
+} from "./match-products"
 import {
   DOCUMENTS_EVIDENCE_KIND,
   DOCUMENTS_EVIDENCE_SCHEMA,
@@ -235,10 +239,6 @@ export async function loadDocumentEvidence(
   }
 }
 
-function readState(value: unknown): DocumentEvidenceProjection["state"] {
-  return value === "complete" || value === "error" ? value : "pending"
-}
-
 /**
  * The page's regions, or none. A column this projection cannot read costs the
  * page its region overlay and nothing else, so the text still shows.
@@ -256,10 +256,6 @@ function readRegions(raw: string): PageProjection["regions"] {
       region.bottomRightY,
     ],
   }))
-}
-
-function readNumber(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) ? value : null
 }
 
 /* -------------------------------------------------------------------------- */
@@ -589,91 +585,28 @@ export async function loadMatchEvidence(
   env: Env,
   runId: string
 ): Promise<MatchEvidenceProjection> {
-  const stored = await readStoredEvidence(
+  const stored = await readOwnedEvidence(
     env,
     runId,
     MATCH_PRODUCTS_STEP_KEY,
-    "matches"
+    MATCHES_EVIDENCE_KIND,
+    MATCHES_EVIDENCE_SCHEMA
   )
 
-  const heuristics = stored?.heuristics ? asRecord(stored.heuristics) : null
-  const totals = stored?.totals ? asRecord(stored.totals) : null
+  const matches = stored.outcome === "read" ? stored.value : null
+  const unreadable = stored.outcome === "unreadable"
 
   return {
     stepKey: MATCH_PRODUCTS_STEP_KEY,
-    state: readState(stored?.state),
-    message: readText(stored?.message),
-    provider: readText(stored?.provider),
-    model: readText(stored?.model),
-    heuristics: heuristics
-      ? {
-          winnerStrength: readNumber(heuristics.winnerStrength) ?? 0,
-          winnerGap: readNumber(heuristics.winnerGap) ?? 0,
-          note: readText(heuristics.note) ?? "",
-        }
-      : null,
-    lines: (Array.isArray(stored?.lines) ? stored.lines : []).map((entry) => {
-      const line = asRecord(entry)
-
-      return {
-        position: readNumber(line.position) ?? 0,
-        reference: readText(line.reference) ?? "",
-        description: readText(line.description) ?? "",
-        state: readText(line.state) ?? "review_required",
-        sku: readText(line.sku),
-        productName: readText(line.productName),
-        method: readText(line.method) ?? "none",
-        decisionEvidence: readText(line.decisionEvidence) ?? "",
-        confidence: readConfidence(line.confidence),
-        winnerScore: readNumber(line.winnerScore) ?? 0,
-        winnerGap: readNumber(line.winnerGap) ?? 0,
-        alternatives: (Array.isArray(line.alternatives)
-          ? line.alternatives
-          : []
-        ).map((value) => {
-          const alternative = asRecord(value)
-
-          return {
-            sku: readText(alternative.sku) ?? "",
-            name: readText(alternative.name) ?? "",
-            score: readNumber(alternative.score) ?? 0,
-            reason: readText(alternative.reason) ?? "",
-            nearDuplicateOf: readText(alternative.nearDuplicateOf),
-          }
-        }),
-        rejected: (Array.isArray(line.rejected) ? line.rejected : []).map(
-          (value) => {
-            const rejected = asRecord(value)
-
-            return {
-              sku: readText(rejected.sku) ?? "",
-              reason: readText(rejected.reason) ?? "",
-            }
-          }
-        ),
-        candidateCount: readNumber(line.candidateCount) ?? 0,
-        shortlistSize: readNumber(line.shortlistSize) ?? 0,
-        repaired: line.repaired === true,
-        issues: readStrings(line.issues),
-        originalOutput: readText(line.originalOutput),
-        latencyMs: readNumber(line.latencyMs),
-        usage: readUsage(line.usage),
-      }
-    }),
-    totals: totals
-      ? {
-          lineCount: readNumber(totals.lineCount) ?? 0,
-          acceptedCount: readNumber(totals.acceptedCount) ?? 0,
-          reviewCount: readNumber(totals.reviewCount) ?? 0,
-          deterministicCount: readNumber(totals.deterministicCount) ?? 0,
-          rerankedCount: readNumber(totals.rerankedCount) ?? 0,
-          modelCalls: readNumber(totals.modelCalls) ?? 0,
-          providerLatencyMs: readNumber(totals.providerLatencyMs) ?? 0,
-          usage: readUsage(totals.usage),
-          estimatedCostUsd: readNumber(totals.estimatedCostUsd),
-          elapsedMs: readNumber(totals.elapsedMs) ?? 0,
-        }
-      : null,
+    state: unreadable ? "error" : (matches?.state ?? "pending"),
+    message: unreadable
+      ? UNREADABLE_EVIDENCE_MESSAGE
+      : (matches?.message ?? null),
+    provider: matches?.provider ?? null,
+    model: matches?.model ?? null,
+    heuristics: matches?.heuristics ?? null,
+    lines: matches?.lines ?? [],
+    totals: matches?.totals ?? null,
   }
 }
 
@@ -907,28 +840,17 @@ async function readStoredEvidence(
   }
 }
 
-function readConfidence(value: unknown): ConfidenceProjection {
-  if (typeof value !== "object" || value === null) return null
+/*
+ * The last of the hand-rolled readers. Only the Build estimate branch above
+ * still calls them; they go when its own step owns a schema.
+ */
 
-  const confidence = value as Record<string, unknown>
-
-  return {
-    label: readText(confidence.label) ?? "Review",
-    score: readNumber(confidence.score) ?? 0,
-    heuristic: readText(confidence.heuristic) ?? "",
-  }
+function readState(value: unknown): EstimateEvidenceProjection["state"] {
+  return value === "complete" || value === "error" ? value : "pending"
 }
 
-function readUsage(value: unknown): StructureEvidenceProjection["usage"] {
-  if (typeof value !== "object" || value === null) return null
-
-  const usage = value as Record<string, unknown>
-
-  return {
-    inputTokens: readNumber(usage.inputTokens) ?? 0,
-    outputTokens: readNumber(usage.outputTokens) ?? 0,
-    totalTokens: readNumber(usage.totalTokens) ?? 0,
-  }
+function readNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null
 }
 
 function readStrings(value: unknown): string[] {
