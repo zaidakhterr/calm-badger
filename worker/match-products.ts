@@ -70,6 +70,40 @@ const RERANK_USAGE_SCHEMA = z.object({
 })
 
 /**
+ * A product this line was compared against and did not settle on. Every field
+ * names something the catalogue holds, so none of them defaults.
+ */
+const MATCH_ALTERNATIVE_SCHEMA = z.object({
+  sku: z.string(),
+  name: z.string(),
+  score: z.number(),
+  reason: z.string(),
+  /** Set when the catalogue records this product as a near duplicate. */
+  nearDuplicateOf: z.string().nullable(),
+})
+
+/**
+ * The `alternatives` column of `run_line_matches`, as this step stores it: the
+ * same alternatives, JSON-encoded beside the decision they lost to.
+ *
+ * The column belongs here because this step writes it. What an unreadable one
+ * means belongs to whoever reads it — the review node offers no alternatives
+ * for that line, rather than refusing to open.
+ */
+export const STORED_MATCH_ALTERNATIVES_SCHEMA = z
+  .string()
+  .transform((raw, ctx) => {
+    try {
+      const decoded: unknown = JSON.parse(raw)
+      return decoded
+    } catch {
+      ctx.addIssue({ code: "custom", message: "The column is not JSON text." })
+      return z.NEVER
+    }
+  })
+  .pipe(z.array(MATCH_ALTERNATIVE_SCHEMA))
+
+/**
  * The decision for one requested line, and everything it was decided on.
  *
  * `method` and `state` stay open strings because the matching module owns
@@ -90,16 +124,7 @@ const MATCH_LINE_SCHEMA = z.object({
   decisionEvidence: z.string(),
   candidateCount: z.number(),
   shortlistSize: z.number(),
-  alternatives: z.array(
-    z.object({
-      sku: z.string(),
-      name: z.string(),
-      score: z.number(),
-      reason: z.string(),
-      /** Set when the catalogue records this product as a near duplicate. */
-      nearDuplicateOf: z.string().nullable(),
-    })
-  ),
+  alternatives: z.array(MATCH_ALTERNATIVE_SCHEMA),
   rejected: z.array(z.object({ sku: z.string(), reason: z.string() })),
   confidence: CONFIDENCE_SCHEMA,
   winnerScore: z.number(),

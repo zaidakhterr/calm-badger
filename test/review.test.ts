@@ -2,7 +2,11 @@ import { env, exports } from "cloudflare:workers"
 import { describe, expect, it } from "vitest"
 
 import { normaliseText } from "../worker/catalog/retrieval"
-import { loadReviewOutcome, settleReview } from "../worker/review"
+import {
+  loadReviewEvidence,
+  loadReviewOutcome,
+  settleReview,
+} from "../worker/review"
 import { retentionDeadline } from "../worker/retention-policy"
 import { applyReviewOutcome } from "../worker/workflow"
 
@@ -181,6 +185,18 @@ function decide(
       ...(capability ? { authorization: `Bearer ${capability}` } : {}),
     },
     body: JSON.stringify({ decisions }),
+  })
+}
+
+/** The same endpoint, with the request body sent exactly as written. */
+function submitDecisionsBody(viewId: string, capability: string, body: string) {
+  return exports.default.fetch(`${base}/api/runs/${viewId}/review/decisions`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${capability}`,
+    },
+    body,
   })
 }
 
@@ -877,6 +893,53 @@ describe("approving a review", () => {
     expect(after.state).toBe("pending")
   })
 
+  it("refuses a body that is not a list of known decisions", async () => {
+    const { run, ownerCapability, review } = await pausedRun()
+    const [item] = review.items
+
+    for (const body of [
+      "not json at all",
+      JSON.stringify({}),
+      JSON.stringify({ decisions: "all of them" }),
+      JSON.stringify({ decisions: { itemId: item.id, action: "accept" } }),
+    ]) {
+      const response = await submitDecisionsBody(
+        run.viewId,
+        ownerCapability,
+        body
+      )
+
+      expect(response.status).toBe(400)
+      expect((await response.json<{ error: string }>()).error).toBe(
+        "A list of review decisions is required"
+      )
+    }
+
+    for (const decisions of [
+      [{ itemId: item.id }],
+      [{ action: "accept" }],
+      [{ itemId: item.id, action: "delete" }],
+      // One unrecognised entry refuses the whole submission, so a decision is
+      // never recorded beside one that could not be read.
+      [{ itemId: item.id, action: "accept" }, "not a decision"],
+    ]) {
+      const response = await submitDecisionsBody(
+        run.viewId,
+        ownerCapability,
+        JSON.stringify({ decisions })
+      )
+
+      expect(response.status).toBe(400)
+      expect((await response.json<{ error: string }>()).error).toBe(
+        "Each decision needs a known item and action"
+      )
+    }
+
+    const after = await readReview(run.viewId)
+    expect(after.resolvedCount).toBe(0)
+    expect(after.state).toBe("pending")
+  })
+
   it("treats a mislabelled action on a product line as the catalogue choice it carries", async () => {
     // A product line is decided by the article number a decision carries, not
     // by the action word next to it. Nothing can be invented either way: the
@@ -1536,6 +1599,105 @@ describe("the settled review, read as a value", () => {
     expect(outcome.state).toBe("expired")
     expect(outcome.decisions).toEqual([])
     expect(outcome.decidedAt).not.toBeNull()
+  })
+})
+
+/* -------------------------------------------------------------------------- */
+/* Stored items a different build wrote                                       */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Rows are seeded straight into D1, the way `run-steps.test.ts` does, because
+ * the point is a stored item no current code path writes: one whose lists
+ * predate a field, and one whose lists cannot be read at all. Running the real
+ * workflow would only ever produce today's columns.
+ */
+describe("reading review items a different build wrote", () => {
+  const SEEDED_AT = "2026-01-01T00:00:00.000Z"
+
+  async function seedReviewItem(
+    reasons: string,
+    alternatives: string
+  ): Promise<string> {
+    const runId = crypto.randomUUID()
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString()
+
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO runs (
+           id, view_id, owner_capability_hash, source_kind, scenario_id,
+           status, workflow_instance_id, workflow_state, workspace_hash,
+           created_at, updated_at
+         ) VALUES (?, ?, 'hash', 'curated', 'messy-forwarded-request',
+                   'active', NULL, 'awaiting_review', NULL, ?, ?)`
+      ).bind(runId, crypto.randomUUID(), SEEDED_AT, SEEDED_AT),
+      env.DB.prepare(
+        `INSERT INTO run_reviews
+           (run_id, state, item_count, opened_at, expires_at, decided_at,
+            summary)
+         VALUES (?, 'pending', 1, ?, ?, NULL, 'one decision')`
+      ).bind(runId, SEEDED_AT, expiresAt),
+      env.DB.prepare(
+        `INSERT INTO run_review_items (
+           id, run_id, kind, position, source_phrase, detail, proposed_label,
+           proposed_sku, proposed_quantity, proposed_customer_id,
+           confidence_label, confidence_score, heuristic, reasons, alternatives,
+           state, decision, resolved_sku, resolved_quantity,
+           resolved_customer_id, resolved_at, created_at
+         ) VALUES (?, ?, 'product', 1, 'panel filter', 'Not certain enough.',
+                   'Panel filter 592x592', 'NX-FLT-1120', NULL, NULL,
+                   'Review', 0.4, 'Demo heuristics.', ?, ?, 'pending',
+                   NULL, NULL, NULL, NULL, NULL, ?)`
+      ).bind(crypto.randomUUID(), runId, reasons, alternatives, SEEDED_AT),
+    ])
+
+    return runId
+  }
+
+  it("still offers an alternative written without its label or score", async () => {
+    const runId = await seedReviewItem(
+      JSON.stringify(["The winner does not lead the runner-up far enough."]),
+      // No `detail` and no `score`, and one entry with no `label` either: an
+      // earlier build recorded the identifier and little else.
+      JSON.stringify([
+        { value: "NX-FLT-1121", label: "Panel filter, wide" },
+        { value: "NX-FLT-1122" },
+      ])
+    )
+
+    const review = await loadReviewEvidence(env, runId)
+    const [item] = review.items
+
+    expect(review.state).toBe("pending")
+    expect(item.reasons).toEqual([
+      "The winner does not lead the runner-up far enough.",
+    ])
+    expect(item.alternatives).toEqual([
+      {
+        value: "NX-FLT-1121",
+        label: "Panel filter, wide",
+        detail: "",
+        score: 0,
+      },
+      // An offer with no wording still names what it would select.
+      { value: "NX-FLT-1122", label: "NX-FLT-1122", detail: "", score: 0 },
+    ])
+  })
+
+  it("asks the question anyway when neither list can be read", async () => {
+    const runId = await seedReviewItem("not json at all", '{"nope": true}')
+
+    const review = await loadReviewEvidence(env, runId)
+    const [item] = review.items
+
+    // The item is what the run cannot decide; its reasons and its offers are
+    // what surrounds it. Losing them costs the wording, never the question.
+    expect(review.itemCount).toBe(1)
+    expect(item.kind).toBe("product")
+    expect(item.proposal.sku).toBe("NX-FLT-1120")
+    expect(item.confidence.label).toBe("Review")
+    expect(item.reasons).toEqual([])
+    expect(item.alternatives).toEqual([])
   })
 })
 

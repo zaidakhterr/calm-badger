@@ -15,6 +15,8 @@ import {
 import {
   loadReviewEvidence,
   recordDecisions,
+  REVIEW_DECISION_SCHEMA,
+  REVIEW_DECISIONS_BODY_SCHEMA,
   REVIEW_EVENT_TYPE,
   searchReviewCatalog,
   searchReviewCustomers,
@@ -782,14 +784,6 @@ async function reviewViewResponse(env: Env, viewId: string): Promise<Response> {
   )
 }
 
-const REVIEW_ACTIONS = new Set([
-  "accept",
-  "alternative",
-  "catalog",
-  "quantity",
-  "customer",
-])
-
 /** Records corrections. It never releases the workflow; approval does that. */
 async function reviewDecisionsResponse(
   request: Request,
@@ -804,10 +798,11 @@ async function reviewDecisionsResponse(
 
   if (!authorization.ok) return ownerRejection(authorization.reason)
 
-  const payload = await readJsonBody(request)
-  const submitted = (payload as { decisions?: unknown } | null)?.decisions
+  const body = REVIEW_DECISIONS_BODY_SCHEMA.safeParse(
+    await readJsonBody(request)
+  )
 
-  if (!Array.isArray(submitted)) {
+  if (!body.success) {
     return Response.json(
       { error: "A list of review decisions is required" },
       { status: 400, headers: jsonHeaders }
@@ -816,27 +811,17 @@ async function reviewDecisionsResponse(
 
   const decisions: DecisionInput[] = []
 
-  for (const entry of submitted) {
-    const decision = entry as Record<string, unknown>
+  for (const entry of body.data.decisions) {
+    const decision = REVIEW_DECISION_SCHEMA.safeParse(entry)
 
-    if (
-      typeof decision.itemId !== "string" ||
-      typeof decision.action !== "string" ||
-      !REVIEW_ACTIONS.has(decision.action)
-    ) {
+    if (!decision.success) {
       return Response.json(
         { error: "Each decision needs a known item and action" },
         { status: 400, headers: jsonHeaders }
       )
     }
 
-    decisions.push({
-      itemId: decision.itemId,
-      action: decision.action as DecisionInput["action"],
-      sku: decision.sku,
-      quantity: decision.quantity,
-      customerId: decision.customerId,
-    })
+    decisions.push(decision.data)
   }
 
   const outcome = await recordDecisions(env, authorization.runId, decisions)

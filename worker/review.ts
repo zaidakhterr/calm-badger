@@ -33,7 +33,15 @@
  * the global dataset or another visitor's run.
  */
 
+import { z } from "zod"
+
 import { readConfig, type AppConfig } from "./env"
+import { STORED_MATCH_ALTERNATIVES_SCHEMA } from "./match-products"
+import {
+  CUSTOMER_EVIDENCE_KIND,
+  CUSTOMER_EVIDENCE_SCHEMA,
+  RESOLVE_CUSTOMER_STEP_KEY,
+} from "./resolve-customer"
 import { retentionDeadline } from "./retention-policy"
 import { MAX_LINE_QUANTITY } from "./rfq-extraction"
 import { createRunStepRecorder } from "./run-steps"
@@ -44,8 +52,118 @@ export const REVIEW_STEP_TITLE = "Review required"
 /** The event type the Worker delivers to a hibernating workflow instance. */
 export const REVIEW_EVENT_TYPE = "owner-review"
 
-export type ReviewState =
-  "not_required" | "pending" | "approved" | "rejected" | "expired"
+/* -------------------------------------------------------------------------- */
+/* The contracts this node owns                                               */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Every state a review can be in. `not_required` is the state of a run that
+ * never opened one, so it is also what a state this build does not recognise
+ * reads as: nothing here is waiting for anybody.
+ */
+export const REVIEW_STATE_SCHEMA = z.enum([
+  "not_required",
+  "pending",
+  "approved",
+  "rejected",
+  "expired",
+])
+
+export type ReviewState = z.infer<typeof REVIEW_STATE_SCHEMA>
+
+/** The four kinds of uncertainty a run can raise, and nothing else. */
+export const REVIEW_ITEM_KIND_SCHEMA = z.enum([
+  "customer",
+  "product",
+  "quantity",
+  "field",
+])
+
+export type ReviewItemKind = z.infer<typeof REVIEW_ITEM_KIND_SCHEMA>
+
+/**
+ * One alternative the owner may choose instead of the proposal.
+ *
+ * The identifier is required — an alternative that names no record is not an
+ * offer, and there is nothing to select. What it reads as is enrichment: an
+ * entry an earlier build wrote without a label still offers its identifier
+ * rather than disappearing from the list.
+ */
+export const REVIEW_ALTERNATIVE_SCHEMA = z
+  .object({
+    /** A SKU or a customer identifier; never a value the owner typed. */
+    value: z.string(),
+    label: z.string().nullable().catch(null),
+    detail: z.string().catch(""),
+    score: z.number().catch(0),
+  })
+  .transform((entry) => ({
+    value: entry.value,
+    label: entry.label ?? entry.value,
+    detail: entry.detail,
+    score: entry.score,
+  }))
+
+export type ReviewAlternative = z.infer<typeof REVIEW_ALTERNATIVE_SCHEMA>
+
+/**
+ * One correction as the owner's browser submits it. The Worker parses the
+ * request body with this schema, so a decision that reaches `recordDecisions`
+ * already names a known action and carries values of the right kind. Whether
+ * those values exist is the catalogue's answer, and it is given below.
+ */
+export const REVIEW_DECISION_SCHEMA = z.object({
+  itemId: z.string(),
+  action: z.enum(["accept", "alternative", "catalog", "quantity", "customer"]),
+  sku: z.string().optional(),
+  quantity: z.number().optional(),
+  customerId: z.string().optional(),
+})
+
+export type DecisionInput = z.infer<typeof REVIEW_DECISION_SCHEMA>
+
+/**
+ * The decisions request body, as a list before any entry is a decision. The
+ * two stages are two different answers: a body that carries no list at all was
+ * not a submission, while a list holding something unrecognised names the
+ * entry that cannot be applied.
+ */
+export const REVIEW_DECISIONS_BODY_SCHEMA = z.object({
+  decisions: z.array(z.json()),
+})
+
+/**
+ * How a product line was decided. Anything else — including a decision word an
+ * earlier build wrote — reads as the alternative, which is how the stored
+ * reason already describes it.
+ */
+const PRODUCT_DECISION_SCHEMA = z
+  .enum(["accepted_proposal", "chose_alternative", "chose_catalog"])
+  .catch("chose_alternative")
+
+/** A JSON text column of this module's, decoded before it is parsed. */
+const STORED_TEXT_SCHEMA = z.string().transform((raw, ctx) => {
+  try {
+    const decoded: unknown = JSON.parse(raw)
+    return decoded
+  } catch {
+    ctx.addIssue({ code: "custom", message: "The column is not JSON text." })
+    return z.NEVER
+  }
+})
+
+/** The `reasons` column: the sentences this node wrote for one item. */
+const STORED_REASONS_SCHEMA = STORED_TEXT_SCHEMA.pipe(z.array(z.string()))
+
+/** The `alternatives` column: the offers this node recorded for one item. */
+const STORED_REVIEW_ALTERNATIVES_SCHEMA = STORED_TEXT_SCHEMA.pipe(
+  z.array(REVIEW_ALTERNATIVE_SCHEMA)
+)
+
+/** The Resolve customer evidence row, read here for its scored candidates. */
+const STORED_CUSTOMER_EVIDENCE_SCHEMA = STORED_TEXT_SCHEMA.pipe(
+  CUSTOMER_EVIDENCE_SCHEMA
+)
 
 export type ReviewOpening =
   | { state: "not_required" }
@@ -249,7 +367,7 @@ function remainingMs(expiresAt: string): number {
 }
 
 type CollectedItem = {
-  kind: "customer" | "product" | "quantity" | "field"
+  kind: ReviewItemKind
   position: number
   sourcePhrase: string
   detail: string
@@ -262,14 +380,6 @@ type CollectedItem = {
   heuristic: string
   reasons: string[]
   alternatives: ReviewAlternative[]
-}
-
-export type ReviewAlternative = {
-  /** A SKU or a customer identifier; never a value the owner typed. */
-  value: string
-  label: string
-  detail: string
-  score: number
 }
 
 /** The run-level customer decision has no line of its own. */
@@ -422,7 +532,7 @@ async function collectItems(env: Env, runId: string): Promise<CollectedItem[]> {
     const match = matchByPosition.get(line.position)
 
     if (match && match.state !== "accepted") {
-      const alternatives = readMatchAlternatives(match.alternatives)
+      const alternatives = matchAlternatives(match.alternatives)
 
       items.push({
         kind: "product",
@@ -469,37 +579,21 @@ async function catalogNames(
 }
 
 /**
- * The one JSON-column parser. Every stored list in this module — reasons,
- * review alternatives, match alternatives — is a JSON array whose entries are
- * only as trustworthy as the row they came from, so the shape check lives here
- * and each caller supplies the mapping for one entry. Anything unparseable or
- * unrecognised reads as an empty list rather than an error.
+ * Alternatives as `match-products` stores them, offered here by SKU. The
+ * column is that step's contract, so its schema comes from there; what an
+ * unreadable one means is this node's decision, and it means no alternatives
+ * for that line rather than a review that cannot be opened.
  */
-function readJsonArray<T>(raw: string, entryOf: (entry: unknown) => T[]): T[] {
-  try {
-    const parsed: unknown = JSON.parse(raw)
-    return Array.isArray(parsed) ? parsed.flatMap(entryOf) : []
-  } catch {
-    return []
-  }
-}
+function matchAlternatives(raw: string): ReviewAlternative[] {
+  const stored = STORED_MATCH_ALTERNATIVES_SCHEMA.safeParse(raw)
+  if (!stored.success) return []
 
-/** Alternatives as `match-products` stores them, keyed by SKU. */
-function readMatchAlternatives(raw: string): ReviewAlternative[] {
-  return readJsonArray(raw, (entry) => {
-    const value = entry as Record<string, unknown>
-    const sku = typeof value.sku === "string" ? value.sku : null
-    if (!sku) return []
-
-    return [
-      {
-        value: sku,
-        label: typeof value.name === "string" ? value.name : sku,
-        detail: typeof value.reason === "string" ? value.reason : "",
-        score: typeof value.score === "number" ? value.score : 0,
-      },
-    ]
-  })
+  return stored.data.map((entry) => ({
+    value: entry.sku,
+    label: entry.name,
+    detail: entry.reason,
+    score: entry.score,
+  }))
 }
 
 /** The customers resolution scored highest, read back from its own evidence. */
@@ -509,33 +603,24 @@ async function customerAlternatives(
 ): Promise<ReviewAlternative[]> {
   const row = await env.DB.prepare(
     `SELECT payload FROM run_step_evidence
-      WHERE run_id = ? AND step_key = 'resolve-customer' AND kind = 'customer'`
+      WHERE run_id = ? AND step_key = ? AND kind = ?`
   )
-    .bind(runId)
+    .bind(runId, RESOLVE_CUSTOMER_STEP_KEY, CUSTOMER_EVIDENCE_KIND)
     .first<{ payload: string }>()
 
   if (!row) return []
 
-  try {
-    const parsed = JSON.parse(row.payload) as {
-      candidates?: { customerId?: string; name?: string; score?: number }[]
-    }
+  // A payload that step's own projection cannot read is reported there, once.
+  // Here it costs the customer question its scored suggestions and no more.
+  const stored = STORED_CUSTOMER_EVIDENCE_SCHEMA.safeParse(row.payload)
+  if (!stored.success) return []
 
-    return (parsed.candidates ?? []).flatMap((candidate) =>
-      candidate.customerId
-        ? [
-            {
-              value: candidate.customerId,
-              label: candidate.name ?? candidate.customerId,
-              detail: "Scored by customer resolution, below the threshold.",
-              score: candidate.score ?? 0,
-            },
-          ]
-        : []
-    )
-  } catch {
-    return []
-  }
+  return stored.data.candidates.map((candidate) => ({
+    value: candidate.customerId,
+    label: candidate.name,
+    detail: "Scored by customer resolution, below the threshold.",
+    score: candidate.score,
+  }))
 }
 
 function describeItems(items: CollectedItem[]): string {
@@ -697,8 +782,8 @@ function projectItem(row: ItemRow): ReviewItemProjection {
       score: row.confidence_score,
       heuristic: row.heuristic,
     },
-    reasons: readStrings(row.reasons),
-    alternatives: readAlternatives(row.alternatives),
+    reasons: storedReasons(row.reasons),
+    alternatives: storedAlternatives(row.alternatives),
     state: row.state,
     decision: row.decision,
     resolved: {
@@ -710,27 +795,19 @@ function projectItem(row: ItemRow): ReviewItemProjection {
   }
 }
 
-function readStrings(raw: string): string[] {
-  return readJsonArray(raw, (entry) =>
-    typeof entry === "string" ? [entry] : []
-  )
+/**
+ * The two stored lists an item carries. Both are enrichment around a question
+ * that is asked either way, so a column this build cannot read costs the item
+ * its reasons or its offers and never the item itself.
+ */
+function storedReasons(raw: string): string[] {
+  const stored = STORED_REASONS_SCHEMA.safeParse(raw)
+  return stored.success ? stored.data : []
 }
 
-/** Alternatives as the review node stores them, keyed by `value`. */
-function readAlternatives(raw: string): ReviewAlternative[] {
-  return readJsonArray(raw, (entry) => {
-    const value = entry as Record<string, unknown>
-    return typeof value.value === "string"
-      ? [
-          {
-            value: value.value,
-            label: typeof value.label === "string" ? value.label : value.value,
-            detail: typeof value.detail === "string" ? value.detail : "",
-            score: typeof value.score === "number" ? value.score : 0,
-          },
-        ]
-      : []
-  })
+function storedAlternatives(raw: string): ReviewAlternative[] {
+  const stored = STORED_REVIEW_ALTERNATIVES_SCHEMA.safeParse(raw)
+  return stored.success ? stored.data : []
 }
 
 async function loadReviewRow(
@@ -746,7 +823,9 @@ async function loadReviewRow(
 }
 
 function effectiveState(review: ReviewRow): ReviewState {
-  if (review.state !== "pending") return review.state as ReviewState
+  const state = REVIEW_STATE_SCHEMA.catch("not_required").parse(review.state)
+
+  if (state !== "pending") return state
   return Date.parse(review.expires_at) <= Date.now() ? "expired" : "pending"
 }
 
@@ -856,7 +935,10 @@ function resolvedDecisionOf(
 ): ResolvedDecision[] {
   if (item.state !== "resolved") return []
 
-  switch (item.kind) {
+  const kind = REVIEW_ITEM_KIND_SCHEMA.safeParse(item.kind)
+  if (!kind.success) return []
+
+  switch (kind.data) {
     case "customer":
       return item.resolved_customer_id
         ? [{ kind: "customer", customerId: item.resolved_customer_id }]
@@ -883,35 +965,18 @@ function resolvedDecisionOf(
               kind: "product",
               position: item.position,
               sku: item.resolved_sku,
-              // Anything that is not one of the two named decisions is the
-              // alternative, which is how the stored reason already reads it.
-              decision:
-                item.decision === "accepted_proposal" ||
-                item.decision === "chose_catalog"
-                  ? item.decision
-                  : "chose_alternative",
+              decision: PRODUCT_DECISION_SCHEMA.parse(item.decision),
               sourcePhrase: item.source_phrase,
               aliasExpiresAt,
             },
           ]
         : []
-
-    default:
-      return []
   }
 }
 
 /* -------------------------------------------------------------------------- */
 /* Deciding                                                                   */
 /* -------------------------------------------------------------------------- */
-
-export type DecisionInput = {
-  itemId: string
-  action: "accept" | "alternative" | "catalog" | "quantity" | "customer"
-  sku?: unknown
-  quantity?: unknown
-  customerId?: unknown
-}
 
 export type DecisionOutcome =
   | { state: "recorded"; review: ReviewProjection }
@@ -1039,7 +1104,7 @@ async function resolveDecision(
   row: ItemRow,
   decision: DecisionInput
 ): Promise<DecisionResolution> {
-  const alternatives = readAlternatives(row.alternatives)
+  const alternatives = storedAlternatives(row.alternatives)
 
   if (row.kind === "customer") {
     if (decision.action !== "customer" && decision.action !== "alternative") {
@@ -1049,8 +1114,7 @@ async function resolveDecision(
       }
     }
 
-    const customerId =
-      typeof decision.customerId === "string" ? decision.customerId.trim() : ""
+    const customerId = decision.customerId?.trim() ?? ""
 
     if (!customerId) {
       return { state: "invalid", message: "A customer identifier is required" }
@@ -1096,7 +1160,9 @@ async function resolveDecision(
       }
     }
 
-    const quantity = Number(decision.quantity)
+    // An omitted quantity fails the same range check a stated one does, and
+    // says the same thing back.
+    const quantity = decision.quantity ?? Number.NaN
 
     if (
       !Number.isInteger(quantity) ||
@@ -1140,9 +1206,7 @@ async function resolveDecision(
   const sku =
     decision.action === "accept"
       ? row.proposed_sku
-      : typeof decision.sku === "string"
-        ? decision.sku.trim().toUpperCase()
-        : ""
+      : (decision.sku?.trim().toUpperCase() ?? "")
 
   if (!sku) {
     return {
