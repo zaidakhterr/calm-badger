@@ -235,34 +235,36 @@ function ScenarioCard({
   onSelect: () => void
 }) {
   return (
-    <div className="relative">
+    <div className="relative h-full">
       <button
         type="button"
         aria-pressed={isSelected}
         onClick={onSelect}
         className={cn(
-          "flex min-h-24 w-full flex-col justify-between rounded-lg border bg-card p-4 text-left shadow-xs transition-colors outline-none hover:bg-muted/40 focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30",
+          "flex h-full w-full flex-col rounded-lg border bg-card p-4 text-left shadow-xs transition-colors outline-none hover:bg-muted/40 focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30",
           isSelected && "border-foreground bg-muted/30"
         )}
       >
-        <span
-          aria-hidden="true"
-          className={cn(
-            "absolute top-4 right-4 size-3 rounded-full border",
-            isSelected && "border-[3px] border-foreground"
-          )}
-        />
-        <span className="block pr-5 text-[13px] leading-4 font-medium">
-          {scenario.name}
+        <span className="flex items-start justify-between gap-3">
+          <span className="block text-[13px] leading-4 font-medium">
+            {scenario.name}
+          </span>
+          <span
+            aria-hidden="true"
+            className={cn(
+              "mt-0.5 size-3 shrink-0 rounded-full border",
+              isSelected && "border-[3px] border-foreground"
+            )}
+          />
         </span>
-        <span className="mt-3 block pr-7 text-[11px] text-muted-foreground">
-          Difficulty {scenario.difficulty.level.toLowerCase()} ·{" "}
-          {scenario.sources}
+        <span className="mt-auto block pt-3 pr-7 text-[11px] leading-4 text-muted-foreground">
+          Difficulty {scenario.difficulty.level.toLowerCase()}
+          <span className="block">{scenario.sources}</span>
         </span>
       </button>
       <InfoTooltip
         label={`About ${scenario.name}`}
-        className="absolute right-2.5 bottom-2.5"
+        className="absolute right-2 bottom-2"
       >
         <p>{scenario.difficulty.summary}</p>
         <p className="mt-1.5 text-muted-foreground">
