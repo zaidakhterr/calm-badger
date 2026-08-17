@@ -5,8 +5,8 @@
  * `ASSETS`, and a set of strings. Everything on it that is a string is parsed
  * here, once, into `AppConfig` — provider names as enums, models as non-empty
  * text, costs and thresholds and windows as numbers, secrets as `string | null`
- * — so that no call site anywhere else reads `env.SOME_VARIABLE` and decides
- * for itself what a blank one means.
+ * — so that no call site anywhere else reads a raw variable off the binding
+ * object and decides for itself what a blank one means.
  *
  * The invariants a deployment must satisfy live in the schema rather than in
  * the code that consumes it:
