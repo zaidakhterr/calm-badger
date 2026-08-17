@@ -34,6 +34,7 @@ import {
 } from "./read-documents"
 import { RESOLVE_CUSTOMER_STEP_KEY } from "./resolve-customer"
 import { RETRIEVE_CANDIDATES_STEP_KEY } from "./retrieve-candidates"
+import { STORED_OCR_REGIONS_SCHEMA } from "./providers/ocr"
 import type { CanonicalQuote } from "./quote"
 import { RFQ_RECEIVED_STEP_KEY } from "./runs"
 import { loadSources, MAX_EMAIL_BODY_CHARS } from "./sources"
@@ -226,27 +227,23 @@ function readState(value: unknown): DocumentEvidenceProjection["state"] {
   return value === "complete" || value === "error" ? value : "pending"
 }
 
+/**
+ * The page's regions, or none. A column this projection cannot read costs the
+ * page its region overlay and nothing else, so the text still shows.
+ */
 function readRegions(raw: string): PageProjection["regions"] {
-  try {
-    const parsed: unknown = JSON.parse(raw)
-    if (!Array.isArray(parsed)) return []
+  const stored = STORED_OCR_REGIONS_SCHEMA.safeParse(raw)
+  if (!stored.success) return []
 
-    return parsed.map((entry, index) => {
-      const region = (entry ?? {}) as Record<string, unknown>
-
-      return {
-        id: typeof region.id === "string" ? region.id : `region-${index + 1}`,
-        box: [
-          readNumber(region.topLeftX) ?? 0,
-          readNumber(region.topLeftY) ?? 0,
-          readNumber(region.bottomRightX) ?? 0,
-          readNumber(region.bottomRightY) ?? 0,
-        ] as [number, number, number, number],
-      }
-    })
-  } catch {
-    return []
-  }
+  return stored.data.map((region) => ({
+    id: region.id,
+    box: [
+      region.topLeftX,
+      region.topLeftY,
+      region.bottomRightX,
+      region.bottomRightY,
+    ],
+  }))
 }
 
 function readNumber(value: unknown): number | null {

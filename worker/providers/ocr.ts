@@ -9,6 +9,8 @@
  * production and no test can reach the network.
  */
 
+import { z } from "zod"
+
 import type { AppConfig } from "../env"
 
 import { createContractFakeOcrProvider } from "./contract-fake-ocr"
@@ -28,13 +30,37 @@ export type OcrRequest = {
 }
 
 /** An image region located on a page, without the image bytes themselves. */
-export type OcrRegion = {
-  id: string
-  topLeftX: number
-  topLeftY: number
-  bottomRightX: number
-  bottomRightY: number
-}
+export const OCR_REGION_SCHEMA = z.object({
+  id: z.string(),
+  topLeftX: z.number(),
+  topLeftY: z.number(),
+  bottomRightX: z.number(),
+  bottomRightY: z.number(),
+})
+
+export type OcrRegion = z.infer<typeof OCR_REGION_SCHEMA>
+
+/**
+ * One page's regions as `run_source_pages.regions` stores them: this contract's
+ * own array, JSON-encoded by the step that persists the page.
+ *
+ * The column belongs to this seam rather than to the reader, because these are
+ * the regions a provider reported. Whoever reads the column decides what an
+ * unreadable one means; regions are provenance around a page of text, so the
+ * projection treats them as enrichment and shows none.
+ */
+export const STORED_OCR_REGIONS_SCHEMA = z
+  .string()
+  .transform((raw, ctx) => {
+    try {
+      const decoded: unknown = JSON.parse(raw)
+      return decoded
+    } catch {
+      ctx.addIssue({ code: "custom", message: "The column is not JSON text." })
+      return z.NEVER
+    }
+  })
+  .pipe(z.array(OCR_REGION_SCHEMA))
 
 export type OcrPage = {
   /** One-based, so page provenance reads naturally in the interface. */

@@ -880,6 +880,29 @@ describe("reading stored evidence a different build wrote", () => {
       .run()
   }
 
+  async function storePage(
+    runId: string,
+    sourceId: string,
+    pageNumber: number,
+    regions: string
+  ): Promise<void> {
+    await env.DB.prepare(
+      `INSERT INTO run_source_pages (
+         id, run_id, source_id, page_number, markdown, width, height, dpi,
+         regions, created_at
+       ) VALUES (?, ?, ?, ?, 'POS 1 PANEL FILTER', 595, 842, 72, ?, ?)`
+    )
+      .bind(
+        crypto.randomUUID(),
+        runId,
+        sourceId,
+        pageNumber,
+        regions,
+        SEEDED_AT
+      )
+      .run()
+  }
+
   it("still projects a payload written before the measurements existed", async () => {
     const { runId, sourceId } = await seedRunWithOneSource()
 
@@ -922,6 +945,36 @@ describe("reading stored evidence a different build wrote", () => {
     expect(source.latencyMs).toBeNull()
     expect(source.estimatedCostUsd).toBeNull()
     expect(source.sanitizedResponse).toBeNull()
+  })
+
+  it("shows the regions of a page, and none when the column cannot be read", async () => {
+    const { runId, sourceId } = await seedRunWithOneSource()
+
+    await storePage(
+      runId,
+      sourceId,
+      1,
+      JSON.stringify([
+        {
+          id: "img-1",
+          topLeftX: 12,
+          topLeftY: 24,
+          bottomRightX: 120,
+          bottomRightY: 240,
+        },
+      ])
+    )
+    await storePage(runId, sourceId, 2, "not json at all")
+    // A region without its corners is not a region; the page keeps its text.
+    await storePage(runId, sourceId, 3, JSON.stringify([{ id: "img-1" }]))
+
+    const evidence = await loadDocumentEvidence(env, runId)
+    const [first, second, third] = evidence.sources[0].pages
+
+    expect(first.regions).toEqual([{ id: "img-1", box: [12, 24, 120, 240] }])
+    expect(second.regions).toEqual([])
+    expect(second.markdown).toContain("PANEL FILTER")
+    expect(third.regions).toEqual([])
   })
 
   it("projects an error and logs one line when the state is not one it knows", async () => {
