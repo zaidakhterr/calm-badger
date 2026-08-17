@@ -34,6 +34,46 @@ const MARKER = /^RFQ_EVAL_REPORT (.+)$/m
 // itself, because JSON escapes an escape byte, so removing them loses nothing.
 const ANSI_ESCAPE = /\u001b\[[0-9;]*m/g
 
+/**
+ * The report the suite prints on its marker line, as far as this script renders
+ * it. `EvaluationReport` in `test/fixtures/reference-evaluation.ts` owns the
+ * contract; these are the entries a rendered table and the committed summary
+ * cannot do without.
+ *
+ * @typedef {{
+ *   mode: "fixtures" | "live"
+ *   providers: { ocr: string; extraction: string; rerank: string }
+ *   scenarios: object[]
+ *   totals: Record<string, number>
+ *   failures: string[]
+ *   summary: object
+ * }} EvaluationReport
+ */
+
+/** The kinds of entry `readJson` can require of the report. */
+const ENTRY_KINDS = {
+  array: {
+    description: "an array",
+    accepts: (value) => Array.isArray(value),
+  },
+  object: {
+    description: "an object",
+    accepts: (value) => value instanceof Object && !Array.isArray(value),
+  },
+}
+
+/** @type {Record<string, keyof typeof ENTRY_KINDS>} */
+const REPORT_ENTRIES = {
+  providers: "object",
+  scenarios: "array",
+  totals: "object",
+  failures: "array",
+  summary: "object",
+}
+
+/** The two runs the evaluation can describe. */
+const REPORT_MODES = ["fixtures", "live"]
+
 const args = new Set(process.argv.slice(2))
 const live = args.has("--live")
 const check = args.has("--check")
@@ -119,7 +159,51 @@ async function runEvaluation(useLiveProviders) {
 
   const line = MARKER.exec(output.replace(ANSI_ESCAPE, ""))
 
-  return { report: line ? JSON.parse(line[1]) : null, code }
+  return { report: line ? readJson(line[1], REPORT_ENTRIES) : null, code }
+}
+
+/**
+ * Reads the marker line as JSON and returns the report only once every entry in
+ * `expected` is present with the kind named there, so a suite that printed
+ * something else fails here rather than half-way through a rendered table or,
+ * worse, inside the committed summary.
+ *
+ * @param {string} text the JSON the suite printed after its marker
+ * @param {Record<string, keyof typeof ENTRY_KINDS>} expected
+ * @returns {EvaluationReport}
+ */
+function readJson(text, expected) {
+  let parsed
+
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    throw new Error(
+      `The evaluation printed an unreadable RFQ_EVAL_REPORT line (${testFile})`
+    )
+  }
+
+  if (!ENTRY_KINDS.object.accepts(parsed)) {
+    throw new Error(
+      `The RFQ_EVAL_REPORT line must carry a JSON object (${testFile})`
+    )
+  }
+
+  if (!REPORT_MODES.includes(parsed.mode)) {
+    throw new Error(
+      `The RFQ_EVAL_REPORT line must name its mode as ${REPORT_MODES.join(" or ")} (${testFile})`
+    )
+  }
+
+  for (const [key, kind] of Object.entries(expected)) {
+    if (!ENTRY_KINDS[kind].accepts(parsed[key])) {
+      throw new Error(
+        `The RFQ_EVAL_REPORT line must carry "${key}" as ${ENTRY_KINDS[kind].description} (${testFile})`
+      )
+    }
+  }
+
+  return parsed
 }
 
 /* -------------------------------------------------------------------------- */

@@ -24,10 +24,16 @@ function sqlText(value) {
   return `'${String(value).replaceAll("'", "''")}'`
 }
 
+/**
+ * One generated column value as SQLite reads it. The generator's columns are
+ * numbers, booleans, strings, or absent; SQLite has no boolean, so a flag is
+ * written as the integer the schema stores.
+ */
 function sqlValue(value) {
   if (value === null || value === undefined) return "NULL"
-  if (typeof value === "number") return String(value)
-  if (typeof value === "boolean") return value ? "1" : "0"
+  if (value === true) return "1"
+  if (value === false) return "0"
+  if (Number.isFinite(value)) return String(value)
   return sqlText(value)
 }
 

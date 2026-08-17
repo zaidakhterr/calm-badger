@@ -65,10 +65,29 @@ export function catalogAction(counts) {
 
 /** Parses the one-row JSON envelope emitted by `wrangler d1 execute --json`. */
 export function parseCatalogCounts(output) {
+  const row = readJson(output, ["products", "customers"])
+
+  return {
+    products: readCount(row.products, "products"),
+    customers: readCount(row.customers, "customers"),
+  }
+}
+
+/**
+ * Reads the JSON envelope `wrangler d1 execute --json` prints and returns its
+ * single result row, once that row carries every column in `expected`. A failed,
+ * empty, or unrecognisable execution is refused here rather than read as a
+ * catalogue of zero rows, which would invite a seed import over live data.
+ *
+ * @param {string} text the envelope, as Wrangler wrote it to standard output
+ * @param {string[]} expected the columns the count query selects
+ * @returns {Record<string, number | string>} the counted row
+ */
+function readJson(text, expected) {
   let payload
 
   try {
-    payload = JSON.parse(output)
+    payload = JSON.parse(text)
   } catch {
     throw new Error(
       "Wrangler returned unreadable JSON while counting the catalogue"
@@ -78,14 +97,24 @@ export function parseCatalogCounts(output) {
   const execution = Array.isArray(payload) ? payload[0] : payload
   const row = execution?.results?.[0]
 
-  if (execution?.success !== true || !row) {
+  if (execution?.success !== true || !isJsonObject(row)) {
     throw new Error("Wrangler returned no successful catalogue count")
   }
 
-  return {
-    products: readCount(row.products, "products"),
-    customers: readCount(row.customers, "customers"),
+  for (const column of expected) {
+    if (!(column in row)) {
+      throw new Error(
+        `Wrangler returned a catalogue count without a "${column}" column`
+      )
+    }
   }
+
+  return row
+}
+
+/** JSON objects, as distinct from arrays and from every primitive. */
+function isJsonObject(value) {
+  return value instanceof Object && !Array.isArray(value)
 }
 
 /**
@@ -143,8 +172,11 @@ function assertMinimums(counts, label) {
   }
 }
 
+/** Counts arrive from D1 as numbers, and from some Wrangler versions as text. */
+const COUNT_TEXT = /^\d+$/
+
 function readCount(value, label) {
-  const count = typeof value === "string" ? Number(value) : value
+  const count = COUNT_TEXT.test(String(value)) ? Number(value) : Number.NaN
 
   if (!Number.isSafeInteger(count) || count < 0) {
     throw new Error(`Wrangler returned an invalid ${label} count`)
