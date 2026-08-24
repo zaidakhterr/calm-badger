@@ -83,7 +83,7 @@ export async function deliverRun(
   try {
     return await deliverOnce(env, runId)
   } catch (error) {
-    const message = "The quote could not be delivered."
+    const message = "The system could not deliver the quote."
 
     console.error(
       JSON.stringify({
@@ -125,7 +125,7 @@ async function deliverOnce(env: Env, runId: string): Promise<DeliveryOutcome> {
   const quote = await loadQuote(env, runId)
 
   if (!quote) {
-    const message = "There is no canonical quote to deliver."
+    const message = "The run does not have a quote to deliver."
     await createRunStepRecorder(env, runId, DELIVER_STEP_KEY).fail(message)
     return { state: "not_priced" }
   }

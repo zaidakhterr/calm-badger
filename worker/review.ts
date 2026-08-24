@@ -463,21 +463,20 @@ async function collectItems(env: Env, runId: string): Promise<CollectedItem[]> {
       position: RUN_LEVEL_POSITION,
       sourcePhrase:
         rfq?.company_name ?? rfq?.contact_email ?? "No company was stated",
-      detail:
-        "Pricing needs a customer: the tier, the agreed prices, and the delivery location all come from that record.",
-      proposedLabel: "No catalogue customer was resolved",
+      detail: "The system needs a customer before it can calculate a price.",
+      proposedLabel: "No customer found",
       proposedSku: null,
       proposedQuantity: null,
       proposedCustomerId: null,
       confidenceLabel: resolution?.confidence_label ?? "Review",
       confidenceScore: resolution?.confidence_score ?? 0,
       heuristic:
-        "Identity scores below the acceptance threshold, or too close to the runner-up, stay unresolved rather than guessing.",
+        "The customer score did not meet the automatic acceptance rules.",
       reasons: [
         rfq?.contact_email
-          ? `The request came from ${rfq.contact_email}, which no catalogue contact or domain claims.`
-          : "The request states no contact address to identify a customer by.",
-        "Creating a customer from model output is not available in this demo.",
+          ? `No customer uses the email address ${rfq.contact_email}.`
+          : "The request does not contain a contact email address.",
+        "This demo cannot create a customer.",
       ],
       alternatives: await customerAlternatives(env, runId),
     })
@@ -516,22 +515,20 @@ async function collectItems(env: Env, runId: string): Promise<CollectedItem[]> {
         position: line.position,
         sourcePhrase: phrase,
         detail: needsQuantity
-          ? `“${line.description}” — no usable quantity survived validation${line.unit ? `, stated in ${line.unit}` : ""}.`
-          : `“${line.description}” — extracted, but one field did not survive validation.`,
+          ? `The line does not have a valid quantity${line.unit ? ` in ${line.unit}` : ""}.`
+          : "The line contains a value that did not pass validation.",
         proposedLabel: needsQuantity
-          ? "No quantity to price"
-          : "Use the line exactly as extracted",
+          ? "Enter a quantity"
+          : "Use the extracted value",
         proposedSku: null,
         proposedQuantity: null,
         proposedCustomerId: null,
         confidenceLabel: "Review",
         confidenceScore: 0,
         heuristic:
-          "Business validation is a hard rule, not a score: a line that fails it is never priced on a guess.",
+          "A line that fails validation cannot continue without review.",
         reasons:
-          reasons.length > 0
-            ? reasons
-            : ["This line did not pass business validation."],
+          reasons.length > 0 ? reasons : ["The line did not pass validation."],
         alternatives: [],
       })
     }
@@ -546,7 +543,8 @@ async function collectItems(env: Env, runId: string): Promise<CollectedItem[]> {
         kind: "product",
         position: line.position,
         sourcePhrase: phrase,
-        detail: `“${line.description}” — the catalogue decision for this line is not certain enough to price.`,
+        detail:
+          "The product match did not meet the automatic acceptance rules.",
         proposedLabel: match.sku
           ? (proposedNames.get(match.sku) ?? match.sku)
           : "No catalogue product could be proposed",
@@ -557,8 +555,8 @@ async function collectItems(env: Env, runId: string): Promise<CollectedItem[]> {
         confidenceScore: match.confidence_score,
         heuristic:
           match.method === "superseded"
-            ? "A superseded article number always goes to review, whatever its successor scores."
-            : "Demo heuristics, not calibrated probabilities: a match is accepted only when the winner clears the strength threshold and leads the runner-up by the configured gap.",
+            ? "An old product number always requires review."
+            : "The proposed product must meet the score and score-gap limits.",
         reasons: [match.reason],
         alternatives: alternatives.slice(0, 3),
       })
@@ -714,7 +712,7 @@ export type ReviewProjection = {
 }
 
 const REVIEW_NOTE =
-  "Review is owner-only: the run URL alone grants no authority. Corrections choose between records that already exist; no product or customer is created here."
+  "Only the owner can change this review. The run URL gives read access only."
 
 export async function loadReviewEvidence(
   env: Env,
@@ -1314,7 +1312,7 @@ export async function settleReview(
     return {
       state: "incomplete",
       review: await loadReviewEvidence(env, runId),
-      message: `${unresolved.length} of ${items.length} decisions are still open, so this review cannot be approved yet`,
+      message: `Confirm all items before you approve the review. Open items: ${unresolved.length}.`,
     }
   }
 
@@ -1363,9 +1361,9 @@ export async function settleReview(
 function closedMessage(state: ReviewState): string {
   switch (state) {
     case "approved":
-      return "This review was already approved"
+      return "This review is already approved"
     case "rejected":
-      return "This review was already rejected"
+      return "This review is already rejected"
     case "expired":
       return "This review window has closed"
     default:
@@ -1429,8 +1427,8 @@ async function commitSettlement(
     decision === "approve" ? "approved" : "rejected",
     now,
     decision === "approve"
-      ? `Owner approved ${items.length} ${plural(items.length, "decision", "decisions")}.`
-      : "Owner rejected this review, so the run stops here.",
+      ? `The owner approved ${items.length} ${plural(items.length, "item", "items")}.`
+      : "The owner rejected the review. The run stops here.",
     runId,
     ...(decision === "approve" ? [runId, runId] : [])
   )
@@ -1452,7 +1450,7 @@ export async function expireReview(env: Env, runId: string): Promise<boolean> {
   const claimed = await env.DB.prepare(
     `UPDATE run_reviews
         SET state = 'expired', decided_at = ?,
-            summary = 'The review window closed before a decision was made.'
+            summary = 'The review time expired.'
       WHERE run_id = ? AND state = 'pending'`
   )
     .bind(now, runId)

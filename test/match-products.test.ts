@@ -481,7 +481,7 @@ describe("matching a curated request", () => {
       expect(line.method).toBe("exact_sku")
       expect(line.confidence!.label).toBe("High")
       expect(line.originalOutput).toBeNull()
-      expect(line.decisionEvidence).toContain("article number")
+      expect(line.decisionEvidence).toContain("product number")
     }
   })
 
@@ -501,7 +501,7 @@ describe("matching a curated request", () => {
     )!
     expect(superseded.state).toBe("review_required")
     expect(superseded.sku).toBe("NX-PMP-8140")
-    expect(superseded.decisionEvidence).toContain("archived")
+    expect(superseded.decisionEvidence).toContain("old product")
 
     const reranked = matches.lines.filter((line) => line.method === "rerank")
     expect(reranked.length).toBeGreaterThan(0)
@@ -529,7 +529,7 @@ describe("matching a curated request", () => {
       expect.arrayContaining(["NX-SEA-9120", "NX-SEA-9121"])
     )
     expect(gasket.confidence!.label).toBe("Review")
-    expect(gasket.confidence!.heuristic).toContain("demo heuristic")
+    expect(gasket.confidence!.heuristic).toContain("required score")
   })
 
   it("uses the stated detail to separate near duplicates when it can", async () => {
@@ -566,9 +566,9 @@ describe("matching a curated request", () => {
 
     expect(retrieveStep.status).toBe("complete")
     expect(matchStep.status).toBe("complete")
-    expect(retrieveStep.summary).toContain("Retrieved")
-    expect(retrieveStep.summary).toContain("settled by exact evidence")
-    expect(matchStep.summary).toContain("Matched")
+    expect(retrieveStep.summary).toContain("Found")
+    expect(retrieveStep.summary).toContain("Exact matches")
+    expect(matchStep.summary).toContain("Accepted")
     expect(retrieveStep.summary).not.toBe(matchStep.summary)
 
     for (const step of [retrieveStep, matchStep]) {
@@ -689,7 +689,7 @@ describe("model output that has to be validated", () => {
 
     expect(line.state).toBe("review_required")
     expect(line.sku).toBeNull()
-    expect(line.decisionEvidence).toContain("One repair attempt was made")
+    expect(line.decisionEvidence).toContain("tried one repair")
     expect(line.originalOutput).not.toBeNull()
   })
 
@@ -880,7 +880,7 @@ describe("the acceptance heuristics", () => {
     expect(decision.state).toBe("accepted")
     expect(decision.sku).toBe("NX-FLT-1120")
     expect(decision.confidence.label).toBe("High")
-    expect(decision.confidence.heuristic).toContain("demo heuristic")
+    expect(decision.confidence.heuristic).toContain("required score")
   })
 
   it("reviews a winner the runner-up is too close to", () => {
@@ -888,7 +888,7 @@ describe("the acceptance heuristics", () => {
 
     expect(decision.state).toBe("review_required")
     expect(decision.confidence.label).toBe("Review")
-    expect(decision.reason).toContain("too close to accept")
+    expect(decision.reason).toContain("score gap")
     // The proposal survives for the reviewer to confirm or correct.
     expect(decision.sku).toBe("NX-FLT-1120")
   })
@@ -903,7 +903,7 @@ describe("the acceptance heuristics", () => {
     )
 
     expect(decision.state).toBe("review_required")
-    expect(decision.reason).toContain("only scores")
+    expect(decision.reason).toContain("proposed product score")
   })
 
   it("returns at most three alternatives", () => {

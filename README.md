@@ -1,393 +1,297 @@
 # RFQ Relay
 
-RFQ Relay turns a messy request for quotation — a forwarded email with a PDF
-and a phone photograph attached — into an auditable, priced quote, and shows
-every decision it made on the way there.
+RFQ Relay converts a request for quotation (RFQ) into an auditable quote. The
+request can include email text, a PDF file, and a photo. The run shows each
+decision.
 
-It is a public demonstration of one workflow, not a product. The document
-reading and the language-model extraction are **live**; the pricing is
-**deterministic**; the delivery to an external business system is
-**simulated**. Those boundaries are stated again, precisely, in
-[What is real and what is simulated](#what-is-real-and-what-is-simulated), and
-the capabilities a production system would need but this demo deliberately does
-not have are listed in [Production extensions](#production-extensions).
+This repository is a public demo. It is not a production product.
 
-All data is synthetic. The catalogue, the customers, the order history, the
-scenario emails and their attachments are generated from a fixed seed and
-belong to no real company.
+- Document reading is live.
+- Language-model extraction and product ranking are live.
+- Customer matching and price calculation use deterministic rules.
+- A person confirms uncertain results.
+- Delivery is simulated.
+
+All data is synthetic. No record belongs to a real company or person.
+
+Public product text follows the [product text style](docs/content-style.md).
+This style is based on ASD-STE100 Simplified Technical English.
 
 ## Contents
 
 - [The problem](#the-problem)
-- [What is real and what is simulated](#what-is-real-and-what-is-simulated)
+- [System limits](#system-limits)
 - [Architecture](#architecture)
-- [The workflow](#the-workflow)
-- [Retrieval and matching](#retrieval-and-matching)
-- [Validation and what the model is not trusted with](#validation-and-what-the-model-is-not-trusted-with)
-- [Pricing and delivery](#pricing-and-delivery)
-- [Synthetic dataset and curated scenarios](#synthetic-dataset-and-curated-scenarios)
-- [Security boundaries](#security-boundaries)
-- [Retention](#retention)
+- [Workflow](#workflow)
+- [Retrieval and product matching](#retrieval-and-product-matching)
+- [Validation](#validation)
+- [Price calculation and delivery](#price-calculation-and-delivery)
+- [Synthetic data](#synthetic-data)
+- [Security](#security)
+- [Data retention](#data-retention)
 - [Analytics](#analytics)
 - [Local development](#local-development)
 - [Checks](#checks)
 - [Evaluation](#evaluation)
-- [Cloudflare runtime](#cloudflare-runtime)
-- [First infrastructure setup](#first-infrastructure-setup)
+- [Cloudflare resources](#cloudflare-resources)
+- [First setup](#first-setup)
 - [Continuous integration and deployment](#continuous-integration-and-deployment)
-- [Production extensions](#production-extensions)
+- [Production gaps](#production-gaps)
 - [License](#license)
 
 ## The problem
 
-A B2B distributor's inbound demand does not arrive as structured data. It
-arrives as a forwarded email thread, a scanned item list, a photograph of a
-shelf label, an attachment with six lines and no article numbers. Someone in
-inside sales reads it, works out which customer it is, guesses which of 250
-near-identical catalogue products each line means, checks whether that customer
-has a negotiated price, and types a quote.
+A distributor can receive an RFQ as an email thread, a scanned list, or a
+photo. The request can omit product numbers. It can also use old product names.
 
-Every part of that is automatable and every part of it is risky. Extraction
-invents fields. Matching picks a product that differs from the right one by one
-dimension. A model asked to price something will happily produce a plausible
-number. The interesting engineering question is not "can a language model read
-an RFQ" — it can — but **where the model's judgment is allowed to reach the
-customer, and what stands between the two**.
+An inside-sales user must do these tasks:
 
-RFQ Relay is one answer to that question, made inspectable. It is generic: it
-models a general industrial and facilities distributor and contains no
-references to any specific company, customer, or commercial product.
+1. Read the documents.
+2. Identify the customer.
+3. Match each line to a product.
+4. Apply the correct price rule.
+5. Create the quote.
 
-## What is real and what is simulated
+Automation can make incorrect decisions. A model can invent a field. It can
+also select a product with the wrong size. RFQ Relay limits where a model can
+make a decision. It keeps evidence for each decision.
 
-| Stage                    | Status        | What that means                                                                        |
-| ------------------------ | ------------- | -------------------------------------------------------------------------------------- |
-| Document reading (OCR)   | **Live**      | PDFs and images go to Mistral OCR over the network. No prerecorded output, no fallback |
-| RFQ structuring          | **Live**      | A language model via OpenRouter, with a strict output schema                           |
-| Customer resolution      | Deterministic | Email identity, domains, aliases, contacts, locations, and order history               |
-| Candidate retrieval      | Deterministic | Exact SKU and alias lookup, then D1 full-text search over the whole catalogue          |
-| Reranking                | **Live**      | A language model narrows a shortlist of eight to a ranked three, with evidence         |
-| Human review             | Real          | The workflow genuinely hibernates until a person decides                               |
-| Pricing                  | Deterministic | Catalogue and customer rules only. No model is asked for a number                      |
-| Delivery to external ERP | **Simulated** | See below                                                                              |
+## System limits
 
-Delivery is the one place where nothing leaves the system. The Generic ERP
-Webhook is a fixed, fictional transformation of the canonical quote, so there
-is no destination choice in the workflow. It makes no network call, holds no
-credential, is connected to no third party, and returns a synthetic external
-estimate ID. It exists to make the adapter boundary inspectable, not to claim an
-integration or vendor relationship.
+| Stage             | Type          | Behavior                                                               |
+| ----------------- | ------------- | ---------------------------------------------------------------------- |
+| Document reading  | Live          | Mistral optical character recognition (OCR) reads PDF and image files. |
+| RFQ structuring   | Live          | A language model returns data with a fixed schema.                     |
+| Customer matching | Deterministic | Catalogue data and fixed scores identify a customer.                   |
+| Product retrieval | Deterministic | Exact lookup and full-text search create a shortlist.                  |
+| Product ranking   | Live          | A language model ranks a maximum of eight products.                    |
+| Review            | Human         | The Workflow waits for the owner.                                      |
+| Price calculation | Deterministic | Catalogue and customer rules calculate all amounts.                    |
+| Delivery          | Simulated     | A local adapter creates a payload and a synthetic receipt.             |
 
-The confidence figure the interface shows is a **demo heuristic**: a
-winner-strength and winner-gap threshold over rerank scores, labelled High,
-Medium, or Review. It is not a calibrated probability, and the interface says so
-where it appears.
+The interface shows confidence labels. These labels use demo rules. They are
+not calibrated probabilities.
+
+The Generic ERP Webhook is simulated. It does not make a network request. It
+does not use credentials. It does not connect to a third-party system.
 
 ## Architecture
 
-One Cloudflare Worker serves the built React application and every `/api/*`
-route. It is the only public surface.
+One Cloudflare Worker serves the React client and all `/api/*` routes.
 
-```
-browser ──► Worker (assets + /api/*) ──► Workflow (durable orchestration)
-                │                              │
-                │                              ├─► Mistral OCR        (live)
-                │                              ├─► OpenRouter LLM     (live)
-                │                              └─► delivery adapter   (simulated)
-                │
-                ├─► D1        run, step, customer, line, match, estimate, rate-limit state
-                └─► R2        private source documents and large model artifacts
+```text
+browser -> Worker -> Cloudflare Workflow
+              |              |-> Mistral OCR
+              |              |-> OpenRouter language model
+              |              `-> simulated delivery adapter
+              |-> D1: run and catalogue data
+              `-> R2: private source files and large model results
 ```
 
-- **Client** — React 19, TypeScript, Vite, Tailwind CSS v4, TanStack Router,
-  shadcn/ui from preset `b1D0ekIC` (Mira, Neutral, Inter, Phosphor icons, Base
-  UI primitives). Two typed routes: `/` for source selection and
-  `/runs/:viewId` for one run.
-- **Orchestration** — a Cloudflare Workflow owns the long-running pipeline. It
-  survives provider latency and, at human review, calls `waitForEvent` and
-  hibernates: a run waiting for a decision consumes no compute and needs no
-  client polling to stay alive.
-- **Persistence** — every workflow step writes its business state to D1 as it
-  completes, so the graph the browser polls (about once a second while active)
-  reflects durable server state rather than client animation. A run survives
-  refresh, and its evidence outlives the request that produced it. The
-  Run-step recorder (`worker/run-steps.ts`) is the single writer of step
-  lifecycle state and evidence, and derives the run's workflow state from the
-  step and its outcome. Review writes only the review tables; the corrections
-  it settles are written by the steps that own them.
-- **Provider seams** — OCR, language model, delivery, and analytics each sit
-  behind a narrow interface in `worker/providers/` and `worker/adapters.ts`.
-  Each has a contract-compatible fake, which is what tests and fixture
-  evaluation run against. The fakes refuse to run when `APP_ENV` is
-  `production`, so a deployment cannot silently serve fake results.
+- **Client:** React 19, TypeScript, Vite, Tailwind CSS, and TanStack Router.
+- **Workflow:** Cloudflare Workflow controls the long run. It stops compute
+  while it waits for review.
+- **D1:** Stores each Run step, its evidence, reviews, quotes, and catalogue
+  data.
+- **R2:** Stores private source files and large model results.
+- **Provider interfaces:** OCR, extraction, ranking, delivery, and analytics
+  use narrow interfaces. Tests use compatible test providers.
 
-The domain step state persisted for the graph is deliberately separate from
-provider execution internals. Steps mean business progress; the evidence
-attached to them carries the machinery.
+The Run-step recorder is the only module that changes Run step state. See
+`worker/run-steps.ts`. A Run step records business progress. Provider details
+stay in Evidence.
 
-## The workflow
+## Workflow
 
-Nine stable step titles, in one strictly linear vertical sequence. Status copy
-changes; titles do not, so the graph does not jump while work proceeds.
+The run has nine possible steps:
 
-1. **RFQ received** — the run and its first completed step are persisted before
-   anything else happens. The node shows the request exactly as it arrived: the
-   email body verbatim and every attachment as stored.
-2. **Read documents** — attachments are stored in private R2, read back, and
-   sent to OCR. Page markdown and source provenance are persisted, and the node
-   shows the text each source was read into alongside the provider's response.
-3. **Structure RFQ** — schema-constrained extraction of customer signals,
-   delivery location, and requested lines.
-4. **Resolve customer** — identity, domain, alias, contact, location, and
-   history evidence. A custom upload may legitimately end unresolved; the demo
-   never invents a customer record.
-5. **Retrieve candidates** — bounded retrieval, shown before any reranking, so
-   it is visible that the whole catalogue is never sent to a model.
-6. **Match products** — reranking to a top three with evidence.
-7. **Review required** — appears in the main sequence only when needed, and
-   blocks every later step until a decision. The decision itself is claimed
-   atomically, so exactly one of two racing owners settles the review.
-8. **Build estimate** — deterministic pricing.
-9. **Deliver** — as soon as the quote exists, it is transformed by the fixed
-   simulated webhook and a synthetic external estimate ID is recorded. No one
-   presses a button; the graph closes on its own.
+1. **RFQ received:** Stores the email text and files.
+2. **Read documents:** Reads the stored files. Stores page text and its source.
+3. **Structure RFQ:** Extracts customer data, a deadline, and requested lines.
+4. **Resolve customer:** Matches the request to an existing customer.
+5. **Retrieve candidates:** Searches the active product catalogue.
+6. **Match products:** Ranks the shortlist and selects products when safe.
+7. **Review required:** Asks the owner to confirm uncertain data. This step is
+   conditional.
+8. **Build estimate:** Applies price rules.
+9. **Deliver:** Creates the simulated delivery payload and receipt.
 
-Each node exposes, where relevant: its sources, the validated structured
-result, the decision evidence, the sanitized original model output, and
-provider/model/latency/token/cost metadata. The validated result is shown
-first, because that is the operational artifact; the raw provider response is
-available underneath it.
+Each completed step can show its validated result and decision evidence.
+Technical details are optional. They include model output, latency, token use,
+and estimated cost.
 
-## Retrieval and matching
+## Retrieval and product matching
 
-Sending 250 products to a language model and asking it to pick would work at
-this scale and stop working at any real one, so the demo does not do it.
+The system does not send the full catalogue to a language model.
 
-1. **Exact SKU and known-alias lookup.** A line that matches deterministically
-   is accepted automatically and never reaches a model. Deterministic evidence
-   outranks model judgment.
-2. **D1 full-text retrieval** over the complete catalogue for everything else,
-   producing a shortlist of eight.
-3. **LLM reranking** of those eight to a ranked three, each with a stated
-   reason.
-4. **Threshold.** A reranked winner is accepted only if it scores at least
-   `MATCH_WINNER_STRENGTH` and leads the runner-up by at least
-   `MATCH_WINNER_GAP` (both in `wrangler.jsonc`). Anything else goes to review
-   rather than being quietly accepted.
+1. It checks an exact product number and known aliases.
+2. It searches all active products with D1 full-text search.
+3. It keeps a maximum of eight products.
+4. A model ranks the best three products.
+5. The system checks the product score and the score gap.
+6. It sends an uncertain line to Review.
 
-Retrieval sits behind its own interface, so embeddings or Vectorize could
-replace the FTS stage without touching orchestration — see
-[Production extensions](#production-extensions).
+Set `MATCH_WINNER_STRENGTH` and `MATCH_WINNER_GAP` in `wrangler.jsonc`.
 
-Human review consolidates every uncertainty — product, customer, quantity,
-extracted field — into one linear node rather than branching the workflow. The
-owner can approve the proposal, choose one of the top three alternatives, search
-the entire catalogue when the shortlist is simply wrong, and correct quantity or
-customer. Creating a product is not offered. Settling the review records the
-decision and nothing else; the workflow then wakes and applies each correction
-through the step that owns it — customer, then lines, then matches — before
-pricing runs. A corrected product is remembered as an alias inside that
-browser's anonymous workspace only; it never mutates the global catalogue or
+The owner can use the proposed product, select an alternative, or search the
+catalogue. The owner can also correct a customer or quantity. The system cannot
+create a product or customer from model output.
+
+An approved product correction creates a temporary browser-workspace alias.
+The alias is customer-specific. It cannot change the global catalogue or
 another visitor's data.
 
-## Validation and what the model is not trusted with
+## Validation
 
-Model text is never persisted as fact. Every response passes through:
+The system does not store model text as a business fact. It applies these
+checks:
 
-1. one JSON-repair attempt,
-2. Zod schema validation,
-3. business validation against the database.
+1. Try one JSON repair.
+2. Validate the fixed Zod schema.
+3. Check the customer, product, and quantity against D1.
 
-A referenced customer, product, or quantity that does not exist sends the run
-to review or to a terminal error. It is never accepted. The consequence is that
-a hallucinated article number cannot become a line on a quote, and a
-hallucinated customer cannot become a customer.
+An invalid value goes to Review or stops the run. A model cannot add an unknown
+customer or product to a quote.
 
-A terminal provider or validation error is displayed as a terminal state.
-There is no retry interface and no automatic retry — see
-[Production extensions](#production-extensions).
+The demo does not retry a provider or validation error.
 
-## Pricing and delivery
+## Price calculation and delivery
 
-Pricing is computed, not generated. Precedence:
+The first applicable price rule sets the price:
 
-1. an active customer-specific historical override,
-2. the customer's pricing tier,
-3. the quantity-break discount,
-4. the catalogue base price.
+1. Active customer-specific price.
+2. Customer price tier.
+3. Quantity discount.
+4. Catalogue base price.
 
-Every applied rule is retained as evidence, so each line price can be traced to
-the rule that produced it. Estimates are in EUR, show line pricing excluding
-VAT, add 19% VAT, and report subtotal and total.
+The system stores the applied rule for each line. All amounts use integer
+cents. It calculates 19% value-added tax (VAT) once from the subtotal.
 
-The result is a **canonical quote**: resolved customer and location, source
-references, selected products, quantities, unit prices, tax, totals, and
-adapter-independent metadata. It is downloadable as JSON. The webhook transforms
-that one stable contract as soon as the quote exists; the transformed payload
-and the adapter's receipt are shown on the delivery node so the boundary is
-inspectable. The webhook is simulated, as described above.
+The result is the canonical quote. It contains the customer, source references,
+products, quantities, prices, tax, and totals. You can download it as JSON.
 
-## Synthetic dataset and curated scenarios
+The simulated webhook converts this quote to one stable event format. The
+delivery step shows the payload and its synthetic receipt.
 
-Everything the demo quotes against is invented and generated from one fixed
-seed in `worker/catalog/dataset.ts`: 250 industrial and facilities products, 25
-customers with two to four contacts and one to three locations, and about 150
-historical orders. The data is deliberately messy, because that is what makes
-retrieval and matching a real problem: trade aliases, typographical variants,
-superseded item numbers, near-duplicate products that differ in one dimension,
-archived products with successors, customer pricing tiers, quantity breaks, and
-customer-specific historical prices.
+## Synthetic data
 
-No record corresponds to a real company, person, product, or price. Scenario
-email addresses use the reserved `.example` suffix, and every generated PDF is
-stamped `SYNTHETIC DEMONSTRATION DOCUMENT`. A check enforces both.
+`worker/catalog/dataset.ts` creates the synthetic catalogue from a fixed seed.
+It contains:
+
+- 250 products.
+- 25 customers.
+- Approximately 150 historical orders.
+- Aliases and spelling errors.
+- Similar products and old product numbers.
+- Price tiers, quantity discounts, and customer-specific prices.
+
+All scenario email addresses use the reserved `.example` suffix. Each generated
+PDF contains the text `SYNTHETIC DEMONSTRATION DOCUMENT`.
 
 ```bash
-pnpm seed:build     # rerender seed/catalog.sql from the generator
-pnpm assets:build   # rerender the scenario PDF and image attachments
-pnpm data:check     # verify both are current, importable, and additive
+pnpm seed:build
+pnpm assets:build
+pnpm data:check
 ```
 
-`seed/catalog.sql` is generated, and importing it is additive: every statement
-is an `INSERT OR IGNORE` into a `catalog_` table, so reseeding a running
-deployment adds missing rows and cannot remove or overwrite anything a demo has
-accumulated. After migrations, deployment checks the remote product and customer
-counts. It imports the foundation and catalogue seeds only when both are zero,
-then verifies the deterministic minimum of 250 products and 25 customers. A
-partial or unexpectedly small catalogue stops deployment without importing seed
-data. The setup wizard still imports both seeds together as one confirmed step.
+The seed uses `INSERT OR IGNORE`. It can add missing records. It cannot change
+or delete stored records.
 
-`GET /api/scenarios` serves the three curated requests — Routine replenishment,
-Messy forwarded request (featured and selected by default), and Ambiguous
-replacement parts. Each one carries a forwarded-email body, an inline
-photograph, a PDF item list under `public/scenarios/`, six requested lines, and
-a plain statement of what makes it easy or hard.
+`GET /api/scenarios` returns three sample requests. Each request contains email
+text, one photo, one PDF file, and six lines. Expected results stay in
+`test/fixtures/gold-scenarios.ts`. Runtime code cannot read them.
 
-The expected outcome of each scenario — customer, extracted fields, and the
-catalogue product behind every requested line — lives in
-`test/fixtures/gold-scenarios.ts`, deliberately outside `worker/` so no runtime
-path can read an answer instead of producing one. Those fixtures are evaluation
-material; the deterministic tests only assert that every expectation is
-resolvable in the generated catalogue.
+Custom requests can contain email text and PDF, JPEG, or PNG files. The maximum
+size is 10 MB. A run can contain a maximum of 20 pages.
 
-Visitors may also upload their own email text with PDF, JPEG, or PNG
-attachments, subject to a MIME allowlist, a combined 10 MB limit, and at most
-20 PDF or image pages per run. The interface asks for synthetic or
-non-confidential documents only, because this is a public demo.
+## Security
 
-## Security boundaries
+This demo does not have user accounts.
 
-There are no accounts. Authority comes from two separate values created when a
-run starts:
+`POST /api/runs` returns two values:
 
-- `POST /api/runs` creates a run, records `RFQ received` as its first completed
-  step, starts the durable workflow, and returns the run plus a plaintext owner
-  capability **once**. Only the SHA-256 hash of that 32-byte capability is
-  stored.
-- `GET /api/runs/:viewId` returns an allowlisted read-only projection to any
-  holder of the URL. Sending the owner capability as
-  `Authorization: Bearer <capability>` additionally marks the viewer as owner.
-- Mutations — `reset` and `review` — require that capability, scoped to that
-  exact run, and validate the run's state before acting. **The public view identifier is never accepted as
-  authorization.**
+- A public `viewId`. Anyone with this value can read the run.
+- An owner capability. Only the SHA-256 hash of this value is stored.
 
-The originating browser keeps its owner capability and a short recent-run list
-in `localStorage`. A browser that only opened a copied URL is a shared viewer:
-same workflow evidence, no approval or reset controls. Shared run URLs are
-bearer links — anyone holding the URL can read the run. The interface says so.
-That is an acceptable trade for synthetic demo data and is not a substitute for
-authentication in production.
+Review and deletion require the owner capability. The public `viewId` does not
+give write access.
 
-Other boundaries:
+The browser stores its owner capability in `localStorage`. A shared browser can
+read the same Evidence. It cannot approve or delete the run.
 
-- **Rate limiting** — five processing runs per hour per visitor, with a
-  friendly message afterwards. The Worker hashes the IP address with a rotating
-  secret (`RATE_LIMIT_SALT`) and persists no raw IP. There is no login and no
-  CAPTCHA; the point is to protect the provider keys without adding friction.
-- **Uploads** — MIME allowlist plus a combined 10 MB transport limit, rejected
-  before any processing. Paid OCR is capped at 20 PDF or image pages per run;
-  an over-limit document ends with an actionable message instead of being
-  processed without a bound or silently truncated.
-- **Secrets** — provider keys exist only as encrypted Cloudflare Worker secrets
-  and, locally, in the git-ignored `.dev.vars`. They are never in
-  `wrangler.jsonc`, never in the repository, and never sent to GitHub. CI
-  receives only a Cloudflare deployment token and account ID.
-- **Source documents** — uploaded PDFs and images live in a private R2 bucket
-  and are served only through capability-checked or run-scoped endpoints.
-- **Logs** — structured and keyed by run, workflow, and step. They do not
-  contain RFQ text, customer data, or secrets.
+Other controls:
 
-## Retention
+- **Rate limit:** Five new runs per hour from one location. The Worker stores a
+  rotating hash. It does not store the network address.
+- **Uploads:** The Worker checks the media type, byte limit, file count, and
+  page count before a provider call.
+- **Secrets:** Production uses encrypted Worker secrets. Local development uses
+  the ignored `.dev.vars` file.
+- **Files:** R2 is private. Run routes control access to stored files.
+- **Logs:** Structured logs do not contain RFQ text, customer data, or secrets.
 
-A public demo should forget.
+## Data retention
 
-- **Curated sample runs** are deleted seven days after creation, so a shared
-  link stays inspectable for a while.
-- **Custom uploads and everything derived from them** are deleted after 24
-  hours.
-- A **daily Cron sweep** (`23 3 * * *`) deletes private R2 objects _before_ the
-  D1 rows that point at them, in bounded batches, resuming an interrupted
-  cleanup on the next schedule. A run with a live pending review is deferred
-  rather than swept out from under the person deciding it.
-- **R2 lifecycle rules** are the safety net beneath all of it, for bytes whose
-  D1 row is already gone: `runs/custom/` expires after one day and
-  `runs/curated/` after eight days. The broad eight-day `runs/` rule remains for
-  legacy keys created before retention-class prefixes existed; the earlier
-  custom rule wins where prefixes overlap. These are account-side bucket
-  settings rather than Worker configuration, so the setup wizard adds them.
+- The system deletes sample runs after seven days.
+- The system deletes custom runs after 24 hours.
+- A daily task deletes R2 files before D1 records.
+- The task keeps a run while Review is open.
+- R2 lifecycle rules delete files that the daily task does not delete.
+- **Start again** deletes the current run immediately.
 
-An expired run returns a plain expired-or-not-found state instead of a broken
-graph. `Start over` genuinely deletes the current run's stored artifacts.
+An expired or deleted run returns one unavailable state.
 
 ## Analytics
 
-Measurement is cookieless, server-side, EU-hosted PostHog with no identity, no
-person profiles, no autocapture, no session replay, no heatmaps, and no
-exception or performance capture.
+PostHog analytics are server-side and hosted in the European Union. The system
+does not use cookies, person profiles, automatic capture, session replay,
+heatmaps, exception capture, or performance capture.
 
-What can be captured is a closed set, enforced in `worker/analytics.ts` rather
-than trusted at each call site: automatic pageviews with the view identifier
-and the entire query string removed before the event is built, and five funnel
-events — `rfq_run_started`, `rfq_run_rejected`, `rfq_run_rate_limited`,
-`rfq_review_decided`, `rfq_quote_delivered`. Every property is a small,
-enumerated bucket. No RFQ or customer or product content, no filenames, no
-prices, no prompts, no model output, no raw errors, no free text of any kind
-can be attached to an event.
+`worker/analytics.ts` allows these product events only:
 
-Set `ANALYTICS_PROVIDER=none` to disable measurement entirely. The committed
-`.dev.vars.example` sets `APP_ENV=development`, which keeps local traffic out of
-the deployed project after it is copied to `.dev.vars`.
+- `rfq_run_started`
+- `rfq_run_rejected`
+- `rfq_run_rate_limited`
+- `rfq_review_decided`
+- `rfq_quote_delivered`
+
+The event schema uses fixed value groups. PostHog does not receive RFQ text,
+customer data, file names, products, prices, prompts, model output, raw errors,
+or free text.
+
+Set `ANALYTICS_PROVIDER=none` to turn analytics off. Set
+`APP_ENV=development` in `.dev.vars` to keep local events out of production
+analytics.
 
 ## Local development
 
 ```bash
 pnpm install
-cp .dev.vars.example .dev.vars   # then fill in your own keys
+cp .dev.vars.example .dev.vars
 pnpm cf:types
 pnpm db:migrate:local
 pnpm db:seed:local
 pnpm dev:worker
 ```
 
-`.dev.vars.example` sets the non-secret local environment mode and lists exactly
-the four secrets the Worker reads with empty values. `.dev.vars` is git-ignored;
-keep real keys only there.
+Add provider keys to `.dev.vars`. Do not commit this file.
 
-`pnpm dev:worker` builds the React client and starts one local Cloudflare Worker
-with emulated D1, R2, and Workflow bindings, while OCR and language-model calls
-go to the real providers — the complete application, locally. Visit
-`http://localhost:8787` and check the runtime with:
+`pnpm dev:worker` builds the client and starts a local Worker. It emulates D1,
+R2, and Workflow bindings. OCR and language-model requests use the configured
+providers.
+
+Open `http://localhost:8787`. Check the runtime with this command:
 
 ```bash
 curl http://localhost:8787/api/health
 ```
 
-For client-only UI work with Vite HMR, use `pnpm dev`.
+Use `pnpm dev` for client-only work with Vite hot module replacement.
 
 ## Checks
 
 ```bash
-pnpm typecheck   # wrangler types --check, then tsc -b
+pnpm typecheck
 pnpm lint
 pnpm format:check
 pnpm wizard:check
@@ -396,75 +300,45 @@ pnpm build
 pnpm test
 ```
 
-`pnpm check` runs all of these, and is what CI runs. The build comes before the
-tests: the Worker integration tests serve scenario attachments and the SPA
-fallback through the `ASSETS` binding, which needs a built `dist/`.
+`pnpm check` runs all checks. Continuous integration (CI) uses this command.
 
-`pnpm lint` runs ESLint and then Oxlint. Oxlint carries the anti-slop plugin
-vendored under `tools/oxlint/anti-slop`, all fifteen rules at error over the
-whole repository. What they enforce is one rule: parse at the boundary. Every
-boundary — a persisted evidence payload, a provider response, configuration, an
-API response on the client, `localStorage`, a script's JSON — parses once into a
-named type, with a Zod schema owned by whoever defines the contract. Writers
-check their payload with `satisfies`; readers `safeParse`. A type assertion
-survives only where it is the honest tool, and then it carries a `SAFETY:`
-comment stating the invariant.
+The lint command runs ESLint and Oxlint. The local Oxlint plug-in requires code
+to parse data at each interface. Zod schemas define stored evidence, provider
+responses, configuration, client responses, and script data.
 
 ## Evaluation
 
-The three curated workflows are scored against gold fixtures by replaying them
-across the public API. The deterministic run uses the contract-compatible fake
-OCR, language-model, and delivery providers, so it needs no credential, makes no
-network call, and costs nothing:
+The test replays all three sample requests through the public API. It compares
+the results with the expected fixtures.
 
 ```bash
-pnpm eval:fixtures                        # score and refresh worker/evaluation-report.ts
-node scripts/run-evaluation.mjs --check    # score without writing; what CI runs
+pnpm eval:fixtures
+node scripts/run-evaluation.mjs --check
 ```
 
-The committed summary is what System details reports. It is fixture-based and
-measured through the fakes, not a claim about production traffic, and three
-scenarios is a demonstration rather than a statistically meaningful sample.
+Test providers make this evaluation repeatable. The command does not need a
+provider key. It does not make a network request or have a provider cost.
 
-The same scoring runs against the configured live OCR and language-model
-providers, reporting latency, usage, and failures. It is explicitly invoked,
-never part of CI, and costs real money:
+Run the same evaluation with live providers:
 
 ```bash
 pnpm eval:live
 ```
 
-Provider selection comes from the environment (`OCR_PROVIDER`,
-`EXTRACTION_PROVIDER`, `RERANK_PROVIDER`), and keys are read from `.dev.vars` or
-the environment. A live run that ends up on the fakes fails rather than
-reporting fake results as live ones.
+The live command reports latency, token use, estimated cost, and differences.
+It can have a provider cost. CI does not run it.
 
-## Cloudflare runtime
+## Cloudflare resources
 
-The demo targets the paid Workers plan: waiting on providers is remote I/O, but
-durable orchestration and active processing use paid allowances.
+`wrangler.jsonc` declares these resources:
 
-The Worker configuration in `wrangler.jsonc` declares:
+- `DB`: D1 storage.
+- `ARTIFACTS`: Private R2 storage.
+- `RFQ_WORKFLOW`: Durable Workflow control.
+- `ASSETS`: The built React client.
 
-- `DB` — local or deployed D1 storage, with additive migrations in `migrations/`
-- `ARTIFACTS` — private R2 source and model artifacts
-- `RFQ_WORKFLOW` — durable RFQ orchestration
-- `ASSETS` — the built React application
-
-Non-secret configuration — provider selection, model identifiers, cost
-constants, match thresholds, review windows, analytics host — lives in the
-`vars` block of `wrangler.jsonc`, each with a comment explaining what it does.
-
-Every generated resource is named from one neutral codename slug the wizard
-selects: the Worker is `<slug>`, the database `<slug>-db`, the bucket
-`<slug>-artifacts`, and the workflow `<slug>-workflow`. RFQ Relay remains the
-in-product name; the infrastructure names are deliberately meaningless. The
-checked-in `calm-badger` names and D1 ID are setup placeholders, replaced by
-`scripts/update-wrangler-config.mjs` during setup.
-
-Provider credentials are never stored in `wrangler.jsonc`. Local development
-uses the ignored `.dev.vars` file. Production uses encrypted Worker secrets —
-these four, and only these four:
+The `vars` section stores non-secret configuration. Encrypted Worker secrets
+store provider credentials.
 
 ```bash
 pnpm wrangler secret put MISTRAL_API_KEY
@@ -473,41 +347,35 @@ pnpm wrangler secret put POSTHOG_API_KEY
 pnpm wrangler secret put RATE_LIMIT_SALT
 ```
 
-## First infrastructure setup
+The setup tool selects one neutral resource name. It uses this name for the
+Worker, D1 database, R2 bucket, and Workflow. The committed `calm-badger` names
+are placeholders.
 
-Run the committed interactive wizard from an unconfigured checkout:
+## First setup
+
+Run the interactive setup tool from an unconfigured repository:
 
 ```bash
 ./scripts/setup-infrastructure.sh
 ```
 
-It checks prerequisites (Node, pnpm, GitHub CLI, Wrangler, and authentication)
-with install guidance when something is missing; offers three generated neutral
-codenames or a validated custom slug; creates the public repository; opens
-Workers Paid billing; provisions or reuses D1 and R2 and rewrites
-`wrangler.jsonc`; guides a least-privilege Cloudflare token and account ID;
-migrates and seeds; builds and deploys; guides Mistral, spend-limited
-OpenRouter, and EU PostHog setup; generates the rate-limit salt; uploads the
-four Worker secrets; sets the GitHub Actions credentials; health-checks the
-deployed public application at `<app>/api/health` and opens it; and only then
-shows the publication scope and offers to commit and push.
+The tool does these tasks:
 
-Each dashboard page is opened for you before the value it wants is requested,
-so setup does not depend on knowing where anything lives. Secrets are entered
-hidden and written to the ignored `.dev.vars` and `.setup.vars` idempotently, so
-reruns detect existing values, resources, remotes, and deployed secrets instead
-of duplicating them. Provider keys go directly to Cloudflare and are never
-written to GitHub.
+1. Checks Node, pnpm, GitHub CLI, Wrangler, and authentication.
+2. Selects a neutral resource name.
+3. Creates or reuses the GitHub and Cloudflare resources.
+4. Applies D1 migrations and imports the synthetic seed.
+5. Configures Mistral, OpenRouter, PostHog, and the rate-limit secret.
+6. Adds GitHub Actions credentials.
+7. Builds and deploys the application.
+8. Checks `<app>/api/health`.
+9. Shows all files and changes before publication.
 
-Every external mutation has its own confirmation gate — repository creation,
-resource provisioning, migration, seeding, deployment, secret upload, staging,
-commit, and push — so the script can be stopped at any point and safely rerun.
-**Publication is the last gate and stays human.** Before the push, the wizard
-prints the staged diff, the complete list of tracked files, and the commit
-history behind them, then asks; declining stops the script and pushes nothing.
+The tool asks before each external change. It asks again before it commits or
+pushes. You can stop the tool and run it again. It does not duplicate existing
+resources.
 
-The wizard's non-interactive structural check opens no browser and mutates
-nothing:
+Run the structural check without external changes:
 
 ```bash
 ./scripts/setup-infrastructure.sh --check
@@ -515,72 +383,41 @@ nothing:
 
 ## Continuous integration and deployment
 
-Both workflows use pnpm with a frozen lockfile.
+`.github/workflows/validate.yml` runs for pull requests and non-main branches.
+It runs `pnpm check` and the fixture evaluation.
 
-**`.github/workflows/validate.yml`** — pull requests and every branch except
-`main`: `pnpm check` (format, lint, wizard structural check, generated-data
-check, `wrangler types --check`, `tsc`, client build, `wrangler deploy
---dry-run`, and the Worker integration tests), then the deterministic fixture
-evaluation.
+`.github/workflows/deploy.yml` runs for changes to `main` and for manual
+deployments. It performs these tasks in order:
 
-**`.github/workflows/deploy.yml`** — pushes to `main` and manual dispatch, in
-the `production` environment, with a `production` concurrency group so
-deployments never overlap. It runs the identical validation and fixture
-evaluation **first**, and only if both pass does it apply additive D1 migrations
-and deploy through the official Wrangler action. A failing check or a drifted
-evaluation summary stops the deployment before anything external is touched.
+1. Runs all checks.
+2. Runs the fixture evaluation.
+3. Applies additive D1 migrations.
+4. Checks the remote catalogue.
+5. Adds the seed only when the catalogue is empty.
+6. Deploys the Worker.
 
-Deployment applies migrations, then verifies catalogue readiness. A newly
-migrated database with zero products and zero customers receives the idempotent
-foundation and catalogue seeds; a ready database receives no seed writes. If
-either table is partially populated or below the deterministic 250-product,
-25-customer baseline, deployment fails loudly instead of masking the partial
-state. The seed uses `INSERT OR IGNORE` and cannot overwrite an existing row.
-Live provider evaluation is never part of CI: it costs money and would make
-automated deployment non-deterministic.
+A failed check stops deployment. Deployments do not overlap.
 
-CI needs exactly two values, set on the repository by the wizard:
+CI uses these GitHub values:
 
-- `CLOUDFLARE_API_TOKEN` — an Actions secret
-- `CLOUDFLARE_ACCOUNT_ID` — an Actions variable
+- `CLOUDFLARE_API_TOKEN`: Actions secret.
+- `CLOUDFLARE_ACCOUNT_ID`: Actions variable.
 
-No provider key is ever available to GitHub.
+GitHub does not receive provider keys.
 
-## Production extensions
+## Production gaps
 
-These are **not implemented**. They are the honest list of what this demo would
-need before it could carry real commercial traffic, and they are omitted
-deliberately to keep one workflow legible rather than to hide a gap.
+The demo does not implement these production functions:
 
-- **Authenticated workspaces.** There are no accounts, organizations, roles, or
-  collaboration. Authority is a per-run bearer capability, and shared links are
-  readable by anyone holding them. Real use needs real identity and tenancy.
-- **Vector retrieval.** Retrieval is D1 full-text search behind an interface
-  chosen so embeddings, Vectorize, or a hybrid ranker could replace it without
-  changing orchestration. That replacement has not been made.
-- **Retries and failure handling.** A provider or validation failure is a
-  terminal, visible state. There is no automatic retry, no backoff, no
-  dead-letter path, and no operator retry interface.
-- **Delivery idempotency.** Delivery is simulated and at-most-once by
-  construction. A real integration needs idempotency keys, a durable outbox,
-  and safety against duplicate submission.
-- **Reconciliation.** Nothing confirms after the fact that an external system
-  actually holds what was sent, and nothing repairs a divergence.
-- **Expanded formats.** Email bodies, PDFs, JPEG, and PNG only. No GAEB,
-  spreadsheets, Word documents, presentations, voice intake, supplier batch
-  RFQs, or duplicate-project detection.
-- **Stronger observability.** Structured logs and Workers traces at a low
-  sampling rate, and nothing else: no SLOs, no alerting, no per-step cost
-  budgets, no tracing across provider calls, no dashboards.
-- **Calibrated evaluation.** Three gold scenarios scored through fakes. There is
-  no held-out set, no regression gate on quality, no inter-annotator agreement,
-  and no calibration — which is why confidence is presented as a demo heuristic
-  labelled High, Medium, or Review rather than as a probability.
-
-Also intentionally absent: quote PDF generation (the canonical quote downloads
-as JSON), autonomous price generation by a model, creation of customers or
-products from model output, globally learned feedback, and any aggregate
-dashboard or activity feed.
+- User accounts, organizations, roles, and tenant isolation.
+- Vector or hybrid product retrieval.
+- Automatic retry, backoff, dead-letter handling, and operator recovery.
+- Real delivery, idempotency, a durable outbox, and reconciliation.
+- GAEB, spreadsheet, Word, presentation, voice, and batch RFQ inputs.
+- Service-level objectives, alerts, cost budgets, and full provider traces.
+- A held-out evaluation set, quality gates, and confidence calibration.
+- Global learning from human feedback.
+- PDF quote generation and a production activity dashboard.
 
 ## License
 

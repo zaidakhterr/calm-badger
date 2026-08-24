@@ -90,7 +90,7 @@ function providerEntry(
     live: provider !== "contract-fake",
     detail:
       provider === "contract-fake"
-        ? `${detail} This build is configured with the deterministic contract fake, so no external provider is called.`
+        ? `${detail} This build uses a test provider. It does not call an external provider.`
         : detail,
   }
 }
@@ -102,27 +102,27 @@ export async function loadSystemDetails(env: Env): Promise<SystemDetails> {
   return {
     architecture: {
       summary:
-        "One Cloudflare Worker serves the interface and the API. A Workflow orchestrates the pipeline and hibernates while it waits for a human decision; business step state lives in D1 and the browser polls it about once a second while a run is active.",
+        "One Cloudflare Worker serves the user interface and the API. A Workflow controls the run. D1 stores each Run step.",
       pieces: [
         {
           name: "Worker",
           detail:
-            "Serves static assets and /api/*. Owns run creation, evidence projections, and every capability check.",
+            "Serves the user interface and /api/*. Creates runs and checks access.",
         },
         {
           name: "Workflow",
           detail:
-            "Durable orchestration of read, structure, resolve, retrieve, match, review, price, and deliver. waitForEvent hibernates at review rather than holding compute open.",
+            "Controls each Run step. It stops compute while it waits for a review decision.",
         },
         {
           name: "D1",
           detail:
-            "Runs, steps, extracted lines, matches, reviews, quotes, deliveries, and the synthetic catalogue, including its full-text index.",
+            "Stores runs, evidence, reviews, quotes, deliveries, and the synthetic catalogue.",
         },
         {
           name: "R2",
           detail:
-            "Private storage for original source documents and large model artifacts, referenced from D1. The bucket is never public.",
+            "Stores source files and large model results. The bucket is private.",
         },
       ],
       steps: [
@@ -142,19 +142,19 @@ export async function loadSystemDetails(env: Env): Promise<SystemDetails> {
         "Document reading (OCR)",
         config.ocrProvider,
         config.mistralOcrModel,
-        "Reads the email body, inline images, and PDF attachments into page markdown with source provenance."
+        "Reads email text, images, and PDF files. Keeps the source of each page."
       ),
       providerEntry(
         "RFQ structuring",
         config.extractionProvider,
         config.extractionModel,
-        "Schema-constrained extraction through the Vercel AI SDK, followed by one JSON repair attempt, Zod validation, and database integrity checks."
+        "Extracts data with a fixed schema. Repairs JSON once. Then it validates the result and checks the catalogue."
       ),
       providerEntry(
         "Candidate reranking",
         config.rerankProvider,
         config.rerankModel,
-        "Ranks the bounded shortlist for one requested line at a time and returns evidence for its ordering."
+        "Ranks the product shortlist for one line at a time. Returns a reason for the order."
       ),
       {
         role: "Delivery",
@@ -162,7 +162,7 @@ export async function loadSystemDetails(env: Env): Promise<SystemDetails> {
         model: null,
         live: false,
         detail:
-          "Delivery is simulated in-process. No external business system is contacted and no affiliation is implied.",
+          "Delivery is simulated. The system does not contact an external business system.",
       },
     ],
     catalog: {
@@ -173,42 +173,42 @@ export async function loadSystemDetails(env: Env): Promise<SystemDetails> {
       locations: counts?.locations ?? 0,
       historicalOrders: counts?.historicalOrders ?? 0,
       aliases: counts?.aliases ?? 0,
-      note: "Deterministic synthetic data from a fixed seed. It deliberately contains aliases, misspellings, near duplicates, archived articles, pricing tiers, quantity breaks, and historical overrides.",
+      note: "A fixed seed creates this synthetic data. It includes aliases, spelling errors, similar products, old products, and price rules.",
     },
     retrieval: {
       shortlistSize: SHORTLIST_SIZE,
       steps: [
         "Exact article-number lookup",
-        "Known-alias lookup, including wording this browser's workspace confirmed earlier",
-        "D1 full-text search across the complete active catalogue",
+        "Known-alias lookup, including text that this browser confirmed",
+        "Full-text search of all active products",
         `Shortlist of at most ${SHORTLIST_SIZE} candidates per line`,
-        "Model reranking to a top three with evidence",
-        "Acceptance heuristics, or one review node",
+        "Model ranking of the best three products",
+        "Automatic acceptance or review",
       ],
-      note: "Exact and known-alias evidence settles a line without a model call. Only the shortlist is ever sent to a model, never the catalogue. The retrieval interface is the seam a vector index would replace.",
+      note: "Exact matches and known aliases do not use a model. The model receives the shortlist only. It does not receive the catalogue.",
     },
     retention: {
       state: "enforced",
       summary:
-        "This demo forgets. A daily cleanup deletes the private originals before it cascades the database records, Start over deletes a run immediately, and a review window never outlives the run data it decides.",
+        "The system deletes demo data. A daily task deletes private files before it deletes database records.",
       rows: [
-        "Curated sample runs: deleted seven days after they start.",
-        "Custom uploads and everything derived from them: deleted twenty-four hours after they start.",
-        "A run still inside a live review window is left until that window closes, then removed on the next sweep.",
-        "Wording confirmed in this browser's workspace inherits its source run's deadline: seven days for a curated scenario and twenty-four hours for a custom upload. Start over removes the run immediately but leaves that short-lived browser memory until its deadline.",
-        "A storage lifecycle rule on the run prefix expires any orphaned object as a safety net beneath the cleanup job.",
-        "Durable workflow instances carry only a run identifier and a state name, and are terminated when a run is deleted, so what the platform keeps about a finished instance contains no request content.",
-        "Measurement is cookieless, EU-hosted, and server-side: page paths are bucketed, view identifiers and query strings are never sent, and no RFQ, customer, filename, product, price, prompt, or model output is measured.",
+        "The system deletes sample runs after seven days.",
+        "The system deletes custom runs after 24 hours.",
+        "The system keeps a run while its review is open. It deletes the run after the review closes.",
+        "The system deletes confirmed browser aliases when it deletes their source run.",
+        "A storage rule deletes files that the daily task does not delete.",
+        "A finished Workflow stores a run ID and a state only. It does not store request content.",
+        "PostHog receives grouped page paths and approved event values only. It does not receive request or model content.",
         "Use synthetic or non-confidential documents only.",
       ],
     },
     rateLimit: {
       state: "enforced",
-      summary: `Processing is limited to ${RATE_LIMIT_MAX_RUNS} runs per hour from one place, with no login and no CAPTCHA. The address is hashed together with a rotating value and the hour it arrived in, so no raw address and no stable per-visitor identifier is ever stored. Reading or sharing an existing run is never limited.`,
+      summary: `You can start ${RATE_LIMIT_MAX_RUNS} runs each hour from one location. The system stores a temporary hash, not the network address. Reading a stored run does not use the limit.`,
     },
     adapterContract: {
       summary:
-        "The Generic ERP Webhook transforms the provider-neutral canonical quote and returns a synthetic external identifier and receipt. It is the fixed simulated destination, so there is nothing to select. The canonical quote is downloadable as JSON before anything is sent.",
+        "The Generic ERP Webhook converts the canonical quote to a JSON event. It returns a synthetic ID and receipt. Delivery is simulated.",
       defaultAdapter: DEFAULT_ADAPTER,
       adapters: [DEFAULT_ADAPTER].map((id) => ({
         id,

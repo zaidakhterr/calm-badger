@@ -231,10 +231,9 @@ export function decideMatch(
         label: "Review",
         score: 0,
         heuristic:
-          "No ranked candidate survived the catalogue integrity check, so the score stays at 0.00.",
+          "No ranked product passed the catalogue check. The score is 0.00.",
       },
-      reason:
-        "No candidate the model returned is an active catalogue product from the shortlist.",
+      reason: "The model did not return an active product from the shortlist.",
     }
   }
 
@@ -247,17 +246,16 @@ export function decideMatch(
   const label: ConfidenceLabel = accepted ? labelFor(score) : "Review"
 
   const heuristic =
-    `Match confidence is a demo heuristic over two configured thresholds: the winner scores ` +
-    `${winner.score.toFixed(2)} against a required ${heuristics.winnerStrength.toFixed(2)}, and leads the runner-up ` +
-    `by ${gap.toFixed(2)} against a required ${heuristics.winnerGap.toFixed(2)}.`
+    `The product score is ${winner.score.toFixed(2)}. The required score is ${heuristics.winnerStrength.toFixed(2)}. ` +
+    `The score gap is ${gap.toFixed(2)}. The required gap is ${heuristics.winnerGap.toFixed(2)}.`
 
   const reason = accepted
-    ? `${winner.sku} leads the shortlist clearly enough to continue without a human.`
+    ? `${winner.sku} meets the automatic acceptance rules.`
     : !strongEnough && !clearEnough
-      ? `No candidate is convincing on its own and the leader is only ${gap.toFixed(2)} ahead.`
+      ? "The product score and score gap are too low."
       : !strongEnough
-        ? `The leading candidate only scores ${winner.score.toFixed(2)}.`
-        : `${winner.sku} and ${runnerUp ? runnerUp.sku : "the runner-up"} are only ${gap.toFixed(2)} apart, which is too close to accept.`
+        ? `The proposed product score is ${winner.score.toFixed(2)}. This is too low.`
+        : `${winner.sku} and ${runnerUp ? runnerUp.sku : "the second product"} have a score gap of ${gap.toFixed(2)}. This is too small.`
 
   return {
     state: accepted ? "accepted" : "review_required",

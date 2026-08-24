@@ -153,7 +153,7 @@ export async function resolveCustomer(
   try {
     return await resolve(env, runId, step)
   } catch (error) {
-    const message = "The customer could not be resolved."
+    const message = "The system could not resolve the customer."
 
     console.error(
       JSON.stringify({
@@ -188,13 +188,13 @@ async function resolve(
     .first<RfqRow>()
 
   if (!rfq) {
-    const message = "No structured request was available to resolve."
+    const message = "The run does not have a structured request."
     await step.fail(message)
     return { state: "error", message }
   }
 
   const startedAt = Date.now()
-  await step.begin("Matching the sender against catalogue customers…")
+  await step.begin("Matching the sender to a customer…")
 
   const references = await loadReferences(env, runId)
   const candidates = await scoreCandidates(env, rfq, references)
@@ -216,7 +216,7 @@ async function resolve(
     method: "deterministic-catalog-lookup",
     message: resolved
       ? null
-      : "No catalogue customer matched this request closely enough. The demo never creates a customer record from a request.",
+      : "No customer met the match rules. This demo cannot create a customer.",
     resolution: resolved && best ? await describeResolution(env, best) : null,
     confidence,
     signals: best?.signals ?? [],
@@ -239,13 +239,12 @@ async function resolve(
   // with its own variant rather than a failure.
   if (resolved && best) {
     await step.complete(
-      `Resolved to ${best.name}. Confidence ${confidence.label} (${confidence.score.toFixed(2)}).`
+      `Customer: ${best.name}. Confidence: ${confidence.label} (${confidence.score.toFixed(2)}).`
     )
   } else {
-    await step.complete(
-      "No catalogue customer matched. The request stays unresolved rather than creating one.",
-      { variant: "unresolved" }
-    )
+    await step.complete("No customer matched. The run requires review.", {
+      variant: "unresolved",
+    })
   }
 
   console.log(
@@ -405,7 +404,7 @@ async function scoreCandidates(
     for (const [customerId, aliases] of perCustomer) {
       record(customerId, {
         kind: "customer_alias",
-        detail: `This customer is the only one recorded using ${aliases.length === 1 ? `the wording “${aliases[0]}”` : `${aliases.length} of these wordings`}.`,
+        detail: `Only this customer uses ${aliases.length === 1 ? `the text “${aliases[0]}”` : `${aliases.length} of these aliases`}.`,
         weight: Math.min(WEIGHTS.aliasCap, WEIGHTS.alias * aliases.length),
       })
     }
@@ -427,7 +426,7 @@ async function scoreCandidates(
       if (row.orders > 0) {
         record(row.customer_id, {
           kind: "order_history",
-          detail: `${row.orders} previous ${row.orders === 1 ? "order" : "orders"} are on record for this customer.`,
+          detail: `The catalogue contains ${row.orders} previous ${row.orders === 1 ? "order" : "orders"} for this customer.`,
           weight: WEIGHTS.historyAny,
         })
       }
@@ -520,13 +519,13 @@ function describeConfidence(
   const closing = resolved
     ? ` The runner-up is ${gap.toFixed(2)} behind.`
     : gap < RESOLUTION_GAP && best.score >= RESOLUTION_THRESHOLD
-      ? ` The runner-up is only ${gap.toFixed(2)} behind, which is too close to accept.`
-      : ` That is below the ${RESOLUTION_THRESHOLD.toFixed(2)} needed to resolve a customer.`
+      ? ` The score gap is ${gap.toFixed(2)}. This is too small for automatic acceptance.`
+      : ` The required customer score is ${RESOLUTION_THRESHOLD.toFixed(2)}.`
 
   return {
     label: resolved ? labelFor(best.score) : "Review",
     score: best.score,
-    heuristic: `Customer confidence sums ${parts}, giving ${best.score.toFixed(2)}.${closing}`,
+    heuristic: `The customer score uses ${parts}. The result is ${best.score.toFixed(2)}.${closing}`,
   }
 }
 

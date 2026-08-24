@@ -295,7 +295,7 @@ describe("reading the sources of a curated request", () => {
     const step = await waitForStep(run.viewId, "read-documents", ["complete"])
 
     expect(step.summary).toMatch(
-      /Read 3 sources into \d+ pages in (\d+ ms|\d+\.\d s)\./
+      /Read 3 sources\. Created \d+ pages in (\d+ ms|\d+\.\d s)\./
     )
     expect(step.startedAt).not.toBeNull()
     expect(step.completedAt).not.toBeNull()

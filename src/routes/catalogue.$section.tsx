@@ -41,28 +41,28 @@ const SECTION_COPY = {
     title: "Products",
     shortTitle: "Products",
     description:
-      "Every active and archived article in the deterministic synthetic catalogue, including pricing and replacement relationships.",
+      "The table contains all active and archived products. It also shows prices and replacement products.",
     searchHint: "Search SKU, product, category, or manufacturer",
   },
   customers: {
     title: "Customers",
     shortTitle: "Customers",
     description:
-      "All synthetic customer accounts with their pricing tiers and summarized contacts and delivery locations.",
+      "The table contains all synthetic customers. It also shows price tiers, contacts, and delivery locations.",
     searchHint: "Search account, domain, contact, or city",
   },
   orders: {
     title: "Historical orders",
     shortTitle: "Orders",
     description:
-      "The synthetic order history used to exercise customer-specific retrieval and pricing decisions.",
+      "The system uses this synthetic order history for customer matches and price rules.",
     searchHint: "Search order, customer, contact, city, or SKU",
   },
   aliases: {
     title: "Aliases and variants",
     shortTitle: "Aliases",
     description:
-      "Seeded shorthand, misspellings, superseded references, and customer-specific wording used during deterministic lookup.",
+      "The system uses these aliases for exact lookup. They include short names, spelling errors, and old product numbers.",
     searchHint: "Search alias, kind, SKU, product, or customer",
   },
 } satisfies Record<CatalogueSection, SectionCopy>

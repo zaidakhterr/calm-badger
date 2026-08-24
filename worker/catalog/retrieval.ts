@@ -327,9 +327,9 @@ export async function retrieveForLine(
             score: 1,
             evidence:
               alias.kind === "workspace"
-                ? `“${alias.alias}” is wording this browser workspace confirmed for ${product.sku} in an earlier review of this customer's requests.`
+                ? `This browser confirmed “${alias.alias}” for ${product.sku} in an earlier review.`
                 : alias.kind === "customer"
-                  ? `“${alias.alias}” is wording this customer is recorded as using for ${product.sku}.`
+                  ? `The catalogue records “${alias.alias}” as this customer's alias for ${product.sku}.`
                   : `“${alias.alias}” is a known catalogue name for ${product.sku}.`,
           },
           shortlist: [],
@@ -345,8 +345,8 @@ export async function retrieveForLine(
           alias.kind === "typo"
             ? `“${alias.alias}” is a recorded misspelling of ${product.sku}.`
             : alias.kind === "legacy"
-              ? `“${alias.alias}” is a superseded number for ${product.sku}, which is still stocked.`
-              : `The request quotes “${alias.alias}”, a known catalogue name for ${product.sku}, inside a longer phrase.`,
+              ? `“${alias.alias}” is an old number for active product ${product.sku}.`
+              : `The request contains known alias “${alias.alias}” for ${product.sku}.`,
       })
 
       return { state: "retrieved", shortlist, query: searchText }
@@ -379,7 +379,7 @@ async function supersededResult(
           ...successor,
           source: "archived_successor" as const,
           score: 1,
-          evidence: `${archived.sku} is archived; the catalogue records ${successor.sku} as its replacement.`,
+          evidence: `${archived.sku} is old. The catalogue lists ${successor.sku} as its replacement.`,
         }
       : null
 
@@ -454,7 +454,7 @@ export async function searchCatalog(
     ...toProduct(row),
     source: "full_text" as const,
     score: Math.round(-row.score * 1000) / 1000,
-    evidence: `Full-text retrieval ranked this ${ordinal(index + 1)} across the active catalogue.`,
+    evidence: `Full-text search ranked this product ${ordinal(index + 1)} in the active catalogue.`,
   }))
 }
 

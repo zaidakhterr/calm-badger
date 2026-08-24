@@ -119,7 +119,7 @@ export async function readDocuments(
   try {
     return await readAllSources(env, runId, recorder)
   } catch (error) {
-    const message = "The documents could not be read."
+    const message = "The system could not read the documents."
 
     console.error(
       JSON.stringify({
@@ -150,8 +150,11 @@ async function readAllSources(
   const sources = await loadSources(env, runId)
 
   if (sources.length === 0) {
-    await recorder.fail("No source documents were stored for this run.")
-    return { state: "error", message: "No source documents were stored" }
+    await recorder.fail("The run does not have source documents.")
+    return {
+      state: "error",
+      message: "The run does not have source documents.",
+    }
   }
 
   const startedAt = Date.now()
@@ -192,7 +195,7 @@ async function readAllSources(
       const message =
         error instanceof OcrProviderError
           ? error.message
-          : "The documents could not be read."
+          : "The system could not read the documents."
 
       console.error(
         JSON.stringify({
@@ -232,9 +235,8 @@ async function readAllSources(
   } satisfies DocumentsEvidence)
 
   await recorder.complete(
-    `Read ${sources.length} ${sources.length === 1 ? "source" : "sources"} ` +
-      `into ${pageRows.length} ${pageRows.length === 1 ? "page" : "pages"} ` +
-      `in ${formatSeconds(elapsedMs)}.`
+    `Read ${sources.length} ${sources.length === 1 ? "source" : "sources"}. ` +
+      `Created ${pageRows.length} ${pageRows.length === 1 ? "page" : "pages"} in ${formatSeconds(elapsedMs)}.`
   )
 
   console.log(

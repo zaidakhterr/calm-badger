@@ -88,25 +88,25 @@ export function evaluationSection(
     return {
       state: "planned",
       summary:
-        "Three scenario fixtures record the correct customer resolution, extracted fields, and product selection for the curated requests. The answers themselves stay in the test suite and are never served to a browser.",
-      rows: ["Scored fixture evaluation has not been recorded for this build."],
+        "Three fixtures contain the reference results for the sample requests. The test suite stores these results. The browser cannot read them.",
+      rows: ["This build does not have a fixture evaluation."],
     }
   }
 
   return {
     state: "measured",
-    summary: `Three curated requests are replayed end to end across this API — read, structure, resolve, retrieve, rerank, review, price, export — and scored against fixtures held in the test suite. Every seam is the deterministic contract fake, so the numbers below cost nothing, call nobody, and repeat exactly. They measure the fixtures, not production traffic, and the answers stay out of this projection.`,
+    summary: `The test replays three sample requests through the full API. Test providers make the result repeatable. These values measure fixtures, not production use.`,
     rows: [
-      `${totals.lines} requested lines across ${totals.scenarios} workflows: ${totals.customerCorrect}/${totals.scenarios} customers resolved correctly, ${totals.extractionComplete}/${totals.scenarios} extractions complete.`,
-      `Retrieval kept the correct article in the shortlist for ${totals.shortlistHits}/${totals.lines} lines; reranking kept it in the top three for ${totals.topThreeHits}/${totals.lines}.`,
+      `${totals.lines} lines in ${totals.scenarios} runs. Correct customers: ${totals.customerCorrect}/${totals.scenarios}. Complete extractions: ${totals.extractionComplete}/${totals.scenarios}.`,
+      `Correct product in shortlist: ${totals.shortlistHits}/${totals.lines}. Correct product in top three: ${totals.topThreeHits}/${totals.lines}.`,
       selectionRow(totals),
       reviewRow(totals),
-      `Pricing and simulated export completed for ${totals.priced}/${totals.scenarios} and ${totals.delivered}/${totals.scenarios} workflows, delivery following pricing automatically once any review was decided.`,
+      `Priced runs: ${totals.priced}/${totals.scenarios}. Simulated deliveries: ${totals.delivered}/${totals.scenarios}.`,
       ...summary.scenarios.map(
         (scenario) =>
-          `${SCENARIO_NAMES.get(scenario.scenarioId) ?? scenario.scenarioId}: ${scenario.selectionCorrect}/${scenario.lines} lines correct, ${scenario.reviewLinesObserved} paused for confirmation.`
+          `${SCENARIO_NAMES.get(scenario.scenarioId) ?? scenario.scenarioId}: ${scenario.selectionCorrect}/${scenario.lines} correct lines. Lines sent to review: ${scenario.reviewLinesObserved}.`
       ),
-      "Live provider evaluation runs the same scoring through pnpm eval:live and is never part of continuous integration.",
+      "Run pnpm eval:live to test live providers. Continuous integration does not run this command.",
     ],
   }
 }
@@ -121,36 +121,36 @@ export function evaluationSection(
  * stated, because collapsing them would flatter the number.
  */
 function selectionRow(totals: EvaluationTotals): string {
-  const base = `Final selection after review: ${totals.selectionCorrect}/${totals.lines} lines quoted the article the fixtures call correct, with quantities right on ${totals.quantityCorrect}/${totals.lines}.`
+  const base = `Correct final products: ${totals.selectionCorrect}/${totals.lines}. Correct quantities: ${totals.quantityCorrect}/${totals.lines}.`
 
   const differed: string[] = []
   if (totals.divergedAfterAsking > 0) {
     differed.push(
-      `${totals.divergedAfterAsking} differed on a line the run had stopped to ask about, where this evaluation approves the proposal unchanged rather than correcting it`
+      `${totals.divergedAfterAsking} reviewed lines had a different product`
     )
   }
 
   if (totals.divergedWithoutAsking > 0) {
     differed.push(
-      `${totals.divergedWithoutAsking} differed on a line the run settled by itself`
+      `${totals.divergedWithoutAsking} automatically accepted lines had a different product`
     )
   }
 
   return differed.length > 0
-    ? `${base} Of the rest, ${differed.join("; ")}.`
+    ? `${base} Differences: ${differed.join("; ")}.`
     : base
 }
 
 function reviewRow(totals: EvaluationTotals): string {
-  const base = `Review: ${totals.reviewLinesObserved} lines paused for a human, against ${totals.reviewLinesInGold} the fixtures call genuinely uncertain.`
+  const base = `Lines sent to review: ${totals.reviewLinesObserved}. Reference review lines: ${totals.reviewLinesInGold}.`
 
   if (totals.missedReviewLines > 0) {
-    return `${base} ${totals.missedReviewLines} uncertain lines were accepted without asking.`
+    return `${base} The system accepted ${totals.missedReviewLines} uncertain lines without review.`
   }
 
   if (totals.extraReviewLines > 0) {
-    return `${base} The ${totals.extraReviewLines} additional pauses are the deterministic reranker asking for confirmation it did not need — caution rather than a wrong acceptance, and reported rather than tuned away.`
+    return `${base} The system sent ${totals.extraReviewLines} additional lines to review.`
   }
 
-  return `${base} No uncertain line was accepted without asking.`
+  return `${base} The system did not accept an uncertain line without review.`
 }

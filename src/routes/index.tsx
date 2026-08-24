@@ -84,17 +84,17 @@ function LandingPage() {
     <main className="mx-auto w-full max-w-3xl px-4 py-10 sm:px-6 sm:py-14">
       <section aria-labelledby="page-title">
         <p className="text-[13px] font-medium text-muted-foreground">
-          Auditable quote workflow
+          Auditable RFQ workflow
         </p>
         <h1
           id="page-title"
           className="mt-2 max-w-xl text-xl leading-7 font-medium tracking-[-0.02em]"
         >
-          Turn a messy request into a quote you can explain.
+          Turn a request into an auditable quote.
         </h1>
         <p className="mt-3 max-w-2xl text-sm leading-6 text-muted-foreground">
-          Choose a synthetic RFQ to inspect how documents, customer evidence,
-          product decisions, and pricing move through one traceable workflow.
+          Select a synthetic request. The run shows each document, decision, and
+          price rule.
         </p>
       </section>
 
@@ -108,7 +108,7 @@ function LandingPage() {
               Choose a request
             </h2>
             <p className="mt-1 text-sm text-muted-foreground">
-              {featured.name} is selected by default.
+              Select a synthetic request.
             </p>
           </div>
           <span className="hidden text-[13px] text-muted-foreground sm:block">
@@ -178,13 +178,11 @@ function LandingPage() {
       ) : null}
 
       <p className="mt-4 text-[13px] leading-5 text-muted-foreground">
-        This public demo is for synthetic or non-confidential documents only.
-        Custom uploads accept PDF, JPEG, and PNG files, up to{" "}
-        {UPLOAD_LIMITS.maxFiles} files and{" "}
-        {UPLOAD_LIMITS.maxBytes / 1024 / 1024} MB combined. There is no login:
-        the live AI providers are protected by a limit of{" "}
-        {PROCESSING_LIMIT_PER_HOUR} runs an hour from one place, and opening a
-        run you already started never counts against it.
+        Use synthetic or non-confidential documents only. You can upload PDF,
+        JPEG, and PNG files. The limit is {UPLOAD_LIMITS.maxFiles} files and{" "}
+        {UPLOAD_LIMITS.maxBytes / 1024 / 1024} MB. You can start{" "}
+        {PROCESSING_LIMIT_PER_HOUR} runs each hour. Opening a stored run does
+        not use this limit.
       </p>
 
       {recentRuns.length > 0 ? (
@@ -332,7 +330,7 @@ function CustomSourceForm({
             Your own RFQ
           </h2>
           <p className="mt-0.5 text-[13px] text-muted-foreground">
-            Paste an email body and attach the documents it refers to.
+            Paste the email text. Then attach its files.
           </p>
         </div>
         <PaperclipIcon className="size-4 text-muted-foreground" aria-hidden />
@@ -343,12 +341,11 @@ function CustomSourceForm({
           <WarningCircleIcon className="mt-0.5 size-4 shrink-0" aria-hidden />
           <p>
             <span className="font-medium">
-              Submit synthetic or non-confidential material only.
+              Use synthetic or non-confidential files only.
             </span>{" "}
-            This is a public demonstration. Uploads and everything derived from
-            them are read by an external OCR provider, kept in private storage,
-            and deleted 24 hours after the run starts. Curated sample runs are
-            deleted after seven days.
+            This is a public demo. An external optical character recognition
+            (OCR) provider reads your files. The system deletes custom runs
+            after 24 hours. It deletes sample runs after seven days.
           </p>
         </div>
 
@@ -361,8 +358,7 @@ function CustomSourceForm({
           >
             product catalogue
           </Link>
-          . Your items may not match anything in it, and a run built on them may
-          stop for review or fail to price.
+          . If a product does not match, the run can stop for review.
         </p>
 
         <div>
@@ -562,7 +558,7 @@ function SourcePreview({ scenario }: { scenario: Scenario }) {
             <span className="font-medium text-foreground">
               Difficulty {scenario.difficulty.level.toLowerCase()}.
             </span>{" "}
-            {scenario.difficulty.summary} {scenario.difficulty.expectedReview}
+            {scenario.difficulty.expectedReview}
           </p>
         </div>
       </div>

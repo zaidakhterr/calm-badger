@@ -101,7 +101,7 @@ export async function buildEstimate(
   try {
     return await build(env, runId, options, step)
   } catch (error) {
-    const message = "The estimate could not be built."
+    const message = "The system could not build the estimate."
 
     console.error(
       JSON.stringify({
@@ -136,7 +136,7 @@ async function build(
     if (options.reviewed) {
       // The owner has already decided everything that was open. Waiting again
       // would be waiting for nobody, so this ends as a terminal state.
-      const message = `The approved corrections still leave this run unpriceable. ${assembly.reason}`
+      const message = `The system cannot price the approved run. ${assembly.reason}`
 
       await step.fail(message)
 
@@ -154,9 +154,7 @@ async function build(
     // The run needs a human, so the node keeps its `waiting` state and simply
     // says why. The run itself stays active with no active step, which is the
     // same posture every earlier step uses when it stops short.
-    await step.hold(
-      `Waiting for owner review before pricing. ${assembly.reason}`
-    )
+    await step.hold(`Waiting for review. ${assembly.reason}`)
 
     console.log(
       JSON.stringify({
@@ -229,7 +227,7 @@ function describeRules(quote: CanonicalQuote) {
     })),
     vatRateBp: VAT_RATE_BP,
     rounding: ROUNDING_NOTE,
-    note: "Precedence is an ordered fallback: the first applicable rule prices the line, and no language model is asked for an amount.",
+    note: "The first applicable rule sets the price. A language model does not calculate a price.",
   }
 }
 

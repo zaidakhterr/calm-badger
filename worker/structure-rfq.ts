@@ -164,7 +164,7 @@ export async function structureRfq(
   try {
     return await structure(env, runId, recorder)
   } catch (error) {
-    const message = "The request could not be structured."
+    const message = "The system could not structure the request."
 
     console.error(
       JSON.stringify({
@@ -195,13 +195,13 @@ async function structure(
   const documents = await loadDocuments(env, runId)
 
   if (documents.length === 0) {
-    const message = "No document text was available to structure."
+    const message = "The run does not have document text."
     await recorder.fail(message)
     return { state: "error", message }
   }
 
   const startedAt = Date.now()
-  await recorder.begin("Extracting customer, source, deadline, and line items…")
+  await recorder.begin("Extracting the customer, deadline, and lines…")
 
   const provider = selectExtractionProvider(readConfig(env))
   let result: ExtractionResult
@@ -219,7 +219,7 @@ async function structure(
     const message =
       error instanceof ExtractionProviderError
         ? error.message
-        : "The request could not be structured."
+        : "The system could not structure the request."
 
     console.error(
       JSON.stringify({
@@ -267,7 +267,7 @@ async function structure(
   if (parsed.state === "irreparable") {
     return await stopWithValidationFailure(runId, recorder, {
       ...shared,
-      message: `${parsed.reason} One repair attempt was made.`,
+      message: `${parsed.reason} The system tried one repair.`,
       issues: [],
       repaired: false,
       latencyMs: result.latencyMs,
@@ -318,12 +318,12 @@ async function structure(
 
   await recorder.complete(
     total === 0
-      ? `No line items could be read from the request. Confidence ${confidence.label}.`
-      : `Validated ${total} ${total === 1 ? "line" : "lines"}` +
+      ? `The system did not find a line. Confidence: ${confidence.label}.`
+      : `Validated ${total} ${total === 1 ? "line" : "lines"}. ` +
           (reviewCount > 0
-            ? `, ${reviewCount} needing review. `
-            : " with no business-rule failures. ") +
-          `Confidence ${confidence.label} (${confidence.score.toFixed(2)}).`
+            ? `Review required: ${reviewCount}. `
+            : "All lines passed validation. ") +
+          `Confidence: ${confidence.label} (${confidence.score.toFixed(2)}).`
   )
 
   console.log(

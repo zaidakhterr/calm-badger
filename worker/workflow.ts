@@ -282,17 +282,16 @@ export async function applyReviewOutcome(
 
   if (outcome.state === "rejected") {
     await recorder.complete(
-      "Owner rejected this review, so the run stops here. Nothing was priced or delivered.",
+      "The owner rejected the review. The run stops here.",
       { variant: "rejected" }
     )
     return "rejected"
   }
 
   if (outcome.state === "expired") {
-    await recorder.complete(
-      "The review window closed before a decision was made, so this run was never priced.",
-      { variant: "expired" }
-    )
+    await recorder.complete("The review time expired. The run stops here.", {
+      variant: "expired",
+    })
     return "expired"
   }
 
@@ -317,7 +316,7 @@ export async function applyReviewOutcome(
   const count = outcome.decisions.length
 
   await recorder.complete(
-    `Owner confirmed ${count} ${count === 1 ? "decision" : "decisions"}; the run continues to pricing.`,
+    `The owner confirmed ${count} ${count === 1 ? "item" : "items"}. The run continues.`,
     { variant: "approved" }
   )
 

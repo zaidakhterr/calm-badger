@@ -245,7 +245,7 @@ describe("deterministic pricing rules", () => {
     expect(price.unitPriceCents).toBe(1490)
     expect(price.discountBp).toBeNull()
     expect(price.subtotalCents).toBe(5960)
-    expect(price.explanation).toContain("catalogue price stands")
+    expect(price.explanation).toContain("catalogue price")
   })
 
   it("applies a quantity break for a customer with no tier discount", () => {
@@ -262,7 +262,7 @@ describe("deterministic pricing rules", () => {
     // 1490 × 0.96 = 1430.4, rounded to the nearest cent.
     expect(price.unitPriceCents).toBe(1430)
     expect(price.subtotalCents).toBe(17_160)
-    expect(price.explanation).toContain("12+ break")
+    expect(price.explanation).toContain("12+ price break")
   })
 
   it("takes the deepest break the quantity reaches", () => {
@@ -550,7 +550,7 @@ const fixtureQuote: CanonicalQuote = {
 }
 
 const NOTICE =
-  "Simulated locally. This adapter transforms the canonical quote and returns a synthetic identifier; no request leaves the application, no third-party system is contacted, and no affiliation or endorsement is implied."
+  "This delivery is simulated. The adapter converts the canonical quote and returns a synthetic ID. No request leaves the application."
 
 describe("adapter payloads", () => {
   it("maps the canonical quote to the Generic ERP Webhook event", () => {
@@ -670,7 +670,7 @@ describe("pricing a run that needs no review", () => {
       "quantity_break",
       "catalog_base",
     ])
-    expect(evidence.rules!.rounding).toContain("nearest cent")
+    expect(evidence.rules!.rounding).toContain("rounds each unit price once")
     expect(evidence.totals!.totalCents).toBe(quote.totals.totalCents)
   })
 
@@ -846,8 +846,8 @@ describe("the fixed delivery webhook", () => {
 
     for (const adapter of evidence.adapters) {
       expect(adapter.simulated).toBe(true)
-      expect(adapter.notice).toContain("no request leaves the application")
-      expect(adapter.notice).toContain("no affiliation or endorsement")
+      expect(adapter.notice).toContain("No request leaves the application")
+      expect(adapter.notice).toContain("simulated")
     }
   })
 

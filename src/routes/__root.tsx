@@ -19,8 +19,7 @@ function NotFound() {
           This page could not be found
         </h1>
         <p className="mt-2 text-sm leading-6 text-muted-foreground">
-          The link may be incorrect, or the run it pointed at may no longer
-          exist.
+          The link can be incorrect. The run can also have expired.
         </p>
         <Link
           to="/"

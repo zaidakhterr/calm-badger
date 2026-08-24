@@ -132,7 +132,7 @@ export async function retrieveCandidates(
   try {
     return await retrieve(env, runId, step)
   } catch (error) {
-    const message = "Catalogue candidates could not be retrieved."
+    const message = "The system could not retrieve product candidates."
 
     console.error(
       JSON.stringify({
@@ -162,7 +162,7 @@ async function retrieve(
   const lines = await loadLines(env, runId)
 
   if (lines.length === 0) {
-    const message = "No requested lines were available to match."
+    const message = "The run does not have lines to match."
     await step.fail(message)
     return { state: "error", message }
   }
@@ -220,10 +220,8 @@ async function retrieve(
   } satisfies CandidatesEvidence)
 
   await step.complete(
-    `Retrieved ${candidateCount} ${candidateCount === 1 ? "candidate" : "candidates"} ` +
-      `for ${lines.length} ${lines.length === 1 ? "line" : "lines"}: ` +
-      `${exactCount} settled by exact evidence, ` +
-      `${lines.length - exactCount} shortlisted for reranking.`
+    `Found ${candidateCount} ${candidateCount === 1 ? "candidate" : "candidates"} for ${lines.length} ${lines.length === 1 ? "line" : "lines"}. ` +
+      `Exact matches: ${exactCount}. Lines sent for ranking: ${lines.length - exactCount}.`
   )
 
   console.log(
@@ -266,10 +264,10 @@ function describeLine(line: LineRow, retrieval: LineRetrieval) {
       retrieval.state === "superseded" ? retrieval.supersededSku : null,
     note:
       retrieval.state === "exact"
-        ? "Settled by deterministic evidence; no model was asked."
+        ? "Exact evidence selected the product. The system did not use a model."
         : retrieval.state === "superseded"
-          ? "The request names an archived product, so the shortlist leads with its live successor and the line still needs a decision."
-          : `Retrieved from the complete active catalogue; the top ${SHORTLIST_SIZE} go to the reranker.`,
+          ? "The request names an old product. Its replacement is first in the shortlist. Review is required."
+          : `The system searched all active products. It sends ${SHORTLIST_SIZE} products to the ranking model.`,
     candidates: shortlist.map((candidate, index) => ({
       rank: index + 1,
       sku: candidate.sku,

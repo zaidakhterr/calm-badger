@@ -248,7 +248,7 @@ export async function matchProducts(
   try {
     return await match(env, runId, step)
   } catch (error) {
-    const message = "The requested lines could not be matched."
+    const message = "The system could not match the lines."
 
     console.error(
       JSON.stringify({
@@ -281,7 +281,7 @@ async function match(
   ])
 
   if (lines.length === 0) {
-    const message = "No requested lines were available to match."
+    const message = "The run does not have lines to match."
     await step.fail(message)
     return { state: "error", message }
   }
@@ -319,7 +319,7 @@ async function match(
       const message =
         error instanceof RerankProviderError
           ? error.message
-          : "The requested lines could not be matched."
+          : "The system could not match the lines."
 
       console.error(
         JSON.stringify({
@@ -365,10 +365,10 @@ async function match(
   } satisfies MatchesEvidence)
 
   await step.complete(
-    `Matched ${acceptedCount} ${acceptedCount === 1 ? "line" : "lines"} to catalogue products` +
+    `Accepted ${acceptedCount} ${acceptedCount === 1 ? "product match" : "product matches"}. ` +
       (reviewCount > 0
-        ? `, ${reviewCount} needing review.`
-        : " with nothing left to confirm.")
+        ? `Review required: ${reviewCount}.`
+        : "No review is required.")
   )
 
   console.log(
@@ -433,8 +433,7 @@ async function matchLine(
       state: "review_required",
       sku: null,
       productName: null,
-      decisionEvidence:
-        "Nothing in the active catalogue matched this wording, so there is no product to price.",
+      decisionEvidence: "No active product matched the request text.",
       confidence: {
         label: "Review",
         score: 0,
@@ -460,13 +459,13 @@ async function matchLine(
       productName: leadingProduct.name,
       decisionEvidence:
         method === "exact_sku"
-          ? `The request prints the current article number ${leadingProduct.sku}, which the catalogue lists as active.`
-          : `The catalogue already records this wording as a name for ${leadingProduct.sku}.`,
+          ? `The request contains active product number ${leadingProduct.sku}.`
+          : `The catalogue records this text as an alias for ${leadingProduct.sku}.`,
       confidence: {
         label: "High",
         score: 1,
         heuristic:
-          "Deterministic catalogue evidence, so no model judgement and no heuristic threshold was involved.",
+          "Exact catalogue evidence selected this product. The system did not use a model.",
       },
       winnerScore: 1,
       winnerGap: 1,
@@ -484,12 +483,11 @@ async function matchLine(
       sku: leadingProduct.sku,
       productName: leadingProduct.name,
       alternatives,
-      decisionEvidence: `The request names an archived product. The catalogue records ${leadingProduct.sku} as its replacement, but substituting it is a business decision, so this line waits for a human.`,
+      decisionEvidence: `The request names an old product. The catalogue lists ${leadingProduct.sku} as its replacement. Review is required.`,
       confidence: {
         label: "Review",
         score: 0.5,
-        heuristic:
-          "A superseded article number always goes to review, whatever the successor scores.",
+        heuristic: "An old product number always requires review.",
       },
       winnerScore: 0.5,
       winnerGap: 0,
@@ -543,7 +541,7 @@ async function matchLine(
       state: "review_required",
       sku: null,
       productName: null,
-      decisionEvidence: `${parsed.reason} One repair attempt was made, so this line waits for a human rather than guessing.`,
+      decisionEvidence: `${parsed.reason} The system tried one repair. Review is required.`,
       confidence: reviewConfidence(
         "The ranking could not be read, so the score stays at 0.00."
       ),
@@ -563,7 +561,7 @@ async function matchLine(
       sku: null,
       productName: null,
       decisionEvidence:
-        "The ranking did not match the required schema, so nothing from it was used.",
+        "The ranking did not match the required schema. The system did not use it.",
       confidence: reviewConfidence(
         "The ranking failed schema validation, so the score stays at 0.00."
       ),
@@ -627,7 +625,7 @@ function describeDecision(
 
   if (duplicate) {
     parts.push(
-      `${duplicate.sku} is recorded as a near duplicate of ${duplicate.nearDuplicateOf}, so the two stay close together on purpose.`
+      `${duplicate.sku} is similar to ${duplicate.nearDuplicateOf}. The system keeps their scores close.`
     )
   }
 
@@ -650,7 +648,7 @@ function describeHeuristics(heuristics: MatchHeuristics) {
   return {
     winnerStrength: heuristics.winnerStrength,
     winnerGap: heuristics.winnerGap,
-    note: "Demo heuristics, not calibrated probabilities. A line is accepted only when the winner clears the strength threshold and leads the runner-up by at least the gap.",
+    note: "These scores are demo rules, not probabilities. The proposed product must meet the score and score-gap limits.",
   }
 }
 

@@ -91,7 +91,7 @@ export type AppliedPrice = {
 export const VAT_RATE_BP = 1900
 
 export const ROUNDING_NOTE =
-  "Amounts are integer cents. A discounted unit price is rounded to the nearest cent (halves up) once, the line subtotal is that rounded unit price times the quantity, and VAT is rounded once over the whole subtotal rather than per line."
+  "All amounts use integer cents. The system rounds each unit price once. It calculates VAT once from the total subtotal."
 
 export function priceLine(input: PriceInput): AppliedPrice {
   const { basePriceCents, quantity, tier, quantityBreaks, override } = input
@@ -104,7 +104,7 @@ export function priceLine(input: PriceInput): AppliedPrice {
       unitPriceCents: override.unitPriceCents,
       discountBp: null,
       quantity,
-      explanation: `An active customer price of ${money(override.unitPriceCents)} applies (${override.reason}, effective ${override.effectiveFrom}), so the ${money(basePriceCents)} catalogue price is not used.`,
+      explanation: `The active customer price is ${money(override.unitPriceCents)}. Reason: ${override.reason}. It applies from ${override.effectiveFrom}.`,
     })
   }
 
@@ -118,7 +118,7 @@ export function priceLine(input: PriceInput): AppliedPrice {
       unitPriceCents,
       discountBp: tier.discountBp,
       quantity,
-      explanation: `The ${tier.name} tier discounts the ${money(basePriceCents)} catalogue price by ${percent(tier.discountBp)} to ${money(unitPriceCents)}.`,
+      explanation: `The ${tier.name} tier gives a ${percent(tier.discountBp)} discount. The unit price changes from ${money(basePriceCents)} to ${money(unitPriceCents)}.`,
     })
   }
 
@@ -134,7 +134,7 @@ export function priceLine(input: PriceInput): AppliedPrice {
       unitPriceCents,
       discountBp: quantityBreak.discountBp,
       quantity,
-      explanation: `Ordering ${quantity} reaches the ${quantityBreak.minQuantity}+ break, which discounts the ${money(basePriceCents)} catalogue price by ${percent(quantityBreak.discountBp)} to ${money(unitPriceCents)}.`,
+      explanation: `The quantity is ${quantity}. This meets the ${quantityBreak.minQuantity}+ price break. The unit price is ${money(unitPriceCents)} after a ${percent(quantityBreak.discountBp)} discount.`,
     })
   }
 
@@ -145,7 +145,7 @@ export function priceLine(input: PriceInput): AppliedPrice {
     unitPriceCents: basePriceCents,
     discountBp: null,
     quantity,
-    explanation: `No customer price, tier discount, or quantity break applies, so the ${money(basePriceCents)} catalogue price stands.`,
+    explanation: `No discount applies. The unit price is the catalogue price of ${money(basePriceCents)}.`,
   })
 }
 

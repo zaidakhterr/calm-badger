@@ -379,8 +379,7 @@ describe("pausing an uncertain run", () => {
       expect(alternative.label.length).toBeGreaterThan(0)
     }
 
-    // The heuristic is described as a demo heuristic, never as certainty.
-    expect(review.note).toContain("owner-only")
+    expect(review.note).toContain("Only the owner")
   })
 })
 
@@ -578,7 +577,7 @@ describe("approving a review", () => {
 
     expect(node.status).toBe("complete")
     expect(node.summary).toBe(
-      `Owner confirmed ${review.items.length} decisions; the run continues to pricing.`
+      `The owner confirmed ${review.items.length} items. The run continues.`
     )
     expect(settled.workflowState).toBe("delivered")
 
@@ -752,7 +751,7 @@ describe("approving a review", () => {
     expect(quantity).toBeDefined()
     expect(customer.position).toBe(-1)
     expect(customer.proposal.customerId).toBeNull()
-    expect(customer.reasons.join(" ")).toContain("not available")
+    expect(customer.reasons.join(" ")).toContain("cannot create a customer")
     expect(quantity.proposal.quantity).toBeNull()
 
     // An existing customer, chosen by searching; nothing is created.
@@ -829,7 +828,7 @@ describe("approving a review", () => {
 
     expect(field).toBeDefined()
     expect(field.reasons.join(" ")).toContain("article number")
-    expect(field.proposal.label).toContain("exactly as extracted")
+    expect(field.proposal.label).toContain("extracted value")
 
     // The only correction available is confirming the extraction as it stands.
     const refused = await decide(run.viewId, ownerCapability, [
@@ -905,7 +904,7 @@ describe("approving a review", () => {
 
       expect(response.status).toBe(400)
       expect((await response.json<{ error: string }>()).error).toBe(
-        "A list of review decisions is required"
+        "Send at least one review decision."
       )
     }
 
@@ -925,7 +924,7 @@ describe("approving a review", () => {
 
       expect(response.status).toBe(400)
       expect((await response.json<{ error: string }>()).error).toBe(
-        "Each decision needs a known item and action"
+        "Each decision must contain a known item and action."
       )
     }
 
@@ -979,7 +978,7 @@ describe("repeated, premature, and rejected decisions", () => {
     expect(premature.status).toBe(409)
 
     const body = await premature.json<{ error: string; review: Review }>()
-    expect(body.error).toContain("still open")
+    expect(body.error).toContain("Open items")
     expect(body.review.state).toBe("pending")
 
     // The run did not move, and can still be approved properly afterwards.
@@ -1053,7 +1052,7 @@ describe("repeated, premature, and rejected decisions", () => {
     const node = settled.steps.find((step) => step.key === "review-required")!
     expect(node.status).toBe("error")
     expect(node.summary).toBe(
-      "Owner rejected this review, so the run stops here. Nothing was priced or delivered."
+      "The owner rejected the review. The run stops here."
     )
 
     // The graph simply stops: nothing below it ran.
@@ -1165,9 +1164,7 @@ describe("an expired review", () => {
     expect(settled.workflowState).toBe("review_expired")
     expect(
       settled.steps.find((step) => step.key === "review-required")!.summary
-    ).toBe(
-      "The review window closed before a decision was made, so this run was never priced."
-    )
+    ).toBe("The review time expired. The run stops here.")
     expect(
       settled.steps.find((step) => step.key === "build-estimate")!.status
     ).toBe("waiting")

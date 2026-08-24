@@ -384,7 +384,7 @@ async function createRunResponse(
 
     return Response.json(
       {
-        error: `This public demo allows ${limit.limit} runs an hour from one place, so the live AI providers stay affordable for everyone. Please try again in about ${Math.ceil(limit.retryAfterSeconds / 60)} minutes — runs you already started are unaffected.`,
+        error: `You can start ${limit.limit} runs each hour. Try again in approximately ${Math.ceil(limit.retryAfterSeconds / 60)} minutes. You can still open a stored run.`,
         limit: limit.limit,
         windowSeconds: limit.windowSeconds,
         retryAfterSeconds: limit.retryAfterSeconds,
@@ -586,7 +586,7 @@ function rejectedRunBody(
   if (reason === "unreadable") {
     return {
       ok: false,
-      error: "The submitted request could not be read",
+      error: "The system could not read the request",
       reasonCode: "unreadable_body",
     }
   }
@@ -594,7 +594,7 @@ function rejectedRunBody(
   return kind === "custom"
     ? {
         ok: false,
-        error: `The request is larger than the ${MAX_UPLOAD_BYTES / (1024 * 1024)} MB upload limit`,
+        error: `The request is larger than the ${MAX_UPLOAD_BYTES / (1024 * 1024)} MB limit`,
         reasonCode: "upload_too_large",
       }
     : {
@@ -670,7 +670,7 @@ async function readCustomInput(
   } catch {
     return {
       ok: false,
-      error: "The submitted request could not be read",
+      error: "The system could not read the request",
       reasonCode: "unreadable_form",
     }
   }
@@ -709,7 +709,7 @@ async function stepEvidenceResponse(
 
   if (!runId) {
     return Response.json(
-      { error: "This run is unavailable or has expired" },
+      { error: "This run is not available. It can have expired." },
       { status: 404, headers: jsonHeaders }
     )
   }
@@ -748,7 +748,7 @@ async function quoteDownloadResponse(
 
   if (!quote) {
     return Response.json(
-      { error: "This run has no canonical quote yet" },
+      { error: "This run does not have a canonical quote." },
       { status: 404, headers: jsonHeaders }
     )
   }
@@ -776,7 +776,7 @@ async function reviewViewResponse(env: Env, viewId: string): Promise<Response> {
 
   if (!runId) {
     return Response.json(
-      { error: "This run is unavailable or has expired" },
+      { error: "This run is not available. It can have expired." },
       { status: 404, headers: jsonHeaders }
     )
   }
@@ -805,7 +805,7 @@ async function reviewDecisionsResponse(
 
   if (!body.ok) {
     return Response.json(
-      { error: "A list of review decisions is required" },
+      { error: "Send at least one review decision." },
       { status: 400, headers: jsonHeaders }
     )
   }
@@ -817,7 +817,7 @@ async function reviewDecisionsResponse(
 
     if (!decision.success) {
       return Response.json(
-        { error: "Each decision needs a known item and action" },
+        { error: "Each decision must contain a known item and action." },
         { status: 400, headers: jsonHeaders }
       )
     }
@@ -871,7 +871,7 @@ async function reviewDecisionResponse(
 
   if (!body.ok) {
     return Response.json(
-      { error: "A review decision must be approve or reject" },
+      { error: "The review action must be approve or reject." },
       { status: 400, headers: jsonHeaders }
     )
   }
@@ -881,7 +881,7 @@ async function reviewDecisionResponse(
 
   if (outcome.state === "absent") {
     return Response.json(
-      { error: "This run has nothing waiting for review" },
+      { error: "This run does not have an open review." },
       { status: 409, headers: jsonHeaders }
     )
   }
@@ -985,20 +985,20 @@ function ownerRejection(
 ): Response {
   if (reason === "missing") {
     return Response.json(
-      { error: "An owner capability is required" },
+      { error: "Owner access is required." },
       { status: 401, headers: { ...jsonHeaders, "www-authenticate": "Bearer" } }
     )
   }
 
   if (reason === "unknown_run") {
     return Response.json(
-      { error: "This run is unavailable or has expired" },
+      { error: "This run is not available. It can have expired." },
       { status: 404, headers: jsonHeaders }
     )
   }
 
   return Response.json(
-    { error: "This capability does not own this run" },
+    { error: "This browser does not own the run." },
     { status: 403, headers: jsonHeaders }
   )
 }
@@ -1016,7 +1016,7 @@ async function sourcePreviewResponse(
 
   if (!runId) {
     return Response.json(
-      { error: "This run is unavailable or has expired" },
+      { error: "This run is not available. It can have expired." },
       { status: 404, headers: jsonHeaders }
     )
   }
@@ -1030,7 +1030,7 @@ async function sourcePreviewResponse(
     !UPLOAD_MEDIA_TYPE_SCHEMA.safeParse(source.mediaType).success
   ) {
     return Response.json(
-      { error: "This source is unavailable" },
+      { error: "This source is not available." },
       { status: 404, headers: jsonHeaders }
     )
   }
@@ -1039,7 +1039,7 @@ async function sourcePreviewResponse(
 
   if (!object) {
     return Response.json(
-      { error: "This source is unavailable" },
+      { error: "This source is not available." },
       { status: 404, headers: jsonHeaders }
     )
   }
@@ -1064,7 +1064,7 @@ async function runViewResponse(
 
   if (!run) {
     return Response.json(
-      { error: "This run is unavailable or has expired" },
+      { error: "This run is not available. It can have expired." },
       { status: 404, headers: jsonHeaders }
     )
   }

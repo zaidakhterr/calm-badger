@@ -33,7 +33,7 @@ export function isAdapterId(value: string): value is AdapterId {
 export const DEFAULT_ADAPTER: AdapterId = "generic-erp-webhook"
 
 export const SIMULATION_NOTICE =
-  "Simulated locally. This adapter transforms the canonical quote and returns a synthetic identifier; no request leaves the application, no third-party system is contacted, and no affiliation or endorsement is implied."
+  "This delivery is simulated. The adapter converts the canonical quote and returns a synthetic ID. No request leaves the application."
 
 export type AdapterDescription = {
   id: string
@@ -50,7 +50,7 @@ export const ADAPTERS = {
     id: "generic-erp-webhook",
     name: "Generic ERP Webhook",
     contract:
-      "Event-oriented webhook envelope: a versioned event name, a flat snake_case body, and every amount as an integer in minor units.",
+      "A JSON event with a version, a flat snake_case body, and integer amounts in minor units.",
     payloadFormat: "JSON event, snake_case, integer minor units",
     simulated: true,
     notice: SIMULATION_NOTICE,

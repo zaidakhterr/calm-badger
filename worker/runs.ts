@@ -46,37 +46,37 @@ const WORKFLOW_STEPS = [
   {
     key: "read-documents",
     title: "Read documents",
-    waiting: "Waiting to read the email, image, and PDF sources.",
+    waiting: "Waiting for the source files.",
   },
   {
     key: "structure-rfq",
     title: "Structure RFQ",
-    waiting: "Waiting for validated document text.",
+    waiting: "Waiting for document text.",
   },
   {
     key: "resolve-customer",
     title: "Resolve customer",
-    waiting: "Waiting for structured customer evidence.",
+    waiting: "Waiting for customer data.",
   },
   {
     key: "retrieve-candidates",
     title: "Retrieve candidates",
-    waiting: "Waiting for extracted line items.",
+    waiting: "Waiting for extracted lines.",
   },
   {
     key: "match-products",
     title: "Match products",
-    waiting: "Waiting for the bounded candidate shortlist.",
+    waiting: "Waiting for product candidates.",
   },
   {
     key: "build-estimate",
     title: "Build estimate",
-    waiting: "Waiting for confirmed customer and product matches.",
+    waiting: "Waiting for confirmed matches.",
   },
   {
     key: "deliver",
     title: "Deliver",
-    waiting: "Waiting for the canonical quote.",
+    waiting: "Waiting for the quote.",
   },
 ] as const
 

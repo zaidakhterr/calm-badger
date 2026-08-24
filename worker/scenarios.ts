@@ -87,8 +87,8 @@ export const SCENARIOS: Scenario[] = [
     difficulty: {
       level: "Low",
       summary:
-        "A known contact writes from a known domain, quotes current article numbers, and names one delivery address. Every line should match on the article number alone.",
-      expectedReview: "Expected to complete without human review.",
+        "The request has a known contact and current product numbers. Each line has an exact product match.",
+      expectedReview: "No review is expected.",
     },
     email: {
       from: {
@@ -135,7 +135,7 @@ export const SCENARIOS: Scenario[] = [
         description: "Panel filter 592 x 592 x 48",
         quantity: 24,
         unit: "pieces",
-        note: "Exact article number; a customer price agreement applies.",
+        note: "The product number is exact. A customer price applies.",
       },
       {
         position: 2,
@@ -143,7 +143,7 @@ export const SCENARIOS: Scenario[] = [
         description: "Lithium grease EP2, 400 g cartridge",
         quantity: 12,
         unit: "cartridges",
-        note: "Exact article number; quantity reaches the first break.",
+        note: "The product number is exact. The quantity gives a discount.",
       },
       {
         position: 3,
@@ -151,7 +151,7 @@ export const SCENARIOS: Scenario[] = [
         description: "Nitrile work gloves, size 9",
         quantity: 24,
         unit: "pairs",
-        note: "Exact article number; size 10 exists as a near duplicate.",
+        note: "The product number is exact. Size 10 is a similar product.",
       },
       {
         position: 4,
@@ -159,7 +159,7 @@ export const SCENARIOS: Scenario[] = [
         description: "Industrial degreaser concentrate, 5 L",
         quantity: 4,
         unit: "canisters",
-        note: "Exact article number, below the quantity break.",
+        note: "The product number is exact. The quantity does not give a discount.",
       },
       {
         position: 5,
@@ -167,7 +167,7 @@ export const SCENARIOS: Scenario[] = [
         description: "Hex bolt M10 x 60 zinc, box of 100",
         quantity: 5,
         unit: "boxes",
-        note: "Exact article number; the M10 x 70 box is a near duplicate.",
+        note: "The product number is exact. The M10 x 70 box is a similar product.",
       },
       {
         position: 6,
@@ -175,7 +175,7 @@ export const SCENARIOS: Scenario[] = [
         description: "LED tube 1200 mm, 18 W, 4000 K",
         quantity: 30,
         unit: "pieces",
-        note: "Exact article number; quantity reaches the first break.",
+        note: "The product number is exact. The quantity gives a discount.",
       },
     ],
     pdfLines: [
@@ -209,9 +209,9 @@ export const SCENARIOS: Scenario[] = [
     difficulty: {
       level: "High",
       summary:
-        "A forwarded thread with two senders, a misspelled product name, a superseded item number, and a gasket description that fits two stocked thicknesses. Quantities sit in the forwarded note rather than the list.",
+        "The forwarded email has two senders, a spelling error, an old product number, and an incomplete gasket description.",
       expectedReview:
-        "Expect human review on the superseded item number and the gasket.",
+        "Review is expected for the old product number and the gasket.",
     },
     email: {
       from: {
@@ -263,7 +263,7 @@ export const SCENARIOS: Scenario[] = [
         description: "Misspelled description, no article number",
         quantity: 16,
         unit: "pieces",
-        note: "Typographical variant of a stocked panel filter.",
+        note: "The product name has a spelling error.",
       },
       {
         position: 2,
@@ -271,7 +271,7 @@ export const SCENARIOS: Scenario[] = [
         description: "Known trade shorthand",
         quantity: 12,
         unit: "cartridges",
-        note: "Matches a known alias exactly.",
+        note: "The text is a known alias.",
       },
       {
         position: 3,
@@ -279,7 +279,7 @@ export const SCENARIOS: Scenario[] = [
         description: "Profile and length only",
         quantity: 4,
         unit: "pieces",
-        note: "Alias match; the SPA 1320 belt sits next to it in the catalogue.",
+        note: "The text is a known alias. The catalogue has a similar SPA 1320 belt.",
       },
       {
         position: 4,
@@ -287,7 +287,7 @@ export const SCENARIOS: Scenario[] = [
         description: "Item number from an inherited folder",
         quantity: 2,
         unit: "kits",
-        note: "Legacy number for an archived seal kit that has a successor.",
+        note: "This is an old number. A new product replaces it.",
       },
       {
         position: 5,
@@ -295,7 +295,7 @@ export const SCENARIOS: Scenario[] = [
         description: "Description only, correct size",
         quantity: 60,
         unit: "pairs",
-        note: "Alias match; the quantity passes the second break.",
+        note: "The text is a known alias. The quantity gives a discount.",
       },
       {
         position: 6,
@@ -303,7 +303,7 @@ export const SCENARIOS: Scenario[] = [
         description: "Thickness left open",
         quantity: 20,
         unit: "pieces",
-        note: "Fits both the 2 mm and the 3 mm gasket.",
+        note: "The text can match the 2 mm or 3 mm gasket.",
       },
     ],
     pdfLines: [
@@ -337,9 +337,9 @@ export const SCENARIOS: Scenario[] = [
     difficulty: {
       level: "Medium",
       summary:
-        "A technician describes worn parts from measurements. Five of the six lines have a near-duplicate sibling that differs only in one dimension, and one label is unreadable except for its last four digits.",
+        "A technician measured worn parts. Five lines have a similar product. One label shows four digits only.",
       expectedReview:
-        "Expect human confirmation on the superseded bearing, where an archived number leads to a successor, and on the ball valve, where the imperial size and the catalogue alias disagree.",
+        "Review is expected for the old bearing and the ball valve size.",
     },
     email: {
       from: {
@@ -384,7 +384,7 @@ export const SCENARIOS: Scenario[] = [
         description: "Bearing designation from the old seal",
         quantity: 10,
         unit: "pieces",
-        note: "Legacy designation of an archived bearing with a successor.",
+        note: "This is an old bearing number. A new product replaces it.",
       },
       {
         position: 2,
@@ -392,7 +392,7 @@ export const SCENARIOS: Scenario[] = [
         description: "Thickness measured on site",
         quantity: 12,
         unit: "pieces",
-        note: "Thickness separates it from the 2 mm near duplicate.",
+        note: "The thickness separates it from the 2 mm product.",
       },
       {
         position: 3,
@@ -408,7 +408,7 @@ export const SCENARIOS: Scenario[] = [
         description: "Partly readable label",
         quantity: 8,
         unit: "pieces",
-        note: "The 1500 mm tube is the near duplicate to rule out.",
+        note: "The system must reject the similar 1500 mm tube.",
       },
       {
         position: 5,
@@ -416,7 +416,7 @@ export const SCENARIOS: Scenario[] = [
         description: "Imperial size given",
         quantity: 6,
         unit: "pieces",
-        note: "DN32, not the DN25 valve carrying the imperial alias.",
+        note: "The correct size is DN32, not DN25.",
       },
       {
         position: 6,
@@ -424,7 +424,7 @@ export const SCENARIOS: Scenario[] = [
         description: "Length written informally",
         quantity: 1,
         unit: "box",
-        note: "M10 x 70, not the M10 x 60 box.",
+        note: "The correct length is 70 mm, not 60 mm.",
       },
     ],
     pdfLines: [

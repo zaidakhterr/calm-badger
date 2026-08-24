@@ -81,7 +81,7 @@ const MAGIC_BYTES = {
 } satisfies Record<UploadMediaType, number[][]>
 
 export function describeUploadLimits(): string {
-  return `Attach PDF, JPEG, or PNG files only, up to ${MAX_UPLOAD_FILES} files, ${MAX_UPLOAD_BYTES / (1024 * 1024)} MB, and ${MAX_OCR_PAGES_PER_RUN} PDF or image pages combined.`
+  return `Attach PDF, JPEG, or PNG files only. The limits are ${MAX_UPLOAD_FILES} files, ${MAX_UPLOAD_BYTES / (1024 * 1024)} MB, and ${MAX_OCR_PAGES_PER_RUN} pages.`
 }
 
 /**

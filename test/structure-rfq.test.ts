@@ -338,7 +338,7 @@ describe("resolving the customer", () => {
     expect(evidence.resolution!.location!.id).toBe(
       goldScenario("routine-replenishment").customer.locationId
     )
-    expect(evidence.confidence!.heuristic).toContain("Customer confidence sums")
+    expect(evidence.confidence!.heuristic).toContain("customer score uses")
   })
 
   it("leaves an unknown sender unresolved and never invents a customer", async () => {
@@ -354,14 +354,14 @@ describe("resolving the customer", () => {
     ])
 
     expect(step.status).toBe("complete")
-    expect(step.summary).toContain("stays unresolved")
+    expect(step.summary).toContain("requires review")
 
     const evidence = await readCustomer(run.viewId)
 
     expect(evidence.state).toBe("unresolved")
     expect(evidence.resolution).toBeNull()
     expect(evidence.confidence!.label).toBe("Review")
-    expect(evidence.message).toContain("never creates a customer record")
+    expect(evidence.message).toContain("cannot create a customer")
     expect(await customerCount()).toBe(before)
 
     const stored = await env.DB.prepare(
@@ -440,7 +440,7 @@ describe("model output that has to be validated", () => {
 
     expect(step.status).toBe("error")
     expect(step.summary).toContain("not valid JSON")
-    expect(step.summary).toContain("One repair attempt was made")
+    expect(step.summary).toContain("tried one repair")
 
     const stopped = await readRun(run.viewId)
     expect(stopped.status).toBe("error")
@@ -490,7 +490,7 @@ describe("model output that has to be validated", () => {
     ])
 
     expect(step.status).toBe("complete")
-    expect(step.summary).toContain("needing review")
+    expect(step.summary).toContain("Review required")
 
     const line = (await readStructure(run.viewId)).validated!.lineItems[0]
 

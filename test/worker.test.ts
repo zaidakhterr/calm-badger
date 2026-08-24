@@ -70,13 +70,13 @@ describe("RFQ Relay Worker", () => {
     // states them as facts rather than as intentions.
     expect(system.retention.state).toBe("enforced")
     expect(system.rateLimit.state).toBe("enforced")
-    expect(system.rateLimit.summary).toContain("5 runs per hour")
+    expect(system.rateLimit.summary).toContain("5 runs each hour")
     // Scored evaluation is measured now, and the drawer says what was measured:
     // the three curated fixtures, through the deterministic contract fakes,
     // including the lines where the run asked for confirmation.
     expect(system.evaluation.state).toBe("measured")
-    expect(system.evaluation.summary).toContain("contract fake")
-    expect(system.evaluation.rows.join(" ")).toContain("18 requested lines")
+    expect(system.evaluation.summary).toContain("Test providers")
+    expect(system.evaluation.rows.join(" ")).toContain("18 lines in 3 runs")
     expect(system.evaluation.rows.join(" ")).toContain("eval:live")
     // The counts are served; the answers behind them are not.
     expect(JSON.stringify(system.evaluation)).not.toMatch(/NX-[A-Z]{3}-\d{4}/)

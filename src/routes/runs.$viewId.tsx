@@ -208,7 +208,7 @@ function RunPage() {
         setSnapshot(next)
         setPollingNotice(
           Date.now() - startedAt > SLOW_POLL_AFTER_MS
-            ? "This run is taking longer than usual. It is still processing, and this page will keep updating."
+            ? "This run needs more time. Processing continues. This page updates automatically."
             : null
         )
       } catch (error) {
@@ -220,7 +220,7 @@ function RunPage() {
         }
 
         setPollingNotice(
-          "Updates were interrupted. This page will keep trying while the server-owned run continues."
+          "The page cannot get an update. The run continues on the server. This page will try again."
         )
       }
 
@@ -250,7 +250,9 @@ function RunPage() {
       await navigate({ to: "/" })
     } catch (error) {
       setResetError(
-        error instanceof Error ? error.message : "The run could not be reset"
+        error instanceof Error
+          ? error.message
+          : "The system could not delete the run"
       )
       setIsResetting(false)
     }
@@ -270,7 +272,7 @@ function RunPage() {
       status: headerStatus,
       startOver: canReset
         ? {
-            label: isResetting ? "Deleting…" : "Start over",
+            label: isResetting ? "Deleting…" : "Start again",
             disabled: isResetting,
             onSelect: () => void handleStartOver(),
           }
@@ -328,8 +330,8 @@ function RunPage() {
         <LinkSimpleIcon className="mt-0.5 size-4 shrink-0" aria-hidden />
         <p>
           {viewer.isOwner
-            ? "This run is stored on the server and survives a refresh. Anyone you send this URL to can view it, but only this browser can approve or reset it."
-            : "You are viewing a shared run. Anyone holding this URL can view it; approval and reset controls stay with the browser that started the run."}
+            ? "The server stores this run. Anyone with this URL can view it. Only this browser can approve or delete it."
+            : "This is a shared run. Anyone with this URL can view it. Only the owner can approve or delete it."}
         </p>
       </div>
 
@@ -397,8 +399,8 @@ function RunPage() {
 
       {stoppedStep ? (
         <p className="mt-1 text-[13px] leading-5 text-muted-foreground">
-          The workflow stopped at this step and will not continue. This demo has
-          no retry: start over to run another request.
+          The run stopped at this step. This demo cannot retry the step. Start
+          again to process the request.
         </p>
       ) : null}
     </main>
@@ -714,8 +716,8 @@ function DocumentEvidencePanel({ evidence }: { evidence: DocumentEvidence }) {
             />
           </dl>
           <p className="mt-1.5 text-[11px] text-muted-foreground">
-            Cost is an estimate from the configured page price, not a billed
-            amount. It reads Unknown when that price is not configured.
+            This cost is an estimate. It is not a billed amount. Unknown means
+            that no page price is configured.
           </p>
         </div>
       ) : null}
@@ -787,9 +789,8 @@ function StructureEvidencePanel({ evidence }: { evidence: StructureEvidence }) {
             {flagged.length > 0 ? (
               <p className="mt-2 text-[11px] text-muted-foreground">
                 {flagged.length}{" "}
-                {flagged.length === 1 ? "line needs" : "lines need"} human
-                review. The rejected value was discarded rather than carried
-                forward.
+                {flagged.length === 1 ? "line requires" : "lines require"}
+                review. The system did not use the invalid values.
               </p>
             ) : null}
           </div>
@@ -864,9 +865,8 @@ function StructureEvidencePanel({ evidence }: { evidence: StructureEvidence }) {
           ) : null}
         </dl>
         <p className="mt-1.5 text-[11px] text-muted-foreground">
-          Cost is an estimate from the configured token prices, not a billed
-          amount. It reads Unknown when those prices are not configured, rather
-          than showing a misleading zero.
+          This cost is an estimate. It is not a billed amount. Unknown means
+          that no token price is configured.
         </p>
       </div>
     </div>
@@ -1018,8 +1018,8 @@ function CustomerEvidencePanel({ evidence }: { evidence: CustomerEvidence }) {
             />
           </dl>
           <p className="mt-1.5 text-[11px] text-muted-foreground">
-            Identity is decided by catalogue lookups, not by a language model,
-            and separately from any product decision.
+            Catalogue data identifies the customer. A language model does not
+            make this decision.
           </p>
         </div>
       ) : null}
@@ -1073,8 +1073,8 @@ function CandidateEvidencePanel({ evidence }: { evidence: CandidateEvidence }) {
             />
           </dl>
           <p className="mt-1.5 text-[11px] text-muted-foreground">
-            Retrieval is a D1 full-text search over the whole active catalogue.
-            Only the shortlist below is ever sent to a model.
+            D1 searches all active products. The model receives the shortlist
+            only.
           </p>
         </div>
       ) : null}
@@ -1219,8 +1219,8 @@ function MatchEvidencePanel({ evidence }: { evidence: MatchEvidence }) {
             />
           </dl>
           <p className="mt-1.5 text-[11px] text-muted-foreground">
-            Cost is an estimate from the configured token prices, not a billed
-            amount. It reads Unknown when those prices are not configured.
+            This cost is an estimate. It is not a billed amount. Unknown means
+            that no token price is configured.
           </p>
         </div>
       ) : null}
@@ -1328,7 +1328,7 @@ function EstimateEvidencePanel({
     return (
       <p className="rounded-md border border-workflow-review/40 bg-workflow-review-soft/60 p-3 text-sm leading-6">
         {evidence.message ??
-          "This run is not priced yet. Pricing runs once every line has an accepted product and a confirmed quantity."}
+          "This run does not have a price. Confirm a product and quantity for each line."}
       </p>
     )
   }
@@ -1516,17 +1516,16 @@ function ReviewPanel({
       <div className="rounded-md border border-workflow-review/40 bg-workflow-review-soft/60 p-3 text-sm leading-6">
         <p>
           {review.state === "pending"
-            ? `${review.resolvedCount} of ${review.itemCount} decisions confirmed. Pricing and delivery stay blocked until this node is approved.`
+            ? `${review.resolvedCount} of ${review.itemCount} items confirmed. Confirm each item. Then approve the review.`
             : review.state === "approved"
-              ? "Approved. The workflow resumed through the same deterministic pricing path."
+              ? "Approved. The run continues."
               : review.state === "rejected"
-                ? "Rejected by the owner. The run stops here; nothing was priced."
-                : "The review window closed before a decision was made, so this run was never priced."}
+                ? "Rejected. The run stops here."
+                : "The review time expired. The run stops here."}
         </p>
         {review.expiresAt && open ? (
           <p className="mt-1 text-muted-foreground">
-            Decide before {formatDeadline(review.expiresAt)}. A review never
-            outlives the run data it decides.
+            Complete the review before {formatDeadline(review.expiresAt)}.
           </p>
         ) : null}
       </div>
@@ -1553,7 +1552,7 @@ function ReviewPanel({
             disabled={!review.canApprove || isWorking}
             onClick={() => void settle("approve")}
           >
-            {isWorking ? "Working…" : "Approve matches"}
+            {isWorking ? "Working…" : "Approve and continue"}
           </Button>
           <Button
             size="lg"
@@ -1566,7 +1565,7 @@ function ReviewPanel({
           </Button>
           {!review.canApprove ? (
             <span className="text-[11px] text-muted-foreground">
-              Confirm every decision above to approve.
+              Confirm all items first.
             </span>
           ) : null}
         </div>
@@ -1642,19 +1641,6 @@ function ReviewItemRow({
         </span>
       </div>
 
-      <p className="mt-2 leading-5 text-muted-foreground">{item.detail}</p>
-
-      <ul className="mt-2 space-y-1 text-[11px] leading-5 text-muted-foreground">
-        {item.reasons.map((reason) => (
-          <li key={reason}>· {reason}</li>
-        ))}
-      </ul>
-
-      <p className="mt-2 text-[11px] leading-5 text-muted-foreground">
-        Confidence {item.confidence.label} · {item.confidence.score.toFixed(2)}{" "}
-        · {item.confidence.heuristic}
-      </p>
-
       {resolved ? (
         <p className="mt-2 leading-5">
           Confirmed:{" "}
@@ -1665,7 +1651,7 @@ function ReviewItemRow({
           </span>
         </p>
       ) : (
-        <p className="mt-2 leading-5">
+        <p className="mt-2 rounded-md bg-muted/40 px-2.5 py-2 leading-5">
           {/* A description of what would be used, not an instruction: the
               label is the catalogue product behind the SKU beside it. */}
           Proposed:{" "}
@@ -1691,7 +1677,7 @@ function ReviewItemRow({
                 void onDecide({ itemId: item.id, action: "accept" })
               }
             >
-              Accept proposal
+              Use proposed product
             </Button>
           ) : null}
 
@@ -1703,51 +1689,53 @@ function ReviewItemRow({
                 void onDecide({ itemId: item.id, action: "accept" })
               }
             >
-              Confirm this reading
+              Confirm proposed value
             </Button>
           ) : null}
 
           {item.alternatives.length > 0 ? (
-            <ul className="space-y-1.5">
-              {item.alternatives.map((alternative) => (
-                <li
-                  key={alternative.value}
-                  className="flex flex-wrap items-center justify-between gap-2 rounded-md border px-2.5 py-1.5"
-                >
-                  <span className="min-w-0">
-                    <span className="font-mono text-[11px]">
-                      {alternative.value}
-                    </span>{" "}
-                    {alternative.label}
-                    <span className="mt-0.5 block text-[11px] text-muted-foreground">
-                      {alternative.detail}
-                    </span>
-                  </span>
-                  <Button
-                    size="lg"
-                    variant="outline"
-                    type="button"
-                    onClick={() =>
-                      void onDecide(
-                        item.kind === "customer"
-                          ? {
-                              itemId: item.id,
-                              action: "alternative",
-                              customerId: alternative.value,
-                            }
-                          : {
-                              itemId: item.id,
-                              action: "alternative",
-                              sku: alternative.value,
-                            }
-                      )
-                    }
+            <details className="rounded-md border bg-muted/20">
+              <summary className="cursor-pointer px-2.5 py-2 font-medium">
+                Choose another option
+              </summary>
+              <ul className="space-y-1.5 border-t p-2">
+                {item.alternatives.map((alternative) => (
+                  <li
+                    key={alternative.value}
+                    className="flex flex-wrap items-center justify-between gap-2 rounded-md border bg-background px-2.5 py-1.5"
                   >
-                    Choose
-                  </Button>
-                </li>
-              ))}
-            </ul>
+                    <span className="min-w-0">
+                      <span className="font-mono text-[11px]">
+                        {alternative.value}
+                      </span>{" "}
+                      {alternative.label}
+                    </span>
+                    <Button
+                      size="lg"
+                      variant="outline"
+                      type="button"
+                      onClick={() =>
+                        void onDecide(
+                          item.kind === "customer"
+                            ? {
+                                itemId: item.id,
+                                action: "alternative",
+                                customerId: alternative.value,
+                              }
+                            : {
+                                itemId: item.id,
+                                action: "alternative",
+                                sku: alternative.value,
+                              }
+                        )
+                      }
+                    >
+                      Choose
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            </details>
           ) : null}
 
           {item.kind === "quantity" ? (
@@ -1776,111 +1764,135 @@ function ReviewItemRow({
           ) : null}
 
           {item.kind === "product" || item.kind === "customer" ? (
-            <div className="space-y-2">
-              <div className="flex flex-wrap items-center gap-2">
-                <input
-                  value={query}
-                  onChange={(event) => setQuery(event.target.value)}
-                  placeholder={
-                    item.kind === "customer"
-                      ? "Search existing customers"
-                      : "Search the complete catalogue"
-                  }
-                  className="h-8 min-w-52 flex-1 rounded-md border bg-background px-2.5 text-[13px] outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
-                />
-                <Button
-                  size="lg"
-                  variant="outline"
-                  type="button"
-                  onClick={() => void search()}
-                >
-                  Search
-                </Button>
-              </div>
+            <details className="rounded-md border bg-muted/20">
+              <summary className="cursor-pointer px-2.5 py-2 font-medium">
+                Search {item.kind === "customer" ? "customers" : "catalogue"}
+              </summary>
+              <div className="space-y-2 border-t p-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <input
+                    value={query}
+                    onChange={(event) => setQuery(event.target.value)}
+                    placeholder={
+                      item.kind === "customer"
+                        ? "Customer name or city"
+                        : "SKU or product name"
+                    }
+                    className="h-8 min-w-52 flex-1 rounded-md border bg-background px-2.5 text-[13px] outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
+                  />
+                  <Button
+                    size="lg"
+                    variant="outline"
+                    type="button"
+                    onClick={() => void search()}
+                  >
+                    Search
+                  </Button>
+                </div>
 
-              {searchError ? (
-                <p className="text-[13px] text-destructive">{searchError}</p>
-              ) : null}
+                {searchError ? (
+                  <p className="text-[13px] text-destructive">{searchError}</p>
+                ) : null}
 
-              {products && item.kind === "product" ? (
-                <ul className="max-h-56 space-y-1.5 overflow-auto">
-                  {products.map((product) => (
-                    <li
-                      key={product.sku}
-                      className="flex flex-wrap items-center justify-between gap-2 rounded-md border px-2.5 py-1.5"
-                    >
-                      <span className="min-w-0">
-                        <span className="font-mono text-[11px]">
-                          {product.sku}
-                        </span>{" "}
-                        {product.name}
-                      </span>
-                      <Button
-                        size="lg"
-                        variant="outline"
-                        type="button"
-                        onClick={() =>
-                          void onDecide({
-                            itemId: item.id,
-                            action: "catalog",
-                            sku: product.sku,
-                          })
-                        }
+                {products && item.kind === "product" ? (
+                  <ul className="max-h-56 space-y-1.5 overflow-auto">
+                    {products.map((product) => (
+                      <li
+                        key={product.sku}
+                        className="flex flex-wrap items-center justify-between gap-2 rounded-md border px-2.5 py-1.5"
                       >
-                        Use
-                      </Button>
-                    </li>
-                  ))}
-                  {products.length === 0 ? (
-                    <li className="text-[11px] text-muted-foreground">
-                      No active catalogue product matched that search.
-                    </li>
-                  ) : null}
-                </ul>
-              ) : null}
-
-              {customers && item.kind === "customer" ? (
-                <ul className="max-h-56 space-y-1.5 overflow-auto">
-                  {customers.map((customer) => (
-                    <li
-                      key={customer.customerId}
-                      className="flex flex-wrap items-center justify-between gap-2 rounded-md border px-2.5 py-1.5"
-                    >
-                      <span className="min-w-0">
-                        {customer.name}
-                        <span className="mt-0.5 block text-[11px] text-muted-foreground">
-                          {customer.customerId} · {customer.tier}
-                          {customer.city ? ` · ${customer.city}` : ""}
+                        <span className="min-w-0">
+                          <span className="font-mono text-[11px]">
+                            {product.sku}
+                          </span>{" "}
+                          {product.name}
                         </span>
-                      </span>
-                      <Button
-                        size="lg"
-                        variant="outline"
-                        type="button"
-                        onClick={() =>
-                          void onDecide({
-                            itemId: item.id,
-                            action: "customer",
-                            customerId: customer.customerId,
-                          })
-                        }
-                      >
-                        Select
-                      </Button>
-                    </li>
-                  ))}
-                </ul>
-              ) : null}
+                        <Button
+                          size="lg"
+                          variant="outline"
+                          type="button"
+                          onClick={() =>
+                            void onDecide({
+                              itemId: item.id,
+                              action: "catalog",
+                              sku: product.sku,
+                            })
+                          }
+                        >
+                          Use
+                        </Button>
+                      </li>
+                    ))}
+                    {products.length === 0 ? (
+                      <li className="text-[11px] text-muted-foreground">
+                        No active catalogue product matched that search.
+                      </li>
+                    ) : null}
+                  </ul>
+                ) : null}
 
-              <p className="text-[11px] leading-5 text-muted-foreground">
-                {item.kind === "customer"
-                  ? "Only existing customers can be selected; this demo never creates one from a request."
-                  : "Only active catalogue products can be chosen; nothing here creates a product."}
-              </p>
-            </div>
+                {customers && item.kind === "customer" ? (
+                  <ul className="max-h-56 space-y-1.5 overflow-auto">
+                    {customers.map((customer) => (
+                      <li
+                        key={customer.customerId}
+                        className="flex flex-wrap items-center justify-between gap-2 rounded-md border px-2.5 py-1.5"
+                      >
+                        <span className="min-w-0">
+                          {customer.name}
+                          <span className="mt-0.5 block text-[11px] text-muted-foreground">
+                            {customer.customerId} · {customer.tier}
+                            {customer.city ? ` · ${customer.city}` : ""}
+                          </span>
+                        </span>
+                        <Button
+                          size="lg"
+                          variant="outline"
+                          type="button"
+                          onClick={() =>
+                            void onDecide({
+                              itemId: item.id,
+                              action: "customer",
+                              customerId: customer.customerId,
+                            })
+                          }
+                        >
+                          Select
+                        </Button>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+
+                <p className="text-[11px] leading-5 text-muted-foreground">
+                  {item.kind === "customer"
+                    ? "You can select an existing customer only."
+                    : "You can select an active product only."}
+                </p>
+              </div>
+            </details>
           ) : null}
         </div>
       ) : null}
+
+      <details className="mt-2 rounded-md border bg-muted/20">
+        <summary className="cursor-pointer px-2.5 py-2 text-[11px] font-medium text-muted-foreground">
+          Why this needs review
+        </summary>
+        <div className="space-y-2 border-t px-2.5 py-2 text-[11px] leading-5 text-muted-foreground">
+          <p>{item.detail}</p>
+          <ul className="space-y-1">
+            {item.reasons.map((reason) => (
+              <li key={reason}>· {reason}</li>
+            ))}
+          </ul>
+          <p>
+            Confidence: {item.confidence.label} (
+            {item.confidence.score.toFixed(2)}).
+          </p>
+          <p>{item.confidence.heuristic}</p>
+        </div>
+      </details>
     </li>
   )
 }
@@ -2318,9 +2330,8 @@ function RunUnavailable() {
           This run is not available
         </h1>
         <p className="mt-2 text-sm leading-6 text-muted-foreground">
-          The link may be incorrect, the run may have been reset, or its
-          short-lived demo data may already be gone. Nothing is broken; there is
-          simply nothing left to show.
+          The link can be incorrect. The owner can also have deleted the run.
+          Demo data can also have expired.
         </p>
         <Link
           to="/"
