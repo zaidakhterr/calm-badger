@@ -990,7 +990,7 @@ describe("repeated, premature, and rejected decisions", () => {
     )
   })
 
-  it("approves once, however many times it is asked", async () => {
+  it("settles once, however many times it is asked", async () => {
     const { run, ownerCapability, review } = await pausedRun()
 
     await decide(run.viewId, ownerCapability, straightforwardDecisions(review))
@@ -1004,6 +1004,11 @@ describe("repeated, premature, and rejected decisions", () => {
     const statuses = responses.map((response) => response.status).sort()
     expect(statuses).toEqual([200, 409, 409])
 
+    const winner = responses.find((response) => response.status === 200)!
+    const outcome = await winner.json<{ status: "approved" | "rejected" }>()
+    const expectedWorkflowState =
+      outcome.status === "approved" ? "delivered" : "review_rejected"
+
     const settled = await waitFor(
       () => readRun(run.viewId),
       (value) =>
@@ -1013,22 +1018,28 @@ describe("repeated, premature, and rejected decisions", () => {
       "a settled run"
     )
 
-    expect(settled.workflowState).toBe("delivered")
-    expect((await readReview(run.viewId)).state).toBe("approved")
+    expect(settled.workflowState).toBe(expectedWorkflowState)
+    expect((await readReview(run.viewId)).state).toBe(outcome.status)
 
-    // One decision, one progression: the run is priced exactly once.
+    // One decision, one progression: only an approved run is priced.
     const quotes = await env.DB.prepare(
       `SELECT COUNT(*) AS total FROM run_quotes WHERE run_id = ?`
     )
       .bind(await runIdOf(run.viewId))
       .first<{ total: number }>()
 
-    expect(quotes!.total).toBe(1)
+    expect(quotes!.total).toBe(outcome.status === "approved" ? 1 : 0)
 
     // And a later decision changes nothing.
-    const late = await settle(run.viewId, ownerCapability, "reject")
+    const late = await settle(
+      run.viewId,
+      ownerCapability,
+      outcome.status === "approved" ? "reject" : "approve"
+    )
     expect(late.status).toBe(409)
-    expect((await readRun(run.viewId)).workflowState).toBe("delivered")
+    expect((await readRun(run.viewId)).workflowState).toBe(
+      expectedWorkflowState
+    )
   })
 
   it("stops the run where it stands when the owner rejects it", async () => {
