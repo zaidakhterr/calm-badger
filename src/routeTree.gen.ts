@@ -10,12 +10,18 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as ProductionRouteImport } from './routes/production'
 import { Route as CatalogueSectionRouteImport } from './routes/catalogue.$section'
 import { Route as RunsViewIdRouteImport } from './routes/runs.$viewId'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ProductionRoute = ProductionRouteImport.update({
+  id: '/production',
+  path: '/production',
   getParentRoute: () => rootRouteImport,
 } as any)
 const CatalogueSectionRoute = CatalogueSectionRouteImport.update({
@@ -31,30 +37,34 @@ const RunsViewIdRoute = RunsViewIdRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/production': typeof ProductionRoute
   '/catalogue/$section': typeof CatalogueSectionRoute
   '/runs/$viewId': typeof RunsViewIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/production': typeof ProductionRoute
   '/catalogue/$section': typeof CatalogueSectionRoute
   '/runs/$viewId': typeof RunsViewIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/production': typeof ProductionRoute
   '/catalogue/$section': typeof CatalogueSectionRoute
   '/runs/$viewId': typeof RunsViewIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/catalogue/$section' | '/runs/$viewId'
+  fullPaths: '/' | '/production' | '/catalogue/$section' | '/runs/$viewId'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/catalogue/$section' | '/runs/$viewId'
-  id: '__root__' | '/' | '/catalogue/$section' | '/runs/$viewId'
+  to: '/' | '/production' | '/catalogue/$section' | '/runs/$viewId'
+  id: '__root__' | '/' | '/production' | '/catalogue/$section' | '/runs/$viewId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  ProductionRoute: typeof ProductionRoute
   CatalogueSectionRoute: typeof CatalogueSectionRoute
   RunsViewIdRoute: typeof RunsViewIdRoute
 }
@@ -66,6 +76,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/production': {
+      id: '/production'
+      path: '/production'
+      fullPath: '/production'
+      preLoaderRoute: typeof ProductionRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/catalogue/$section': {
@@ -87,6 +104,7 @@ declare module '@tanstack/react-router' {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  ProductionRoute: ProductionRoute,
   CatalogueSectionRoute: CatalogueSectionRoute,
   RunsViewIdRoute: RunsViewIdRoute,
 }
