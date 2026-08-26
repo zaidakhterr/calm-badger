@@ -3,11 +3,10 @@
  *
  * Every holder of a run URL, owner or not, sees the same allowlisted evidence:
  * the sources a run was given, the text read from each page with its
- * provenance, the validated RFQ and the model text behind it, the customer the
- * run resolved to and why, and sanitized provider metadata. Nothing here can
- * expose an owner capability, an API key, a request header, a prompt, or a raw
- * provider error, because only these fields are selected and the stored payload
- * never contained them.
+ * provenance, the validated RFQ, the exact model messages and response behind
+ * it, the customer the run resolved to and why, and sanitized provider
+ * metadata. Nothing here can expose an owner capability, an API key, a request
+ * header, or a raw provider error because only these fields are selected.
  *
  * Each projection lists the business result before the original model output,
  * which is the order the interface reads them in.
@@ -313,6 +312,8 @@ export type StructureEvidenceProjection = {
   confidence: ConfidenceProjection
   repaired: boolean
   issues: string[]
+  /** Exact system and user messages supplied to the model. */
+  modelInput: { system: string; user: string } | null
   /** Model text as returned, truncated. It never contained a prompt or a key. */
   originalOutput: string | null
   provider: string | null
@@ -352,6 +353,7 @@ export async function loadStructureEvidence(
     confidence: structure?.confidence ?? null,
     repaired: structure?.repaired ?? false,
     issues: structure?.issues ?? [],
+    modelInput: structure?.modelInput ?? null,
     originalOutput: structure?.originalOutput ?? null,
     provider: structure?.provider ?? null,
     model: structure?.model ?? null,
@@ -548,6 +550,8 @@ export type MatchLineProjection = {
   shortlistSize: number
   repaired: boolean
   issues: string[]
+  /** Exact system and user messages supplied to the model, if one was used. */
+  modelInput: { system: string; user: string } | null
   /** Model text as returned, truncated. It never contained a prompt or a key. */
   originalOutput: string | null
   latencyMs: number | null

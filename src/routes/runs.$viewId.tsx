@@ -47,6 +47,7 @@ import {
   type EvidenceSource,
   type MatchEvidence,
   type MatchLine,
+  type ModelInput,
   type QuoteLine,
   type ReceivedEvidence,
   type ReceivedSource,
@@ -810,6 +811,10 @@ function StructureEvidencePanel({ evidence }: { evidence: StructureEvidence }) {
 
       <ConfidenceBlock confidence={evidence.confidence} />
 
+      {evidence.modelInput ? (
+        <ModelInputDetails input={evidence.modelInput} />
+      ) : null}
+
       {evidence.originalOutput ? (
         <details className="rounded-md border bg-background">
           <summary className="cursor-pointer px-3 py-2 text-[13px]">
@@ -1299,13 +1304,18 @@ function MatchLineRow({ line }: { line: MatchLine }) {
       ) : null}
 
       {line.originalOutput ? (
-        <details className="mt-1.5 rounded-md border bg-background">
-          <summary className="cursor-pointer px-3 py-2 text-[13px]">
-            Original model output
-            {line.repaired ? " (repaired before validation)" : ""}
-          </summary>
-          <CopyableCode value={line.originalOutput} />
-        </details>
+        <>
+          {line.modelInput ? (
+            <ModelInputDetails input={line.modelInput} className="mt-1.5" />
+          ) : null}
+          <details className="mt-1.5 rounded-md border bg-background">
+            <summary className="cursor-pointer px-3 py-2 text-[13px]">
+              Original model output
+              {line.repaired ? " (repaired before validation)" : ""}
+            </summary>
+            <CopyableCode value={line.originalOutput} />
+          </details>
+        </>
       ) : null}
     </li>
   )
@@ -1995,6 +2005,31 @@ function DeliveredPanel({
         </>
       ) : null}
     </div>
+  )
+}
+
+function ModelInputDetails({
+  input,
+  className,
+}: {
+  input: ModelInput
+  className?: string
+}) {
+  const value = [
+    "SYSTEM MESSAGE",
+    input.system,
+    "",
+    "USER MESSAGE",
+    input.user,
+  ].join("\n")
+
+  return (
+    <details className={cn("rounded-md border bg-background", className)}>
+      <summary className="cursor-pointer px-3 py-2 text-[13px]">
+        Model input
+      </summary>
+      <CopyableCode value={value} />
+    </details>
   )
 }
 

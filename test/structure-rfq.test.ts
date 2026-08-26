@@ -4,8 +4,8 @@
  * These tests drive the public workflow boundary — create a run, wait for the
  * persisted steps, read the evidence projections — with the deterministic
  * contract-fake OCR and extraction providers selected in `vitest.config.ts`. No
- * test reaches a live provider, and none of them assert prompt wording or
- * internal calls. The fake extractor derives its answer from the document text
+ * test reaches a live provider. Evidence assertions cover the exact model
+ * messages. The fake extractor derives its answer from the document text
  * alone, so the repair, schema, and business-validation paths below are the
  * real ones.
  */
@@ -79,6 +79,7 @@ type StructureEvidence = {
   confidence: { label: string; score: number; heuristic: string } | null
   repaired: boolean
   issues: string[]
+  modelInput: { system: string; user: string } | null
   originalOutput: string | null
   provider: string | null
   model: string | null
@@ -832,12 +833,13 @@ describe("selecting the extraction provider", () => {
 })
 
 describe("what leaves the system", () => {
-  it("keeps secrets, prompts, and expected-outcome copy out of the evidence", async () => {
+  it("shows the model input without exposing secrets or expected-outcome copy", async () => {
     const { run } = await createCuratedRun("messy-forwarded-request")
     await waitForStep(run.viewId, "resolve-customer", ["complete", "error"])
 
+    const structure = await readStructure(run.viewId)
     const serialized = JSON.stringify([
-      await readStructure(run.viewId),
+      structure,
       await readCustomer(run.viewId),
     ])
 
@@ -849,11 +851,12 @@ describe("what leaves the system", () => {
       "apiKey",
       "capability",
       "storageKey",
-      // The instruction is a system prompt and is never shown.
-      "You extract request-for-quotation facts",
     ]) {
       expect(serialized).not.toContain(forbidden)
     }
+
+    expect(structure.modelInput?.system).toBe(RFQ_EXTRACTION_INSTRUCTION)
+    expect(structure.modelInput?.user.length).toBeGreaterThan(0)
 
     // The landing page's line notes describe the expected answer.
     for (const leaked of [

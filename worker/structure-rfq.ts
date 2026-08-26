@@ -24,6 +24,7 @@ import { readConfig } from "./env"
 import {
   estimateExtractionCostUsd,
   ExtractionProviderError,
+  renderExtractionModelInput,
   selectExtractionProvider,
   type ExtractionDocument,
   type ExtractionResult,
@@ -129,6 +130,11 @@ export const STRUCTURE_EVIDENCE_SCHEMA = z.object({
   repaired: z.boolean(),
   confidence: CONFIDENCE_SCHEMA.nullable().catch(null),
   validated: VALIDATED_RFQ_SCHEMA.nullable(),
+  /** Exact system and user messages supplied to the model. */
+  modelInput: z
+    .object({ system: z.string(), user: z.string() })
+    .nullable()
+    .catch(null),
   /** Model text as returned, truncated. It never held a prompt or a key. */
   originalOutput: z.string().nullable(),
   issues: z.array(z.string()),
@@ -204,17 +210,19 @@ async function structure(
   await recorder.begin("Extracting the customer, deadline, and lines…")
 
   const provider = selectExtractionProvider(readConfig(env))
+  const extractionRequest = {
+    runId,
+    instruction: RFQ_EXTRACTION_INSTRUCTION,
+    documents,
+    schema: rfqExtractionSchema,
+    schemaName: RFQ_SCHEMA_NAME,
+    schemaDescription: RFQ_SCHEMA_DESCRIPTION,
+  }
+  const modelInput = renderExtractionModelInput(extractionRequest)
   let result: ExtractionResult
 
   try {
-    result = await provider.extract({
-      runId,
-      instruction: RFQ_EXTRACTION_INSTRUCTION,
-      documents,
-      schema: rfqExtractionSchema,
-      schemaName: RFQ_SCHEMA_NAME,
-      schemaDescription: RFQ_SCHEMA_DESCRIPTION,
-    })
+    result = await provider.extract(extractionRequest)
   } catch (error) {
     const message =
       error instanceof ExtractionProviderError
@@ -240,6 +248,7 @@ async function structure(
       repaired: false,
       confidence: null,
       validated: null,
+      modelInput,
       originalOutput: null,
       issues: [],
       usage: null,
@@ -257,6 +266,7 @@ async function structure(
     provider: provider.name,
     model: result.model,
     usage: result.usage,
+    modelInput,
     originalOutput: result.text.slice(0, MAX_STORED_OUTPUT_CHARS),
     estimatedCostUsd: estimateExtractionCostUsd(readConfig(env), result.usage),
     reportedCostUsd: result.reportedCostUsd,
@@ -302,6 +312,7 @@ async function structure(
     repaired: parsed.repaired,
     confidence,
     validated,
+    modelInput: shared.modelInput,
     originalOutput: shared.originalOutput,
     issues: [],
     usage: result.usage,
@@ -362,6 +373,7 @@ async function stopWithValidationFailure(
     issues: string[]
     repaired: boolean
     usage: ExtractionResult["usage"]
+    modelInput: StructureEvidence["modelInput"]
     originalOutput: string
     estimatedCostUsd: number | null
     reportedCostUsd: number | null
@@ -388,6 +400,7 @@ async function stopWithValidationFailure(
     repaired: detail.repaired,
     confidence: null,
     validated: null,
+    modelInput: detail.modelInput,
     originalOutput: detail.originalOutput,
     issues: detail.issues,
     usage: detail.usage,

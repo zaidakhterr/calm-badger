@@ -234,6 +234,13 @@ const USAGE_SCHEMA = z.object({
   totalTokens: z.number(),
 })
 
+const MODEL_INPUT_SCHEMA = z.object({
+  system: z.string(),
+  user: z.string(),
+})
+
+export type ModelInput = z.infer<typeof MODEL_INPUT_SCHEMA>
+
 const STRUCTURE_EVIDENCE_SCHEMA = z.object({
   stepKey: z.string(),
   state: EVIDENCE_STATE_SCHEMA,
@@ -263,6 +270,7 @@ const STRUCTURE_EVIDENCE_SCHEMA = z.object({
   confidence: CONFIDENCE_SCHEMA.catch(null),
   repaired: z.boolean(),
   issues: z.array(z.string()),
+  modelInput: MODEL_INPUT_SCHEMA.nullable().catch(null),
   originalOutput: z.string().nullable().catch(null),
   provider: z.string().nullable().catch(null),
   model: z.string().nullable().catch(null),
@@ -418,6 +426,7 @@ const MATCH_LINE_SCHEMA = z.object({
   shortlistSize: z.number(),
   repaired: z.boolean(),
   issues: z.array(z.string()),
+  modelInput: MODEL_INPUT_SCHEMA.nullable().catch(null),
   originalOutput: z.string().nullable().catch(null),
   latencyMs: z.number().nullable().catch(null),
   usage: USAGE_SCHEMA.nullable().catch(null),

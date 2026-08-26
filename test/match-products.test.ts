@@ -129,6 +129,7 @@ type MatchEvidence = {
     shortlistSize: number
     repaired: boolean
     issues: string[]
+    modelInput: { system: string; user: string } | null
     originalOutput: string | null
     latencyMs: number | null
     usage: { totalTokens: number } | null
@@ -1004,13 +1005,14 @@ describe("integrity in isolation", () => {
 })
 
 describe("what leaves the system", () => {
-  it("keeps secrets, prompts, and expected-outcome copy out of the evidence", async () => {
+  it("shows each reranker input without exposing secrets or expected-outcome copy", async () => {
     const { run } = await createCuratedRun("messy-forwarded-request")
     await waitForStep(run.viewId, "match-products", ["complete", "error"])
 
+    const matches = await readMatches(run.viewId)
     const serialized = JSON.stringify([
       await readCandidates(run.viewId),
-      await readMatches(run.viewId),
+      matches,
     ])
 
     for (const forbidden of [
@@ -1021,10 +1023,13 @@ describe("what leaves the system", () => {
       "apiKey",
       "capability",
       "storageKey",
-      "You rank supplier catalogue products",
     ]) {
       expect(serialized).not.toContain(forbidden)
     }
+
+    const reranked = matches.lines.find((line) => line.modelInput !== null)
+    expect(reranked?.modelInput?.system).toBe(RERANK_INSTRUCTION)
+    expect(reranked?.modelInput?.user).toContain("Candidate products:")
 
     for (const scenario of SCENARIOS) {
       for (const item of scenario.requestedItems) {

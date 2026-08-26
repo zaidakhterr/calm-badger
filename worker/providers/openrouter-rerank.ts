@@ -29,8 +29,9 @@
  *
  * The model comes from `OPENROUTER_RERANK_MODEL`, which is configured
  * independently of the extraction model. The API key comes from the
- * `OPENROUTER_API_KEY` secret binding; it is never logged, never persisted, and
- * never included in stored evidence. Prompts are likewise never persisted.
+ * `OPENROUTER_API_KEY` secret binding; it is never logged, persisted, or
+ * included in stored evidence. The shared renderer lets the workflow store the
+ * exact system and user messages without touching provider request headers.
  */
 
 import { createOpenRouter } from "@openrouter/ai-sdk-provider"
@@ -45,6 +46,7 @@ import {
 } from "./openrouter-response"
 import {
   RerankProviderError,
+  renderRerankModelInput,
   type RerankProvider,
   type RerankRequest,
   type RerankResult,
@@ -81,14 +83,15 @@ export function createOpenRouterRerankProvider(
       const languageModel = openrouter.chat(model, {
         usage: { include: true },
       })
+      const modelInput = renderRerankModelInput(request)
 
       const startedAt = Date.now()
 
       try {
         const generated = await generateText({
           model: languageModel,
-          system: request.instruction,
-          prompt: renderRequest(request),
+          system: modelInput.system,
+          prompt: modelInput.user,
           output: Output.object({
             schema: request.schema,
             name: request.schemaName,
@@ -162,39 +165,6 @@ export function createOpenRouterRerankProvider(
       }
     },
   }
-}
-
-/**
- * The user prompt: the requested line as the request wrote it, and the
- * shortlist retrieval already bounded. Nothing else is sent — no other
- * catalogue rows, no customer record, and no expected outcome.
- */
-function renderRequest(request: RerankRequest): string {
-  const candidates = request.candidates.map((candidate, index) =>
-    [
-      `${index + 1}. sku: ${candidate.sku}`,
-      `   name: ${candidate.name}`,
-      `   description: ${candidate.description}`,
-      `   category: ${candidate.category}; manufacturer: ${candidate.manufacturer}; unit: ${candidate.unit}`,
-      candidate.knownAs.length > 0
-        ? `   also known as: ${candidate.knownAs.join("; ")}`
-        : null,
-    ]
-      .filter((part) => part !== null)
-      .join("\n")
-  )
-
-  return [
-    `Requested line: ${request.reference}`,
-    request.description && request.description !== request.reference
-      ? `Requested description: ${request.description}`
-      : null,
-    "",
-    "Candidate products:",
-    ...candidates,
-  ]
-    .filter((part) => part !== null)
-    .join("\n")
 }
 
 /**

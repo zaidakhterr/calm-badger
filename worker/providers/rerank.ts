@@ -46,7 +46,7 @@ export type RerankCandidate = {
 export type RerankRequest = {
   /** Used only for structured logging. */
   runId: string
-  /** The task instruction. Built from static copy and never persisted. */
+  /** The task instruction. Built from static copy and stored as model input. */
   instruction: string
   /** The requested line, in the request's own words. */
   reference: string
@@ -56,6 +56,49 @@ export type RerankRequest = {
   schema: z.ZodType
   schemaName: string
   schemaDescription: string
+}
+
+/** The two text messages supplied to the reranking model. */
+export type RerankModelInput = {
+  system: string
+  user: string
+}
+
+/**
+ * Renders the exact text messages the live provider sends. The workflow stores
+ * this value with the response instead of trying to reconstruct it later.
+ */
+export function renderRerankModelInput(
+  request: RerankRequest
+): RerankModelInput {
+  const candidates = request.candidates.map((candidate, index) =>
+    [
+      `${index + 1}. sku: ${candidate.sku}`,
+      `   name: ${candidate.name}`,
+      `   description: ${candidate.description}`,
+      `   category: ${candidate.category}; manufacturer: ${candidate.manufacturer}; unit: ${candidate.unit}`,
+      candidate.knownAs.length > 0
+        ? `   also known as: ${candidate.knownAs.join("; ")}`
+        : null,
+    ]
+      .filter((part) => part !== null)
+      .join("\n")
+  )
+
+  return {
+    system: request.instruction,
+    user: [
+      `Requested line: ${request.reference}`,
+      request.description && request.description !== request.reference
+        ? `Requested description: ${request.description}`
+        : null,
+      "",
+      "Candidate products:",
+      ...candidates,
+    ]
+      .filter((part) => part !== null)
+      .join("\n"),
+  }
 }
 
 export type RerankUsage = {

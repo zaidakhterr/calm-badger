@@ -28,8 +28,9 @@
  * latency; this demo has no retry story, so a failure is reported once.
  *
  * The API key comes from the `OPENROUTER_API_KEY` secret binding. It is never
- * logged, never persisted, and never included in stored evidence. Prompts are
- * likewise never persisted or returned.
+ * logged, persisted, or included in stored evidence. The shared renderer lets
+ * the workflow store the exact system and user messages without touching the
+ * provider request headers.
  */
 
 import { createOpenRouter } from "@openrouter/ai-sdk-provider"
@@ -39,7 +40,7 @@ import type { AppConfig } from "../env"
 
 import {
   ExtractionProviderError,
-  type ExtractionDocument,
+  renderExtractionModelInput,
   type ExtractionProvider,
   type ExtractionRequest,
   type ExtractionResult,
@@ -81,14 +82,15 @@ export function createOpenRouterExtractionProvider(
       const languageModel = openrouter.chat(model, {
         usage: { include: true },
       })
+      const modelInput = renderExtractionModelInput(request)
 
       const startedAt = Date.now()
 
       try {
         const generated = await generateText({
           model: languageModel,
-          system: request.instruction,
-          prompt: renderDocuments(request.documents),
+          system: modelInput.system,
+          prompt: modelInput.user,
           output: Output.object({
             schema: request.schema,
             name: request.schemaName,
@@ -166,22 +168,6 @@ export function createOpenRouterExtractionProvider(
       }
     },
   }
-}
-
-/**
- * The user prompt: the text already read from the request's own documents,
- * with its provenance. Nothing else is sent — no catalogue, no expected
- * outcome, and no interface copy.
- */
-function renderDocuments(documents: ExtractionDocument[]): string {
-  const rendered = documents.map((document) => {
-    return [
-      `--- source: ${document.label} (${document.kind}), page ${document.pageNumber} ---`,
-      document.markdown,
-    ].join("\n")
-  })
-
-  return rendered.join("\n\n")
 }
 
 /**

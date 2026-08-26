@@ -45,6 +45,7 @@ import {
 } from "./product-matching"
 import {
   estimateRerankCostUsd,
+  renderRerankModelInput,
   RerankProviderError,
   selectRerankProvider,
   type RerankProvider,
@@ -130,6 +131,11 @@ const MATCH_LINE_SCHEMA = z.object({
   winnerGap: z.number(),
   repaired: z.boolean(),
   issues: z.array(z.string()),
+  /** Exact system and user messages supplied to the model. */
+  modelInput: z
+    .object({ system: z.string(), user: z.string() })
+    .nullable()
+    .catch(null),
   /** Model text as returned, truncated. It never held a prompt or a key. */
   originalOutput: z.string().nullable(),
   latencyMs: z.number().nullable().catch(null),
@@ -234,6 +240,7 @@ type LineEvidenceFacts = Pick<
   | "rejected"
   | "repaired"
   | "issues"
+  | "modelInput"
   | "originalOutput"
   | "latencyMs"
   | "usage"
@@ -421,6 +428,7 @@ async function matchLine(
     rejected: [],
     repaired: false,
     issues: [],
+    modelInput: null,
     originalOutput: null,
     latencyMs: null,
     usage: null,
@@ -512,7 +520,7 @@ async function matchLine(
     ]
   })
 
-  const result = await provider.rerank({
+  const rerankRequest = {
     runId,
     instruction: RERANK_INSTRUCTION,
     reference: line.reference,
@@ -521,12 +529,15 @@ async function matchLine(
     schema: rerankSchema,
     schemaName: RERANK_SCHEMA_NAME,
     schemaDescription: RERANK_SCHEMA_DESCRIPTION,
-  })
+  }
+  const modelInput = renderRerankModelInput(rerankRequest)
+  const result = await provider.rerank(rerankRequest)
 
   const shared = {
     ...base,
     method: "rerank",
     shortlistSize: candidates.length,
+    modelInput,
     originalOutput: result.text.slice(0, MAX_STORED_OUTPUT_CHARS),
     latencyMs: result.latencyMs,
     usage: result.usage,

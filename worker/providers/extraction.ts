@@ -35,13 +35,40 @@ export type ExtractionDocument = {
 export type ExtractionRequest = {
   /** Used only for structured logging. */
   runId: string
-  /** The task instruction. Built from static copy and never persisted. */
+  /** The task instruction. Built from static copy and stored as model input. */
   instruction: string
   documents: ExtractionDocument[]
   /** Constrains the response where the provider supports structured output. */
   schema: z.ZodType
   schemaName: string
   schemaDescription: string
+}
+
+/** The two text messages supplied to the extraction model. */
+export type ExtractionModelInput = {
+  system: string
+  user: string
+}
+
+/**
+ * Renders the exact text messages the live provider sends. Keeping this beside
+ * the provider contract lets the workflow persist the same input the client
+ * uses without rebuilding it from evidence later.
+ */
+export function renderExtractionModelInput(
+  request: ExtractionRequest
+): ExtractionModelInput {
+  const rendered = request.documents.map((document) => {
+    return [
+      `--- source: ${document.label} (${document.kind}), page ${document.pageNumber} ---`,
+      document.markdown,
+    ].join("\n")
+  })
+
+  return {
+    system: request.instruction,
+    user: rendered.join("\n\n"),
+  }
 }
 
 export type ExtractionUsage = {
