@@ -75,15 +75,32 @@ type RunTraceRow = {
   scenario_id: string | null
 }
 
+/**
+ * Loads what the trace carries. A read that fails yields no context, so the
+ * run proceeds untraced rather than stopping before its first durable step.
+ */
 export async function loadRunTraceContext(
   env: Env,
   runId: string
 ): Promise<RunTraceContext | null> {
-  const row = await env.DB.prepare(
-    `SELECT view_id, source_kind, scenario_id FROM runs WHERE id = ?`
-  )
-    .bind(runId)
-    .first<RunTraceRow>()
+  let row: RunTraceRow | null
+
+  try {
+    row = await env.DB.prepare(
+      `SELECT view_id, source_kind, scenario_id FROM runs WHERE id = ?`
+    )
+      .bind(runId)
+      .first<RunTraceRow>()
+  } catch (error) {
+    console.error(
+      JSON.stringify({
+        event: "tracing_context_unavailable",
+        runId,
+        message: error instanceof Error ? error.message : "unknown",
+      })
+    )
+    return null
+  }
 
   if (!row) return null
 
@@ -130,7 +147,15 @@ export async function traceRunStep<T extends StepOutcome>(
 ): Promise<T> {
   const processor = installTracing(env)
 
-  if (run === null) return fn()
+  // Without a context the step runs untraced. Its model calls still start
+  // spans through the global tracer, so the export is still awaited.
+  if (run === null) {
+    try {
+      return await fn()
+    } finally {
+      await flushTracing(processor)
+    }
+  }
 
   const traceId = await createTraceId(run.runId)
 
