@@ -126,6 +126,10 @@ const VARIABLES_SCHEMA = z.object({
   POSTHOG_API_KEY: secret,
 
   RATE_LIMIT_SALT: secret,
+
+  LANGFUSE_PUBLIC_KEY: secret,
+  LANGFUSE_SECRET_KEY: secret,
+  LANGFUSE_BASE_URL: secret,
 })
 
 type Variables = z.infer<typeof VARIABLES_SCHEMA>
@@ -147,6 +151,42 @@ export type AnalyticsTarget =
   | PosthogTarget
   | { provider: "contract-fake" }
   | { provider: "none"; reason: AnalyticsDisabledReason }
+
+/** A live Langfuse project. It cannot be built without all three values. */
+export type LangfuseTarget = {
+  provider: "langfuse"
+  publicKey: string
+  secretKey: string
+  /** Already stripped of trailing slashes, so a caller can append a path. */
+  baseUrl: string
+}
+
+/** Which tracing implementation this deployment resolves to, and with what. */
+export type TracingTarget =
+  LangfuseTarget | { provider: "none"; reason: "unconfigured" }
+
+/**
+ * Tracing resolves like measurement does: one settled decision, so no call site
+ * asks whether a key is present. Unlike PostHog it is not gated on production:
+ * the `environment` attribute keeps development traces apart in Langfuse, and
+ * seeing a local run's trace is the reason a developer configures it at all.
+ */
+function tracingTarget(variables: Variables): TracingTarget {
+  const publicKey = variables.LANGFUSE_PUBLIC_KEY
+  const secretKey = variables.LANGFUSE_SECRET_KEY
+  const baseUrl = variables.LANGFUSE_BASE_URL
+
+  if (publicKey === null || secretKey === null || baseUrl === null) {
+    return { provider: "none", reason: "unconfigured" }
+  }
+
+  return {
+    provider: "langfuse",
+    publicKey,
+    secretKey,
+    baseUrl: baseUrl.replace(/\/+$/, ""),
+  }
+}
 
 /**
  * Measurement resolves here rather than in the provider seam, so the seam is a
@@ -250,6 +290,7 @@ export const APP_CONFIG_SCHEMA = VARIABLES_SCHEMA.superRefine(
   reviewWindowSecondsCustom: variables.REVIEW_WINDOW_SECONDS_CUSTOM,
 
   analytics: analyticsTarget(variables),
+  tracing: tracingTarget(variables),
 
   rateLimitSalt: variables.RATE_LIMIT_SALT,
 }))

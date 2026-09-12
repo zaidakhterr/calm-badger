@@ -13,6 +13,7 @@
  * by the same outer boundary, so the step can never be abandoned mid-flight.
  */
 
+import { startActiveObservation } from "@langfuse/tracing"
 import { z } from "zod"
 
 import { readConfig } from "./env"
@@ -317,16 +318,58 @@ async function readSource(
     throw new OcrPageLimitError(provider.name, MAX_OCR_PAGES_PER_RUN)
   }
 
-  const document = await provider.read({
-    sourceId: source.id,
-    label: source.label,
-    // Narrowed by the `text/plain` return above: what is left of the stored
-    // vocabulary is exactly the set of upload types the reader accepts.
-    mediaType: source.mediaType,
-    bytes,
-    maxPages,
-    runPageLimit: MAX_OCR_PAGES_PER_RUN,
-  })
+  // Narrowed by the `text/plain` return above: what is left of the stored
+  // vocabulary is exactly the set of upload types the reader accepts.
+  const mediaType = source.mediaType
+
+  // The read is a paid model call, so it is traced as a generation with pages
+  // as its usage unit. The input names the document; it never carries the
+  // bytes, which would otherwise be uploaded as media.
+  const document = await startActiveObservation(
+    "read-document",
+    async (generation) => {
+      generation.update({
+        model: provider.model,
+        input: {
+          label: source.label,
+          mediaType,
+          byteSize: source.byteSize,
+          maxPages,
+        },
+      })
+
+      const read = await provider.read({
+        sourceId: source.id,
+        label: source.label,
+        mediaType,
+        bytes,
+        maxPages,
+        runPageLimit: MAX_OCR_PAGES_PER_RUN,
+      })
+
+      const costUsd = estimateOcrCostUsd(
+        readConfig(env),
+        read.usage.pagesProcessed
+      )
+
+      generation.update({
+        output: {
+          pageCount: read.pages.length,
+          pagesProcessed: read.usage.pagesProcessed,
+          latencyMs: read.latencyMs,
+        },
+        usageDetails: { pages: read.usage.pagesProcessed },
+      })
+
+      // An unconfigured price is no cost, not a zero cost.
+      if (costUsd !== null) {
+        generation.update({ costDetails: { pages: costUsd } })
+      }
+
+      return read
+    },
+    { asType: "generation" }
+  )
 
   if (
     document.pages.length > maxPages ||

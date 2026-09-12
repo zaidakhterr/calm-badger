@@ -6,3 +6,8 @@ MISTRAL_API_KEY=
 OPENROUTER_API_KEY=
 POSTHOG_API_KEY=
 RATE_LIMIT_SALT=
+
+# Langfuse tracing. Leave all three blank to keep tracing off.
+LANGFUSE_PUBLIC_KEY=
+LANGFUSE_SECRET_KEY=
+LANGFUSE_BASE_URL=

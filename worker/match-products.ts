@@ -21,6 +21,7 @@
  * this node reading `active` forever.
  */
 
+import { startActiveObservation } from "@langfuse/tracing"
 import { z } from "zod"
 
 import {
@@ -314,12 +315,37 @@ async function match(
     )
 
     try {
+      // One observation per line, so the rerank generation it makes nests
+      // under the line it decided, with the decision as the output.
       evidence.push(
-        await matchLine(runId, provider, heuristics, {
-          line,
-          shortlist,
-          products,
-          aliases,
+        await startActiveObservation("match-line", async (observation) => {
+          observation.update({
+            input: {
+              position: line.position,
+              reference: line.reference,
+              description: line.description,
+              shortlistSize: shortlist.length,
+            },
+          })
+
+          const matched = await matchLine(runId, provider, heuristics, {
+            line,
+            shortlist,
+            products,
+            aliases,
+          })
+
+          observation.update({
+            output: {
+              state: matched.state,
+              method: matched.method,
+              sku: matched.sku,
+              productName: matched.productName,
+              confidence: matched.confidence,
+            },
+          })
+
+          return matched
         })
       )
     } catch (error) {

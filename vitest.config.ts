@@ -41,6 +41,25 @@ export default defineConfig({
   ],
   test: {
     setupFiles: ["./test/apply-migrations.ts"],
+    // The OpenTelemetry and Langfuse packages ship ESM with extensionless
+    // relative imports, which workerd's module loader refuses. Pre-bundling
+    // them through Vite is the fix Cloudflare documents for this case.
+    deps: {
+      optimizer: {
+        ssr: {
+          enabled: true,
+          include: [
+            "@opentelemetry/api",
+            "@opentelemetry/core",
+            "@opentelemetry/sdk-trace-base",
+            "@opentelemetry/exporter-trace-otlp-http",
+            "@langfuse/tracing",
+            "@langfuse/otel",
+            "@langfuse/vercel-ai-sdk",
+          ],
+        },
+      },
+    },
     // Starting a run writes to D1, spawns a workflow, and reads the scenario
     // attachment through ASSETS. Several tests do that half a dozen times in
     // sequence, which is fast locally and much slower on a contended CI

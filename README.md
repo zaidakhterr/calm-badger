@@ -263,6 +263,35 @@ Set `ANALYTICS_PROVIDER=none` to turn analytics off. Set
 `APP_ENV=development` in `.dev.vars` to keep local events out of production
 analytics.
 
+## Tracing
+
+Langfuse tracing is optional. It is off until all three values are set:
+
+```bash
+pnpm wrangler secret put LANGFUSE_PUBLIC_KEY
+pnpm wrangler secret put LANGFUSE_SECRET_KEY
+pnpm wrangler secret put LANGFUSE_BASE_URL
+```
+
+For local development, set the same three values in `.dev.vars`. Use the
+European Union region, `https://cloud.langfuse.com`, to match the analytics
+choice above, or the URL of a self-hosted Langfuse.
+
+One run is one trace. Each business step is one observation in it, and the
+model calls of a step nest under it. The trace carries the `environment` from
+`APP_ENV`, a tag with the source kind (`curated` or `custom`), and the run,
+view, and scenario identifiers as metadata.
+
+Unlike analytics, tracing sends business content. Langfuse receives:
+
+- the model input and output of every extraction and reranking call
+- the name, media type, and size of every document, but not the document bytes
+- the page count and cost of every document read
+- the outcome and message of every step
+
+Custom runs are tagged `custom`, so their traces can be filtered or deleted to
+match the 24-hour retention of the run.
+
 ## Local development
 
 ```bash

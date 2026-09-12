@@ -100,6 +100,9 @@ export function createOpenRouterExtractionProvider(
           maxOutputTokens: MAX_OUTPUT_TOKENS,
           maxRetries: 0,
           abortSignal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+          // Names the generation in the trace. Which trace, if any, is the
+          // caller's context; this client never learns it.
+          telemetry: { functionId: "extract-rfq" },
         })
 
         // The one boundary this client reads the provider across. A result
