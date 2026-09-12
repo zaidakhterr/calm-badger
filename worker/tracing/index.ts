@@ -34,10 +34,12 @@ import {
 } from "@langfuse/tracing"
 import { LangfuseVercelAiSdkIntegration } from "@langfuse/vercel-ai-sdk"
 import { context, trace } from "@opentelemetry/api"
+import { resourceFromAttributes } from "@opentelemetry/resources"
 import { BasicTracerProvider } from "@opentelemetry/sdk-trace-base"
 import { registerTelemetry } from "ai"
 
 import { readConfig, type LangfuseTarget } from "../env"
+import { loadSources } from "../sources"
 
 import { AsyncLocalStorageContextManager } from "./context-manager"
 
@@ -58,15 +60,25 @@ export const RUN_TRACE_NAME = "process-rfq"
  */
 const STEP_PARENT_SPAN_ID = "0000000000000001"
 
+/** One source as the trace names it: what it is, never what it contains. */
+export type TracedSource = {
+  label: string
+  mediaType: string
+  byteSize: number
+}
+
 /**
  * What every observation of a run carries. Loaded once per workflow
- * invocation, from the run row, and handed to every step.
+ * invocation, from the run row, and handed to every step. The sources are
+ * the request as it arrived, and become the input of the trace's first
+ * observation.
  */
 export type RunTraceContext = {
   runId: string
   viewId: string
   sourceKind: string
   scenarioId: string | null
+  sources: TracedSource[]
 }
 
 type RunTraceRow = {
@@ -84,6 +96,7 @@ export async function loadRunTraceContext(
   runId: string
 ): Promise<RunTraceContext | null> {
   let row: RunTraceRow | null
+  let sources: TracedSource[]
 
   try {
     row = await env.DB.prepare(
@@ -91,6 +104,11 @@ export async function loadRunTraceContext(
     )
       .bind(runId)
       .first<RunTraceRow>()
+    sources = (await loadSources(env, runId)).map((source) => ({
+      label: source.label,
+      mediaType: source.mediaType,
+      byteSize: source.byteSize,
+    }))
   } catch (error) {
     console.error(
       JSON.stringify({
@@ -109,20 +127,29 @@ export async function loadRunTraceContext(
     viewId: row.view_id,
     sourceKind: row.source_kind,
     scenarioId: row.scenario_id,
+    sources,
   }
 }
 
 /** The observation types a workflow step maps to. Model calls nest inside. */
 export type StepObservationType = "span" | "retriever" | "tool"
 
+/** What a step observation may take as input: small, named facts. */
+export type StepInput = Record<
+  string,
+  string | number | boolean | null | TracedSource[]
+>
+
 /**
  * What a step's observation records beyond the result: an active, verb-first
- * name, the type, and the input a reviewer wants at a glance.
+ * name, the type, the input a reviewer wants at a glance, and, for a step
+ * whose result carries a whole payload, the summary to record instead.
  */
-export type StepTrace = {
+export type StepTrace<T extends StepOutcome> = {
   name: string
   asType?: StepObservationType
-  input?: Record<string, string | number | boolean | null>
+  input?: StepInput
+  output?: (result: T) => StepOutcome
 }
 
 /**
@@ -142,7 +169,7 @@ export type StepOutcome = { state: string; message?: string }
 export async function traceRunStep<T extends StepOutcome>(
   env: Env,
   run: RunTraceContext | null,
-  step: StepTrace,
+  step: StepTrace<T>,
   fn: () => Promise<T>
 ): Promise<T> {
   const processor = installTracing(env)
@@ -163,15 +190,16 @@ export async function traceRunStep<T extends StepOutcome>(
     if (step.input) observation.update({ input: step.input })
 
     const result = await fn()
+    const output = step.output ? step.output(result) : result
 
     if (result.state === "error") {
       observation.update({
-        output: result,
+        output,
         level: "ERROR",
         statusMessage: result.message,
       })
     } else {
-      observation.update({ output: result })
+      observation.update({ output })
     }
 
     return result
@@ -224,7 +252,7 @@ export async function traceRunStep<T extends StepOutcome>(
 /** What a step's callback may set on its observation, whatever its type. */
 type StepObservation = {
   update(attributes: {
-    input?: Record<string, string | number | boolean | null>
+    input?: StepInput
     output?: StepOutcome
     level?: "ERROR"
     statusMessage?: string
@@ -259,7 +287,10 @@ function installLangfuse(
     exportMode: "immediate",
   })
 
-  const provider = new BasicTracerProvider({ spanProcessors: [processor] })
+  const provider = new BasicTracerProvider({
+    spanProcessors: [processor],
+    resource: resourceFromAttributes({ "service.name": "calm-badger" }),
+  })
 
   context.setGlobalContextManager(new AsyncLocalStorageContextManager())
   trace.setGlobalTracerProvider(provider)

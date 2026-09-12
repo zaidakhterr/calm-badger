@@ -26,6 +26,12 @@ export default defineConfig({
           // PostHog without a key, a host, or a network call existing at all.
           ANALYTICS_PROVIDER: "contract-fake",
           POSTHOG_API_KEY: "",
+          // Tracing stays off in tests, whatever `.dev.vars` holds: a test
+          // run must not export traces to a real Langfuse project. The
+          // tracing suite installs its own in-memory provider instead.
+          LANGFUSE_PUBLIC_KEY: "",
+          LANGFUSE_SECRET_KEY: "",
+          LANGFUSE_BASE_URL: "",
           // A fixed salt keeps the rotating visitor hash reproducible within a
           // test run. It is not a secret and matches nothing deployed.
           RATE_LIMIT_SALT: "test-rate-limit-salt",
@@ -52,6 +58,7 @@ export default defineConfig({
             "@opentelemetry/api",
             "@opentelemetry/core",
             "@opentelemetry/sdk-trace-base",
+            "@opentelemetry/resources",
             "@opentelemetry/exporter-trace-otlp-http",
             "@langfuse/tracing",
             "@langfuse/otel",

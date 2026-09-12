@@ -65,6 +65,7 @@ const RUN: RunTraceContext = {
   viewId: "view-tracing-1",
   sourceKind: "curated",
   scenarioId: "cable-order",
+  sources: [{ label: "order.pdf", mediaType: "application/pdf", byteSize: 10 }],
 }
 
 /** The isolate's own bindings with variables overridden, as in every suite. */

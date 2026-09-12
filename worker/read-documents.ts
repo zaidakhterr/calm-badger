@@ -363,7 +363,7 @@ async function readSource(
 
       // An unconfigured price is no cost, not a zero cost.
       if (costUsd !== null) {
-        generation.update({ costDetails: { pages: costUsd } })
+        generation.update({ costDetails: { pages: costUsd, total: costUsd } })
       }
 
       return read

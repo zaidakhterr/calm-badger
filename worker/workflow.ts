@@ -4,7 +4,7 @@ import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers"
 import { DEFAULT_ADAPTER } from "./adapters"
 import { captureFunnelEvent } from "./analytics"
 import { buildEstimate } from "./build-estimate"
-import { deliverRun } from "./deliver"
+import { deliverRun, type DeliveryOutcome } from "./deliver"
 import { ConfigError, readConfig } from "./env"
 import { applyReviewProductDecision, matchProducts } from "./match-products"
 import { readDocuments } from "./read-documents"
@@ -79,29 +79,11 @@ export class RfqWorkflow extends WorkflowEntrypoint<Env, RfqWorkflowParams> {
     // What every observation of this run carries. One read, before any step.
     const run = await loadRunTraceContext(this.env, runId)
 
-    const acknowledgedAt = await step.do("record RFQ receipt", async () => {
-      const now = new Date().toISOString()
-
-      // Idempotent: the request handler already persisted RFQ receipt, so the
-      // durable orchestrator only confirms it owns the run. The receipt
-      // sentence and any earlier completion time are preserved by the
-      // recorder's `rfq-received` row, so a replay changes nothing.
-      await createRunStepRecorder(this.env, runId, "rfq-received").complete(
-        null,
-        { at: now }
-      )
-
-      console.log(
-        JSON.stringify({
-          event: "workflow_step_completed",
-          runId,
-          step: RFQ_RECEIVED_STEP_KEY,
-          instanceId: event.instanceId,
-        })
-      )
-
-      return now
-    })
+    // The first observation of the trace, so its input is the request as it
+    // arrived: the scenario, the source kind, and what each source is.
+    const acknowledgedAt = await step.do("record RFQ receipt", () =>
+      traceReceipt(this.env, run, runId, event.instanceId)
+    )
 
     // Every failure path in the steps below is handled inside the step, which
     // records a terminal error and returns. Nothing is thrown, so the workflow
@@ -263,6 +245,8 @@ export class RfqWorkflow extends WorkflowEntrypoint<Env, RfqWorkflowParams> {
           name: "deliver-quote",
           asType: "tool",
           input: { adapter: DEFAULT_ADAPTER },
+          // The payload is stored evidence; the trace records the receipt.
+          output: summarizeDelivery,
         },
         () => deliverRun(this.env, runId)
       )
@@ -379,6 +363,59 @@ export async function applyReviewOutcome(
 }
 
 /**
+ * Records RFQ receipt as the trace's first observation.
+ *
+ * Idempotent: the request handler already persisted RFQ receipt, so the
+ * durable orchestrator only confirms it owns the run. The receipt sentence and
+ * any earlier completion time are preserved by the recorder's `rfq-received`
+ * row, so a replay changes nothing. The step's stored value stays the bare
+ * timestamp it always was.
+ */
+async function traceReceipt(
+  env: Env,
+  run: RunTraceContext | null,
+  runId: string,
+  instanceId: string
+): Promise<string> {
+  const traced = await traceRunStep(
+    env,
+    run,
+    {
+      name: "receive-rfq",
+      input: {
+        scenarioId: run?.scenarioId ?? null,
+        sourceKind: run?.sourceKind ?? null,
+        sources: run?.sources ?? [],
+      },
+    },
+    async () => {
+      const now = new Date().toISOString()
+
+      await createRunStepRecorder(env, runId, "rfq-received").complete(null, {
+        at: now,
+      })
+
+      console.log(
+        JSON.stringify({
+          event: "workflow_step_completed",
+          runId,
+          step: RFQ_RECEIVED_STEP_KEY,
+          instanceId,
+        })
+      )
+
+      return {
+        state: "received",
+        sourceCount: run?.sources.length ?? 0,
+        acknowledgedAt: now,
+      }
+    }
+  )
+
+  return traced.acknowledgedAt
+}
+
+/**
  * The review outcome as one traced step. The outcome is a bare state, so it is
  * wrapped for the observation and unwrapped for the workflow, which keeps the
  * durable step's stored value exactly what it was.
@@ -396,6 +433,36 @@ async function traceReviewOutcome(
   )
 
   return traced.state
+}
+
+/** What the trace keeps of a delivery: the receipt, never the payload. */
+type DeliverySummary =
+  | { state: "delivered"; externalEstimateId: string; acceptedAt: string }
+  | {
+      state: "already_delivered"
+      externalEstimateId: string
+      deliveredAt: string
+    }
+  | { state: "not_priced" }
+  | { state: "error"; message: string }
+
+function summarizeDelivery(outcome: DeliveryOutcome): DeliverySummary {
+  switch (outcome.state) {
+    case "delivered":
+      return {
+        state: outcome.state,
+        externalEstimateId: outcome.delivery.receipt.externalEstimateId,
+        acceptedAt: outcome.delivery.receipt.acceptedAt,
+      }
+    case "already_delivered":
+      return {
+        state: outcome.state,
+        externalEstimateId: outcome.delivery.externalEstimateId,
+        deliveredAt: outcome.delivery.deliveredAt,
+      }
+    default:
+      return outcome
+  }
 }
 
 function failure(
