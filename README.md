@@ -284,7 +284,9 @@ view, and scenario identifiers as metadata.
 
 Unlike analytics, tracing sends business content. Langfuse receives:
 
-- the model input and output of every extraction and reranking call
+- the model input and output of every extraction and reranking call. The
+  input holds the document text after reading, and the output holds the
+  customer name and contact details the model extracted.
 - the name, media type, and size of every document, but not the document bytes
 - the page count and cost of every document read
 - the outcome and message of every step
