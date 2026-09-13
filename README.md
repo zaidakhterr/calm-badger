@@ -131,7 +131,7 @@ The system does not send the full catalogue to a language model.
 5. The system checks the product score and the score gap.
 6. It sends an uncertain line to Review.
 
-Set `MATCH_WINNER_STRENGTH` and `MATCH_WINNER_GAP` in `wrangler.jsonc`.
+The rerank prompt in Langfuse stores the product score and score-gap limits.
 
 The owner can use the proposed product, select an alternative, or search the
 catalogue. The owner can also correct a customer or quantity. The system cannot

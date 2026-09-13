@@ -19,8 +19,6 @@
 
 import { z } from "zod"
 
-import type { AppConfig } from "./env"
-
 import {
   JSON_TEXT_SCHEMA,
   labelFor,
@@ -54,6 +52,17 @@ export const rerankSchema = z.object({
     .max(16),
 })
 
+/** Fields read by the integrity check. Prompt policy lives in its full schema. */
+export const RERANK_CONTRACT = z.object({
+  ranked: z.array(
+    z.object({
+      sku: z.string(),
+      score: z.number(),
+      reason: z.string(),
+    })
+  ),
+})
+
 /**
  * The ranking a model is asked to answer with. Named because the contract fake
  * writes one and this module validates one, and the two must be the same thing.
@@ -66,12 +75,14 @@ export type RerankSchemaOutcome =
   | { state: "valid"; ranked: RankedCandidate[] }
   | { state: "invalid"; issues: string[] }
 
-/** The ranking contract over the JSON text the repair gate accepted. */
-const RERANK_JSON_SCHEMA = JSON_TEXT_SCHEMA.pipe(rerankSchema)
-
 /** Schema failures are reported by path and rule only: the value is model text. */
-export function validateRerankOutput(json: string): RerankSchemaOutcome {
-  const result = RERANK_JSON_SCHEMA.safeParse(json)
+export function validateRerankOutput(
+  json: string,
+  schema: z.ZodType = rerankSchema
+): RerankSchemaOutcome {
+  const result = JSON_TEXT_SCHEMA.pipe(schema)
+    .pipe(RERANK_CONTRACT)
+    .safeParse(json)
 
   if (result.success) return { state: "valid", ranked: result.data.ranked }
 
@@ -178,18 +189,6 @@ export type MatchHeuristics = {
   winnerStrength: number
   /** How far clear of the runner-up the winner has to be. */
   winnerGap: number
-}
-
-/**
- * Both thresholds are configured variables rather than constants, so a
- * deployment can be made stricter or looser without a code change. They are
- * demo judgement either way, and the interface says so.
- */
-export function readMatchHeuristics(config: AppConfig): MatchHeuristics {
-  return {
-    winnerStrength: config.matchWinnerStrength,
-    winnerGap: config.matchWinnerGap,
-  }
 }
 
 export type MatchDecision = {

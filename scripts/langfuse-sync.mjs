@@ -42,34 +42,52 @@ async function syncPrompts() {
     const { bundledPrompt } = await loader.ssrLoadModule(
       "/worker/langfuse/fallbacks.ts"
     )
-    const fallback = bundledPrompt("rfq/extract")
-    const existing = cli(["prompts", "get", fallback.name, "--label", "latest"])
-    if (existing.status === 200) {
-      const prompt = promptVersion.parse(existing.body)
-      console.log(
-        `Preserved ${prompt.name} version ${prompt.version}; Langfuse owns edits and labels.`
-      )
-      return
-    }
-    if (existing.status !== 404)
-      throw new Error(`Prompt lookup failed (${existing.status})`)
-    const created = cli(
-      ["prompts", "create", "--body-file", "-"],
-      JSON.stringify({
-        name: fallback.name,
-        type: "chat",
-        prompt: fallback.prompt,
-        config: fallback.config,
-        labels: ["production"],
+    for (const seed of [
+      {
+        name: "rfq/extract",
         commitMessage: "Ticket 02: migrate the extraction prompt and schema",
-      })
-    )
-    if (created.status < 200 || created.status >= 300)
-      throw new Error(`Prompt creation failed (${created.status})`)
-    const prompt = promptVersion.parse(created.body)
-    console.log(
-      `Created ${prompt.name} version ${prompt.version} with label production.`
-    )
+      },
+      {
+        name: "rfq/rerank",
+        commitMessage:
+          "Ticket 03: migrate the rerank prompt, schema, and thresholds",
+      },
+    ]) {
+      const fallback = bundledPrompt(seed.name)
+      const existing = cli([
+        "prompts",
+        "get",
+        fallback.name,
+        "--label",
+        "latest",
+      ])
+      if (existing.status === 200) {
+        const prompt = promptVersion.parse(existing.body)
+        console.log(
+          `Preserved ${prompt.name} version ${prompt.version}; Langfuse owns edits and labels.`
+        )
+        continue
+      }
+      if (existing.status !== 404)
+        throw new Error(`Prompt lookup failed (${existing.status})`)
+      const created = cli(
+        ["prompts", "create", "--body-file", "-"],
+        JSON.stringify({
+          name: fallback.name,
+          type: "chat",
+          prompt: fallback.prompt,
+          config: fallback.config,
+          labels: ["production"],
+          commitMessage: seed.commitMessage,
+        })
+      )
+      if (created.status < 200 || created.status >= 300)
+        throw new Error(`Prompt creation failed (${created.status})`)
+      const prompt = promptVersion.parse(created.body)
+      console.log(
+        `Created ${prompt.name} version ${prompt.version} with label production.`
+      )
+    }
   } finally {
     await loader.close()
   }

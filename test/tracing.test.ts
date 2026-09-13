@@ -1,7 +1,9 @@
 import { z } from "zod"
 import { extractionPrompt } from "../worker/langfuse/extraction-prompt"
 import { bundledPrompt } from "../worker/langfuse/fallbacks"
+import { rerankPrompt } from "../worker/langfuse/rerank-prompt"
 import { createOpenRouterExtractionProvider } from "../worker/providers/openrouter-extraction"
+import { createOpenRouterRerankProvider } from "../worker/providers/openrouter-rerank"
 import { env } from "cloudflare:workers"
 import { createTraceId, startObservation } from "@langfuse/tracing"
 import { LangfuseVercelAiSdkIntegration } from "@langfuse/vercel-ai-sdk"
@@ -161,6 +163,82 @@ it("links the fetched extraction version on the actual provider generation", asy
         span.attributes["langfuse.observation.prompt.name"] === "rfq/extract"
     )
   expect(generation?.attributes["langfuse.observation.prompt.version"]).toBe(41)
+})
+
+it("links the fetched rerank version and forwards its full schema", async () => {
+  const prompt = bundledPrompt("rfq/rerank")
+  prompt.version = 43
+  prompt.isFallback = false
+  const selected = rerankPrompt(prompt)
+  const requests: z.infer<ReturnType<typeof z.json>>[] = []
+  const client = createOpenRouterRerankProvider(
+    readConfig(envWith({ OPENROUTER_API_KEY: "offline-test" })),
+    (_url, init) => {
+      requests.push(z.json().parse(JSON.parse(z.string().parse(init?.body))))
+      return Promise.resolve(
+        Response.json({
+          id: "rerank-generation-probe",
+          model: selected.config.model,
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: "assistant",
+                content: JSON.stringify({
+                  ranked: [{ sku: "NX-VLV-2210", score: 0.9, reason: "DN25." }],
+                }),
+              },
+              finish_reason: "stop",
+            },
+          ],
+          usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
+        })
+      )
+    }
+  )
+  await traceRunStep(env, RUN, { name: "match-products" }, async () => {
+    await client.rerank({
+      runId: RUN.runId,
+      prompt: selected,
+      reference: "DN25 ball valve",
+      description: "Brass ball valve DN25",
+      candidates: [
+        {
+          sku: "NX-VLV-2210",
+          name: "Brass ball valve",
+          description: "DN25 lever-operated brass ball valve",
+          category: "Valves",
+          manufacturer: "Nordex",
+          unit: "piece",
+          knownAs: ["ball valve"],
+        },
+      ],
+      schemaName: "catalog_rerank",
+      schemaDescription: "Candidate products ranked best first.",
+    })
+    return { state: "complete" }
+  })
+  const sent = z
+    .object({
+      model: z.string(),
+      temperature: z.number(),
+      response_format: z.object({
+        json_schema: z.object({ schema: z.record(z.string(), z.json()) }),
+      }),
+    })
+    .parse(requests[0])
+  expect(sent.model).toBe(selected.config.model)
+  expect(sent.temperature).toBe(selected.config.temperature)
+  expect(sent.response_format.json_schema.schema).toEqual(
+    selected.config.response_format
+  )
+  const generation = exporter
+    .getFinishedSpans()
+    .find(
+      (span) =>
+        span.attributes["langfuse.observation.prompt.name"] === "rfq/rerank"
+    )
+  expect(generation?.attributes["langfuse.observation.prompt.version"]).toBe(43)
 })
 
 describe("tracing configuration", () => {

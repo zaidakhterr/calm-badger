@@ -31,14 +31,12 @@ import {
   type CatalogProduct,
 } from "./catalog/retrieval"
 import { readConfig } from "./env"
+import { rerankPrompt, type RerankPrompt } from "./langfuse/rerank-prompt"
 import {
   applyIntegrityChecks,
   decideMatch,
-  readMatchHeuristics,
-  RERANK_INSTRUCTION,
   RERANK_SCHEMA_DESCRIPTION,
   RERANK_SCHEMA_NAME,
-  rerankSchema,
   validateRerankOutput,
   type MatchAlternative,
   type MatchDecision,
@@ -51,6 +49,7 @@ import {
   selectRerankProvider,
   type RerankProvider,
 } from "./providers/rerank"
+import { selectLangfuseProvider } from "./providers/langfuse"
 import {
   CONFIDENCE_SCHEMA,
   labelFor,
@@ -299,8 +298,18 @@ async function match(
     `Ranking shortlisted products for ${lines.length} ${lines.length === 1 ? "line" : "lines"}…`
   )
 
-  const provider = selectRerankProvider(readConfig(env))
-  const heuristics = readMatchHeuristics(readConfig(env))
+  const config = readConfig(env)
+  const prompt = rerankPrompt(
+    await selectLangfuseProvider(config).prompts.get(
+      "rfq/rerank",
+      lines.flatMap((line) => [line.reference, line.description])
+    )
+  )
+  const provider = selectRerankProvider(config)
+  const heuristics = {
+    winnerStrength: prompt.config.winner_strength,
+    winnerGap: prompt.config.winner_gap,
+  }
   const skus = [...new Set(candidates.map((candidate) => candidate.sku))]
   const [products, aliases] = await Promise.all([
     loadActiveProducts(env, skus),
@@ -328,7 +337,7 @@ async function match(
             },
           })
 
-          const matched = await matchLine(runId, provider, heuristics, {
+          const matched = await matchLine(runId, provider, prompt, heuristics, {
             line,
             shortlist,
             products,
@@ -369,7 +378,7 @@ async function match(
         state: "error",
         message,
         provider: provider.name,
-        model: provider.model,
+        model: prompt.config.model,
         heuristics: describeHeuristics(heuristics),
         lines: evidence,
         totals: totalsOf(evidence, env, Date.now() - startedAt),
@@ -391,7 +400,7 @@ async function match(
     state: "complete",
     message: null,
     provider: provider.name,
-    model: provider.model,
+    model: prompt.config.model,
     heuristics: describeHeuristics(heuristics),
     lines: evidence,
     totals: totalsOf(evidence, env, elapsedMs),
@@ -433,6 +442,7 @@ async function match(
 async function matchLine(
   runId: string,
   provider: RerankProvider,
+  prompt: RerankPrompt,
   heuristics: MatchHeuristics,
   input: {
     line: LineRow
@@ -548,11 +558,10 @@ async function matchLine(
 
   const rerankRequest = {
     runId,
-    instruction: RERANK_INSTRUCTION,
+    prompt,
     reference: line.reference,
     description: line.description,
     candidates,
-    schema: rerankSchema,
     schemaName: RERANK_SCHEMA_NAME,
     schemaDescription: RERANK_SCHEMA_DESCRIPTION,
   }
@@ -587,7 +596,7 @@ async function matchLine(
     }
   }
 
-  const checked = validateRerankOutput(parsed.json)
+  const checked = validateRerankOutput(parsed.json, prompt.schema)
 
   if (checked.state === "invalid") {
     return {

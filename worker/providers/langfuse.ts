@@ -7,6 +7,7 @@ import {
 } from "../langfuse/contract"
 import { compatibleExtractionPrompt } from "../langfuse/extraction-prompt"
 import { bundledPrompt } from "../langfuse/fallbacks"
+import { compatibleRerankPrompt } from "../langfuse/rerank-prompt"
 
 import { createContractFakeLangfuseProvider } from "./contract-fake-langfuse"
 
@@ -53,7 +54,7 @@ export function selectLangfuseProvider(config: AppConfig): LangfuseProvider {
           if (parsed.success && parsed.data.name === name) {
             return name === "rfq/extract"
               ? compatibleExtractionPrompt(parsed.data)
-              : parsed.data
+              : compatibleRerankPrompt(parsed.data)
           }
         } catch {
           // Never log an SDK error: it can carry request or response content.

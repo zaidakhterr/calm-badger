@@ -153,8 +153,8 @@ export async function loadSystemDetails(env: Env): Promise<SystemDetails> {
       providerEntry(
         "Candidate reranking",
         config.rerankProvider,
-        config.rerankModel,
-        "Ranks the product shortlist for one line at a time. Returns a reason for the order."
+        null,
+        "Uses the model, schema, and acceptance rules from the rerank prompt in Langfuse. Returns a reason for the order."
       ),
       {
         role: "Delivery",
