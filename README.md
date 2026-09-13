@@ -404,6 +404,13 @@ Run the structural check without external changes:
 `.github/workflows/validate.yml` runs for pull requests and non-main branches.
 It runs `pnpm check`.
 
+`.github/workflows/langfuse-experiment.yml` runs the curated Langfuse
+experiment for pull requests from branches in this repository. It uses real
+Mistral and OpenRouter providers against a local Worker and a local D1
+database. The gate posts scores and the comparison link on the pull request.
+Fork pull requests skip this workflow because GitHub does not give repository
+secrets or a write token to fork workflows.
+
 `.github/workflows/deploy.yml` runs for changes to `main` and for manual
 deployments. It performs these tasks in order:
 
@@ -419,8 +426,14 @@ CI uses these GitHub values:
 
 - `CLOUDFLARE_API_TOKEN`: Actions secret.
 - `CLOUDFLARE_ACCOUNT_ID`: Actions variable.
+- `MISTRAL_API_KEY`: Actions secret for the experiment Worker.
+- `OPENROUTER_API_KEY`: Actions secret for the experiment Worker.
+- `LANGFUSE_PUBLIC_KEY`: Actions secret for the experiment and Worker.
+- `LANGFUSE_SECRET_KEY`: Actions secret for the experiment and Worker.
+- `LANGFUSE_BASE_URL`: Actions secret for the Langfuse project URL.
 
-GitHub does not receive provider keys.
+The experiment creates a new rate-limit salt for each CI run. It disables
+PostHog for the local Worker.
 
 ## Production gaps
 
