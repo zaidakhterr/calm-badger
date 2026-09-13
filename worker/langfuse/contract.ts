@@ -18,16 +18,23 @@ export const LANGFUSE_PROMPT_SCHEMA = z.object({
 
 export type LangfusePrompt = z.infer<typeof LANGFUSE_PROMPT_SCHEMA>
 
+/** Stable signal names shared by review outcomes and owner feedback. */
+export const LANGFUSE_SCORE_NAMES = {
+  reviewLineCorrect: "review-line-correct",
+  reviewApproved: "review-approved",
+  ownerLineThumbs: "owner-line-thumbs",
+  ownerQuoteThumbs: "owner-quote-thumbs",
+} as const
+
+export type LangfuseScoreName =
+  (typeof LANGFUSE_SCORE_NAMES)[keyof typeof LANGFUSE_SCORE_NAMES]
+
 /** These signals belong to a run or to one observation within that run. */
 export type LangfuseScore = {
   id: string
   traceId: string
   observationId?: string
-  name:
-    | "review-line-correct"
-    | "review-approved"
-    | "owner-line-thumbs"
-    | "owner-quote-thumbs"
+  name: LangfuseScoreName
   value: 0 | 1
   comment?: string
 }

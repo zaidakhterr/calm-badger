@@ -43,6 +43,7 @@ import type { LangfuseTarget } from "./target"
 import { loadSources } from "../sources"
 
 import { AsyncLocalStorageContextManager } from "./context-manager"
+import { langfuseIdGenerator } from "./ids"
 
 /**
  * The AI SDK reports every model call to the registered integration, which
@@ -289,6 +290,7 @@ function installLangfuse(
   })
 
   const provider = new BasicTracerProvider({
+    idGenerator: langfuseIdGenerator,
     spanProcessors: [processor],
     resource: resourceFromAttributes({ "service.name": "calm-badger" }),
   })

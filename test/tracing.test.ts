@@ -1,5 +1,9 @@
 import { env } from "cloudflare:workers"
-import { createTraceId, startObservation } from "@langfuse/tracing"
+import {
+  createTraceId,
+  startActiveObservation,
+  startObservation,
+} from "@langfuse/tracing"
 import { LangfuseVercelAiSdkIntegration } from "@langfuse/vercel-ai-sdk"
 import { getPropagatedAttributesFromContext } from "@langfuse/core"
 import { context, trace } from "@opentelemetry/api"
@@ -16,6 +20,12 @@ import { afterAll, beforeEach, describe, expect, it } from "vitest"
 
 import { readConfig } from "../worker/env"
 import { AsyncLocalStorageContextManager } from "../worker/langfuse/context-manager"
+import {
+  createObservationId,
+  langfuseIdGenerator,
+  MATCH_LINE_OBSERVATION_NAME,
+  withObservationId,
+} from "../worker/langfuse/ids"
 import {
   RUN_TRACE_NAME,
   traceRunStep,
@@ -46,6 +56,7 @@ class PropagatingSpanProcessor extends SimpleSpanProcessor {
 
 const exporter = new InMemorySpanExporter()
 const provider = new BasicTracerProvider({
+  idGenerator: langfuseIdGenerator,
   spanProcessors: [new PropagatingSpanProcessor(exporter)],
 })
 
@@ -232,6 +243,52 @@ describe("traceRunStep", () => {
       Object.keys(span.attributes).some((key) => key.startsWith("gen_ai."))
     )
     expect(generation).toBeDefined()
+  })
+
+  it("gives each match-line a stable id without reusing it for nested spans", async () => {
+    const first = await createObservationId(
+      RUN.runId,
+      MATCH_LINE_OBSERVATION_NAME,
+      1
+    )
+    const repeated = await createObservationId(
+      RUN.runId,
+      MATCH_LINE_OBSERVATION_NAME,
+      1
+    )
+    const second = await createObservationId(
+      RUN.runId,
+      MATCH_LINE_OBSERVATION_NAME,
+      2
+    )
+
+    expect(repeated).toBe(first)
+    expect(second).not.toBe(first)
+
+    await traceRunStep(env, RUN, { name: "match-products" }, () =>
+      withObservationId(RUN.runId, MATCH_LINE_OBSERVATION_NAME, 1, () =>
+        startActiveObservation(MATCH_LINE_OBSERVATION_NAME, async () => {
+          await generateText({
+            model: mockModel(),
+            prompt: "rank",
+            telemetry: {
+              functionId: "rerank-candidates",
+              integrations: new LangfuseVercelAiSdkIntegration(),
+            },
+          })
+          return { state: "complete" }
+        })
+      )
+    )
+
+    const spans = exporter.getFinishedSpans()
+    const line = spans.find((span) => span.name === MATCH_LINE_OBSERVATION_NAME)
+    const generation = spans.find((span) =>
+      Object.keys(span.attributes).some((key) => key.startsWith("gen_ai."))
+    )
+
+    expect(line?.spanContext().spanId).toBe(first)
+    expect(generation?.spanContext().spanId).not.toBe(first)
   })
 
   it("runs the step untraced when the run row is unknown", async () => {
