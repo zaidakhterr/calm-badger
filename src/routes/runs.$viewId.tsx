@@ -10,6 +10,8 @@ import {
   ImageSquareIcon,
   LinkSimpleIcon,
   EnvelopeSimpleIcon,
+  ThumbsDownIcon,
+  ThumbsUpIcon,
   WarningIcon,
   XIcon,
 } from "@phosphor-icons/react"
@@ -31,6 +33,7 @@ import {
   searchCatalog,
   searchCustomers,
   settleReview,
+  submitOwnerFeedback,
   submitReviewDecisions,
   type CatalogSearchResult,
   type CustomerSearchResult,
@@ -474,7 +477,11 @@ function evidencePanel(
 
   if (step.key === BUILD_ESTIMATE_STEP && snapshot.estimate) {
     return (
-      <EstimateEvidencePanel evidence={snapshot.estimate} viewId={viewId} />
+      <EstimateEvidencePanel
+        evidence={snapshot.estimate}
+        viewId={viewId}
+        canGiveFeedback={snapshot.viewer.canMutate}
+      />
     )
   }
 
@@ -495,7 +502,13 @@ function evidencePanel(
   }
 
   if (step.key === MATCH_PRODUCTS_STEP && snapshot.matches) {
-    return <MatchEvidencePanel evidence={snapshot.matches} />
+    return (
+      <MatchEvidencePanel
+        evidence={snapshot.matches}
+        viewId={viewId}
+        canGiveFeedback={snapshot.viewer.canMutate}
+      />
+    )
   }
 
   return null
@@ -1143,7 +1156,15 @@ function CandidateLineRow({ line }: { line: CandidateLine }) {
  * Match products. Business decision first, then the evidence for it, then the
  * alternatives, then the model's own output and its metadata.
  */
-function MatchEvidencePanel({ evidence }: { evidence: MatchEvidence }) {
+function MatchEvidencePanel({
+  evidence,
+  viewId,
+  canGiveFeedback,
+}: {
+  evidence: MatchEvidence
+  viewId: string
+  canGiveFeedback: boolean
+}) {
   return (
     <div className="space-y-4">
       {evidence.message ? (
@@ -1158,7 +1179,12 @@ function MatchEvidencePanel({ evidence }: { evidence: MatchEvidence }) {
         </h3>
         <ul className="mt-2 space-y-2">
           {evidence.lines.map((line) => (
-            <MatchLineRow key={line.position} line={line} />
+            <MatchLineRow
+              key={line.position}
+              line={line}
+              viewId={viewId}
+              canGiveFeedback={canGiveFeedback}
+            />
           ))}
         </ul>
       </div>
@@ -1233,7 +1259,15 @@ function MatchEvidencePanel({ evidence }: { evidence: MatchEvidence }) {
   )
 }
 
-function MatchLineRow({ line }: { line: MatchLine }) {
+function MatchLineRow({
+  line,
+  viewId,
+  canGiveFeedback,
+}: {
+  line: MatchLine
+  viewId: string
+  canGiveFeedback: boolean
+}) {
   const needsReview = line.state !== "accepted"
 
   return (
@@ -1317,6 +1351,13 @@ function MatchLineRow({ line }: { line: MatchLine }) {
           </details>
         </>
       ) : null}
+      {canGiveFeedback ? (
+        <OwnerFeedbackControls
+          viewId={viewId}
+          target={line.position}
+          label={`line ${line.position} product match`}
+        />
+      ) : null}
     </li>
   )
 }
@@ -1328,9 +1369,11 @@ function MatchLineRow({ line }: { line: MatchLine }) {
 function EstimateEvidencePanel({
   evidence,
   viewId,
+  canGiveFeedback,
 }: {
   evidence: EstimateEvidence
   viewId: string
+  canGiveFeedback: boolean
 }) {
   const quote = evidence.quote
 
@@ -1355,6 +1398,9 @@ function EstimateEvidencePanel({
             ? ` · ${quote.customer.location.label}, ${quote.customer.location.city}`
             : ""}
         </p>
+        {canGiveFeedback ? (
+          <OwnerFeedbackControls viewId={viewId} target="quote" label="quote" />
+        ) : null}
         <ul className="mt-2 space-y-2">
           {quote.lines.map((line) => (
             <EstimateLineRow key={line.position} line={line} />
@@ -1419,6 +1465,95 @@ function EstimateEvidencePanel({
           codeClassName="max-h-72"
         />
       </details>
+    </div>
+  )
+}
+
+/** One compact owner-only control for a stable Langfuse thumbs score. */
+function OwnerFeedbackControls({
+  viewId,
+  target,
+  label,
+}: {
+  viewId: string
+  target: number | "quote"
+  label: string
+}) {
+  const [comment, setComment] = useState("")
+  const [selected, setSelected] = useState<"up" | "down" | null>(null)
+  const [isSaving, setIsSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const save = async (value: "up" | "down") => {
+    setIsSaving(true)
+    setError(null)
+
+    try {
+      await submitOwnerFeedback(
+        viewId,
+        target,
+        value,
+        comment.trim() || undefined
+      )
+      setSelected(value)
+    } catch (reason) {
+      setError(
+        reason instanceof Error
+          ? reason.message
+          : "The system could not save this feedback."
+      )
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  return (
+    <div className="mt-3 rounded-md border bg-background p-2.5">
+      <p className="text-[11px] font-medium">Rate this {label}</p>
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <input
+          aria-label={`Comment on ${label}`}
+          className="h-8 min-w-44 flex-1 rounded-md border bg-transparent px-2.5 text-[12px] outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring"
+          maxLength={500}
+          placeholder="Add or replace comment (optional)"
+          value={comment}
+          onChange={(event) => setComment(event.target.value)}
+        />
+        <Button
+          aria-label={`Thumbs up for ${label}`}
+          aria-pressed={selected === "up"}
+          disabled={isSaving}
+          size="sm"
+          type="button"
+          variant={selected === "up" ? "default" : "outline"}
+          onClick={() => void save("up")}
+        >
+          <ThumbsUpIcon />
+          Good
+        </Button>
+        <Button
+          aria-label={`Thumbs down for ${label}`}
+          aria-pressed={selected === "down"}
+          disabled={isSaving}
+          size="sm"
+          type="button"
+          variant={selected === "down" ? "default" : "outline"}
+          onClick={() => void save("down")}
+        >
+          <ThumbsDownIcon />
+          Poor
+        </Button>
+      </div>
+      <p className="mt-1.5 text-[11px] text-muted-foreground">
+        A blank comment keeps any earlier comment.
+      </p>
+      {error ? (
+        <p className="mt-2 text-[11px] text-destructive">{error}</p>
+      ) : selected ? (
+        <p className="mt-2 text-[11px] text-muted-foreground">
+          Feedback saved. Choose again to replace it.
+        </p>
+      ) : null}
     </div>
   )
 }
