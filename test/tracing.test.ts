@@ -2,6 +2,7 @@ import { z } from "zod"
 import { extractionPrompt } from "../worker/langfuse/extraction-prompt"
 import { bundledPrompt } from "../worker/langfuse/fallbacks"
 import { createOpenRouterExtractionProvider } from "../worker/providers/openrouter-extraction"
+import { createOpenRouterRerankProvider } from "../worker/providers/openrouter-rerank"
 import { env } from "cloudflare:workers"
 import {
   createTraceId,
@@ -18,7 +19,7 @@ import {
   SimpleSpanProcessor,
 } from "@opentelemetry/sdk-trace-base"
 import type { Span } from "@opentelemetry/sdk-trace-base"
-import { generateText, registerTelemetry } from "ai"
+import { generateText } from "ai"
 import { MockLanguageModelV4 } from "ai/test"
 import { afterAll, beforeEach, describe, expect, it } from "vitest"
 
@@ -66,8 +67,6 @@ const provider = new BasicTracerProvider({
 
 context.setGlobalContextManager(new AsyncLocalStorageContextManager())
 trace.setGlobalTracerProvider(provider)
-registerTelemetry(new LangfuseVercelAiSdkIntegration())
-
 afterAll(async () => {
   await provider.shutdown()
 })
@@ -172,6 +171,154 @@ it("links the fetched extraction version on the actual provider generation", asy
         span.attributes["langfuse.observation.prompt.name"] === "rfq/extract"
     )
   expect(generation?.attributes["langfuse.observation.prompt.version"]).toBe(41)
+})
+
+async function traceExtractionCost(reportedCostUsd: number | null) {
+  const prompt = extractionPrompt(bundledPrompt("rfq/extract"))
+  const usage =
+    reportedCostUsd === null
+      ? { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 }
+      : {
+          prompt_tokens: 3,
+          completion_tokens: 2,
+          total_tokens: 5,
+          cost: reportedCostUsd,
+        }
+
+  const provider = createOpenRouterExtractionProvider(
+    readConfig(envWith({ OPENROUTER_API_KEY: "offline-test" })),
+    () =>
+      Promise.resolve(
+        Response.json({
+          id: "generation-cost-probe",
+          model: prompt.config.model,
+          choices: [
+            {
+              index: 0,
+              message: { role: "assistant", content: "{}" },
+              finish_reason: "stop",
+            },
+          ],
+          usage,
+        })
+      )
+  )
+
+  await traceRunStep(env, RUN, { name: "structure-rfq" }, async () => {
+    await provider.extract({
+      runId: RUN.runId,
+      prompt,
+      documents: [
+        {
+          label: "email",
+          kind: "email_body",
+          pageNumber: 1,
+          markdown: "Please quote belts",
+        },
+      ],
+      schemaName: "rfq_extraction",
+      schemaDescription: "RFQ facts",
+    })
+    return { state: "complete" }
+  })
+
+  return exporter
+    .getFinishedSpans()
+    .find(
+      (span) =>
+        span.attributes["gen_ai.response.id"] === "generation-cost-probe"
+    )
+}
+
+it("attaches OpenRouter's extraction cost to the actual AI SDK generation", async () => {
+  const generation = await traceExtractionCost(0.000123456789)
+
+  expect(generation?.attributes["langfuse.observation.cost_details"]).toBe(
+    JSON.stringify({ total: 0.000123456789 })
+  )
+})
+
+it("leaves extraction cost absent when OpenRouter reports none", async () => {
+  const generation = await traceExtractionCost(null)
+
+  expect(generation?.attributes).not.toHaveProperty(
+    "langfuse.observation.cost_details"
+  )
+})
+
+it("preserves a zero OpenRouter rerank cost on the actual generation", async () => {
+  const provider = createOpenRouterRerankProvider(
+    readConfig(envWith({ OPENROUTER_API_KEY: "offline-test" })),
+    () =>
+      Promise.resolve(
+        Response.json({
+          id: "rerank-cost-probe",
+          model: "openai/gpt-5.6-luna",
+          choices: [
+            {
+              index: 0,
+              message: { role: "assistant", content: '{"ok":true}' },
+              finish_reason: "stop",
+            },
+          ],
+          usage: {
+            prompt_tokens: 4,
+            completion_tokens: 2,
+            total_tokens: 6,
+            cost: 0,
+          },
+        })
+      )
+  )
+
+  await traceRunStep(env, RUN, { name: "match-products" }, async () => {
+    await provider.rerank({
+      runId: RUN.runId,
+      instruction: "Rank the candidate.",
+      reference: "NX-FLT-1120",
+      description: "Filter cartridge",
+      candidates: [],
+      schema: z.object({ ok: z.boolean() }),
+      schemaName: "rerank_probe",
+      schemaDescription: "A telemetry probe",
+    })
+    return { state: "complete" }
+  })
+
+  const generation = exporter
+    .getFinishedSpans()
+    .find(
+      (span) => span.attributes["gen_ai.response.id"] === "rerank-cost-probe"
+    )
+  expect(generation?.attributes["langfuse.observation.cost_details"]).toBe(
+    JSON.stringify({ total: 0 })
+  )
+})
+
+it("records OCR pages without attaching application cost", async () => {
+  await traceRunStep(env, RUN, { name: "read-documents" }, () =>
+    startActiveObservation(
+      "read-document",
+      (generation) => {
+        generation.update({
+          model: "mistral-ocr-latest",
+          usageDetails: { pages: 2 },
+        })
+        return Promise.resolve({ state: "complete" })
+      },
+      { asType: "generation" }
+    )
+  )
+
+  const generation = exporter
+    .getFinishedSpans()
+    .find((span) => span.name === "read-document")
+  expect(generation?.attributes["langfuse.observation.usage_details"]).toBe(
+    JSON.stringify({ pages: 2 })
+  )
+  expect(generation?.attributes).not.toHaveProperty(
+    "langfuse.observation.cost_details"
+  )
 })
 
 describe("tracing configuration", () => {

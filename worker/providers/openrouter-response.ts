@@ -33,7 +33,11 @@ const OPENROUTER_USAGE_SCHEMA = z.object({
  */
 const OPENROUTER_METADATA_SCHEMA = z.object({
   openrouter: z
-    .object({ usage: z.object({ cost: z.number().nullish() }).nullish() })
+    .object({
+      usage: z
+        .object({ cost: z.number().nonnegative().finite().nullish() })
+        .nullish(),
+    })
     .nullish(),
 })
 

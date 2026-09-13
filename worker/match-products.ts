@@ -46,7 +46,6 @@ import {
   type MatchHeuristics,
 } from "./product-matching"
 import {
-  estimateRerankCostUsd,
   renderRerankModelInput,
   RerankProviderError,
   selectRerankProvider,
@@ -142,6 +141,7 @@ const MATCH_LINE_SCHEMA = z.object({
   originalOutput: z.string().nullable(),
   latencyMs: z.number().nullable().catch(null),
   usage: RERANK_USAGE_SCHEMA.nullable().catch(null),
+  reportedCostUsd: z.number().nonnegative().finite().nullable().catch(null),
 })
 
 /**
@@ -178,8 +178,10 @@ export const MATCHES_EVIDENCE_SCHEMA = z.object({
       modelCalls: z.number(),
       providerLatencyMs: z.number(),
       usage: RERANK_USAGE_SCHEMA.nullable(),
-      /** `null` when no model was called; never a silently invented zero. */
+      /** Legacy compatibility only. New evidence never estimates model cost. */
       estimatedCostUsd: z.number().nullable(),
+      /** Exact sum reported by OpenRouter, or `null` if any call omitted it. */
+      reportedCostUsd: z.number().nonnegative().finite().nullable().catch(null),
       elapsedMs: z.number(),
     })
     .nullable()
@@ -246,6 +248,7 @@ type LineEvidenceFacts = Pick<
   | "originalOutput"
   | "latencyMs"
   | "usage"
+  | "reportedCostUsd"
 >
 
 export async function matchProducts(
@@ -382,7 +385,7 @@ async function match(
         model: provider.model,
         heuristics: describeHeuristics(heuristics),
         lines: evidence,
-        totals: totalsOf(evidence, env, Date.now() - startedAt),
+        totals: totalsOf(evidence, Date.now() - startedAt),
       } satisfies MatchesEvidence)
 
       await step.fail(message)
@@ -404,7 +407,7 @@ async function match(
     model: provider.model,
     heuristics: describeHeuristics(heuristics),
     lines: evidence,
-    totals: totalsOf(evidence, env, elapsedMs),
+    totals: totalsOf(evidence, elapsedMs),
   } satisfies MatchesEvidence)
 
   await step.complete(
@@ -468,6 +471,7 @@ async function matchLine(
     originalOutput: null,
     latencyMs: null,
     usage: null,
+    reportedCostUsd: null,
   }
 
   if (!leading) {
@@ -577,6 +581,7 @@ async function matchLine(
     originalOutput: result.text.slice(0, MAX_STORED_OUTPUT_CHARS),
     latencyMs: result.latencyMs,
     usage: result.usage,
+    reportedCostUsd: result.reportedCostUsd,
   }
 
   const parsed = parseModelOutput(result.text)
@@ -699,7 +704,7 @@ function describeHeuristics(heuristics: MatchHeuristics) {
   }
 }
 
-function totalsOf(lines: LineEvidence[], env: Env, elapsedMs: number) {
+function totalsOf(lines: LineEvidence[], elapsedMs: number) {
   const usage = lines.reduce(
     (total, line) => ({
       inputTokens: total.inputTokens + (line.usage?.inputTokens ?? 0),
@@ -725,10 +730,26 @@ function totalsOf(lines: LineEvidence[], env: Env, elapsedMs: number) {
       0
     ),
     usage: reranked > 0 ? usage : null,
-    estimatedCostUsd:
-      reranked > 0 ? estimateRerankCostUsd(readConfig(env), usage) : null,
+    estimatedCostUsd: null,
+    reportedCostUsd: reportedRerankCost(lines, reranked),
     elapsedMs,
   }
+}
+
+function reportedRerankCost(
+  lines: LineEvidence[],
+  reranked: number
+): number | null {
+  if (reranked === 0) return null
+
+  const rerankedLines = lines.filter((line) => line.method === "rerank")
+  if (rerankedLines.some((line) => line.reportedCostUsd === null)) return null
+
+  const total = rerankedLines.reduce(
+    (total, line) => total + (line.reportedCostUsd ?? 0),
+    0
+  )
+  return Number.isFinite(total) ? total : null
 }
 
 /* -------------------------------------------------------------------------- */

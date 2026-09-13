@@ -20,7 +20,6 @@ import { extractionPrompt } from "../worker/langfuse/extraction-prompt"
 import { readConfig } from "../worker/env"
 import { loadCustomerEvidence, loadStructureEvidence } from "../worker/evidence"
 import {
-  estimateExtractionCostUsd,
   ExtractionProviderError,
   selectExtractionProvider,
   type ExtractionRequest,
@@ -310,7 +309,7 @@ describe("structuring a curated request", () => {
     expect(validated.deadline.text).toBe("next week")
   })
 
-  it("exposes the confidence label, heuristic, model, latency, tokens, and cost", async () => {
+  it("exposes model usage without an application cost estimate", async () => {
     const { run } = await createCuratedRun("routine-replenishment")
     await waitForStep(run.viewId, "structure-rfq", ["complete", "error"])
 
@@ -327,7 +326,8 @@ describe("structuring a curated request", () => {
     expect(evidence.usage!.totalTokens).toBe(
       evidence.usage!.inputTokens + evidence.usage!.outputTokens
     )
-    expect(evidence.estimatedCostUsd).toBeGreaterThan(0)
+    expect(evidence.estimatedCostUsd).toBeNull()
+    expect(evidence.reportedCostUsd).toBeNull()
   })
 
   it("shows the validated result before the original model output", async () => {
@@ -881,26 +881,6 @@ describe("selecting the extraction provider", () => {
     await expect(provider.extract(extractionRequest())).rejects.not.toThrow(
       /upstream is on fire/
     )
-  })
-
-  it("reports an unknown cost rather than zero when prices are misconfigured", () => {
-    const usage = { inputTokens: 1000, outputTokens: 500, totalTokens: 1500 }
-
-    expect(estimateExtractionCostUsd(readConfig(env), usage)).toBeGreaterThan(0)
-    expect(
-      estimateExtractionCostUsd(
-        readConfig(envWith({ OPENROUTER_COST_PER_1M_INPUT_TOKENS_USD: "" })),
-        usage
-      )
-    ).toBeNull()
-    expect(
-      estimateExtractionCostUsd(
-        readConfig(
-          envWith({ OPENROUTER_COST_PER_1M_OUTPUT_TOKENS_USD: "free" })
-        ),
-        usage
-      )
-    ).toBeNull()
   })
 })
 

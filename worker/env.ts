@@ -4,7 +4,7 @@
  * `Env` is the Cloudflare binding object: `DB`, `ARTIFACTS`, `RFQ_WORKFLOW`,
  * `ASSETS`, and a set of strings. Everything on it that is a string is parsed
  * here, once, into `AppConfig` — provider names as enums, models as non-empty
- * text, costs and thresholds and windows as numbers, secrets as `string | null`
+ * text, thresholds and windows as numbers, secrets as `string | null`
  * — so that no call site anywhere else reads a raw variable off the binding
  * object and decides for itself what a blank one means.
  *
@@ -18,12 +18,11 @@
  * - thresholds are ratios and review windows are positive.
  *
  * Where a bad value has an honest fallback the schema takes it, because that
- * is the behaviour these variables already had: a malformed price yields `null`
- * (an uncosted call and a free call are different facts), and a nonsense
- * threshold or window yields the documented default. Where a bad value has no
- * honest fallback — an unknown provider, a fake in production — parsing fails,
- * and the Worker and the workflow turn that into one clear line rather than a
- * surprise halfway through a run.
+ * is the behaviour these variables already had: a nonsense threshold or window
+ * yields the documented default. Where a bad value has no honest fallback — an
+ * unknown provider, a fake in production — parsing fails, and the Worker and
+ * the workflow turn that into one clear line rather than a surprise halfway
+ * through a run.
  */
 
 import { z } from "zod"
@@ -58,19 +57,6 @@ function text(fallback: string) {
   return z.string().trim().min(1).default(fallback)
 }
 
-/**
- * A configured price. Blank, absent, negative, or unparseable yields `null`
- * rather than zero: an estimator that prints "$0.0000" for a deployment whose
- * prices were never configured is telling a quiet lie.
- */
-const priceUsd = z
-  .string()
-  .trim()
-  .transform((raw) => Number.parseFloat(raw))
-  .refine((value) => Number.isFinite(value) && value >= 0)
-  .nullable()
-  .catch(null)
-
 /** A demo heuristic between 0 and 1. Nonsense takes the documented default. */
 function ratio(fallback: number) {
   return z
@@ -101,7 +87,6 @@ const VARIABLES_SCHEMA = z.object({
   OCR_PROVIDER: z.enum(["mistral", "contract-fake"]).default("mistral"),
   MISTRAL_OCR_MODEL: text(DEFAULT_MISTRAL_OCR_MODEL),
   MISTRAL_API_KEY: secret,
-  OCR_COST_PER_1000_PAGES_USD: priceUsd,
 
   EXTRACTION_PROVIDER: z
     .enum(["openrouter", "contract-fake"])
@@ -111,8 +96,6 @@ const VARIABLES_SCHEMA = z.object({
     .default("openrouter"),
   OPENROUTER_RERANK_MODEL: text(DEFAULT_OPENROUTER_MODEL),
   OPENROUTER_API_KEY: secret,
-  OPENROUTER_COST_PER_1M_INPUT_TOKENS_USD: priceUsd,
-  OPENROUTER_COST_PER_1M_OUTPUT_TOKENS_USD: priceUsd,
 
   MATCH_WINNER_STRENGTH: ratio(DEFAULT_WINNER_STRENGTH),
   MATCH_WINNER_GAP: ratio(DEFAULT_WINNER_GAP),
@@ -259,16 +242,11 @@ export const APP_CONFIG_SCHEMA = VARIABLES_SCHEMA.superRefine(
   ocrProvider: variables.OCR_PROVIDER,
   mistralOcrModel: variables.MISTRAL_OCR_MODEL,
   mistralApiKey: variables.MISTRAL_API_KEY,
-  ocrCostPer1000PagesUsd: variables.OCR_COST_PER_1000_PAGES_USD,
 
   extractionProvider: variables.EXTRACTION_PROVIDER,
   rerankProvider: variables.RERANK_PROVIDER,
   rerankModel: variables.OPENROUTER_RERANK_MODEL,
   openRouterApiKey: variables.OPENROUTER_API_KEY,
-  openRouterCostPer1MInputTokensUsd:
-    variables.OPENROUTER_COST_PER_1M_INPUT_TOKENS_USD,
-  openRouterCostPer1MOutputTokensUsd:
-    variables.OPENROUTER_COST_PER_1M_OUTPUT_TOKENS_USD,
 
   matchWinnerStrength: variables.MATCH_WINNER_STRENGTH,
   matchWinnerGap: variables.MATCH_WINNER_GAP,

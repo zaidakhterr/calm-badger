@@ -38,7 +38,6 @@
     // APP_ENV is production.
     "OCR_PROVIDER": "mistral",
     "MISTRAL_OCR_MODEL": "mistral-ocr-latest",
-    "OCR_COST_PER_1000_PAGES_USD": "1",
     // "openrouter" is the live extractor. "contract-fake" is the deterministic
     // provider used by tests and fixture evaluation; it refuses to run when
     // APP_ENV is production.
@@ -58,8 +57,6 @@
     // curated sample runs live seven days, custom uploads twenty-four hours.
     "REVIEW_WINDOW_SECONDS_CURATED": "604800",
     "REVIEW_WINDOW_SECONDS_CUSTOM": "86400",
-    "OPENROUTER_COST_PER_1M_INPUT_TOKENS_USD": "1.25",
-    "OPENROUTER_COST_PER_1M_OUTPUT_TOKENS_USD": "10",
     // Cookieless, server-side capture against EU ingestion. "contract-fake" is
     // the deterministic recorder tests read back and, like the other fakes, is
     // refused when APP_ENV is production; "none" disables measurement. With

@@ -183,23 +183,3 @@ export function selectOcrProvider(config: AppConfig): OcrProvider {
     ? createContractFakeOcrProvider(config)
     : createMistralOcrProvider(config)
 }
-
-/**
- * Estimated spend for a document, in USD. The per-page price is a configured
- * variable rather than a constant so that it can be corrected without a code
- * change; the interface labels the result as an estimate.
- *
- * A missing or malformed price yields `null`, not zero, exactly as the token
- * price estimator does. A page that cost nothing and a page whose price was
- * never configured are different facts, and "$0.0000" for the second one would
- * be a quiet lie.
- */
-export function estimateOcrCostUsd(
-  config: AppConfig,
-  pagesProcessed: number
-): number | null {
-  const perThousand = config.ocrCostPer1000PagesUsd
-  if (perThousand === null) return null
-
-  return Math.round(((pagesProcessed * perThousand) / 1000) * 1e6) / 1e6
-}

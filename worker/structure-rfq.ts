@@ -24,7 +24,6 @@ import { readConfig } from "./env"
 import { extractionPrompt } from "./langfuse/extraction-prompt"
 import { selectLangfuseProvider } from "./providers/langfuse"
 import {
-  estimateExtractionCostUsd,
   ExtractionProviderError,
   renderExtractionModelInput,
   selectExtractionProvider,
@@ -144,7 +143,7 @@ export const STRUCTURE_EVIDENCE_SCHEMA = z.object({
     .nullable()
     .catch(null),
   estimatedCostUsd: z.number().nullable().catch(null),
-  reportedCostUsd: z.number().nullable().catch(null),
+  reportedCostUsd: z.number().nonnegative().finite().nullable().catch(null),
 })
 
 export type StructureEvidence = z.infer<typeof STRUCTURE_EVIDENCE_SCHEMA>
@@ -259,7 +258,7 @@ async function structure(
       issues: [],
       usage: null,
       metrics: { latencyMs: 0, elapsedMs: Date.now() - startedAt },
-      // No usage was reported, so no estimate is honest here.
+      // The legacy estimate field is intentionally unpopulated.
       estimatedCostUsd: null,
       reportedCostUsd: null,
     } satisfies StructureEvidence)
@@ -274,7 +273,7 @@ async function structure(
     usage: result.usage,
     modelInput,
     originalOutput: result.text.slice(0, MAX_STORED_OUTPUT_CHARS),
-    estimatedCostUsd: estimateExtractionCostUsd(readConfig(env), result.usage),
+    estimatedCostUsd: null,
     reportedCostUsd: result.reportedCostUsd,
   }
 

@@ -32,7 +32,6 @@ import {
   propagateAttributes,
   startActiveObservation,
 } from "@langfuse/tracing"
-import { LangfuseVercelAiSdkIntegration } from "@langfuse/vercel-ai-sdk"
 import { context, trace } from "@opentelemetry/api"
 import { resourceFromAttributes } from "@opentelemetry/resources"
 import { BasicTracerProvider } from "@opentelemetry/sdk-trace-base"
@@ -44,13 +43,14 @@ import { loadSources } from "../sources"
 
 import { AsyncLocalStorageContextManager } from "./context-manager"
 import { langfuseIdGenerator } from "./ids"
+import { LangfuseOpenRouterIntegration } from "./openrouter-cost-telemetry"
 
 /**
  * The AI SDK reports every model call to the registered integration, which
  * turns it into a Langfuse generation. Registered once per isolate; with no
  * tracer provider installed, the generation is a no-op span.
  */
-registerTelemetry(new LangfuseVercelAiSdkIntegration())
+registerTelemetry(new LangfuseOpenRouterIntegration())
 
 /** The name every step of a run traces under. Stable, so it can be filtered. */
 export const RUN_TRACE_NAME = "process-rfq"

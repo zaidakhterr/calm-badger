@@ -118,7 +118,7 @@ The run has nine possible steps:
 
 Each completed step can show its validated result and decision evidence.
 Technical details are optional. They include model output, latency, token use,
-and estimated cost.
+and provider-reported cost.
 
 ## Retrieval and product matching
 
@@ -288,7 +288,8 @@ Unlike analytics, tracing sends business content. Langfuse receives:
   input holds the document text after reading, and the output holds the
   customer name and contact details the model extracted.
 - the name, media type, and size of every document, but not the document bytes
-- the page count and cost of every document read
+- the page count of every document read. Langfuse calculates its cost from the
+  configured model price.
 - the outcome and message of every step
 
 Custom runs are tagged `custom`, so their traces can be filtered or deleted to
@@ -356,7 +357,8 @@ Run the same evaluation with live providers:
 pnpm eval:live
 ```
 
-The live command reports latency, token use, estimated cost, and differences.
+The live command reports latency, token use, provider-reported cost, and
+differences.
 It can have a provider cost. CI does not run it.
 
 ## Cloudflare resources

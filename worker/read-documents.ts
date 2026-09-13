@@ -18,7 +18,6 @@ import { z } from "zod"
 
 import { readConfig } from "./env"
 import {
-  estimateOcrCostUsd,
   OcrPageLimitError,
   OcrProviderError,
   selectOcrProvider,
@@ -46,7 +45,7 @@ export const DOCUMENTS_EVIDENCE_KIND = "documents"
  * what it answered — default rather than fail, so evidence written by an
  * earlier build still renders instead of blanking the whole step. An absent
  * measurement reads as `null`, never as zero: "not recorded" and "nothing" are
- * different facts, exactly as they are for the estimated cost.
+ * different facts.
  */
 const SOURCE_EVIDENCE_SCHEMA = z.object({
   sourceId: z.string(),
@@ -59,7 +58,7 @@ const SOURCE_EVIDENCE_SCHEMA = z.object({
   pageCount: z.number(),
   pagesProcessed: z.number(),
   latencyMs: z.number().nullable().catch(null),
-  /** `null` when the configured page price is missing or malformed. */
+  /** Legacy compatibility only. New evidence never estimates OCR cost. */
   estimatedCostUsd: z.number().nullable().catch(null),
   /** Provider evidence as the provider seam sanitized it, or nothing. */
   sanitizedResponse: z.unknown().default(null),
@@ -71,7 +70,7 @@ const DOCUMENTS_TOTALS_SCHEMA = z.object({
   pageCount: z.number(),
   pagesProcessed: z.number(),
   providerLatencyMs: z.number(),
-  /** `null` when one source was uncosted; never a silently understated total. */
+  /** Legacy compatibility only. New evidence never estimates OCR cost. */
   estimatedCostUsd: z.number().nullable(),
   elapsedMs: z.number(),
 })
@@ -308,7 +307,7 @@ async function readSource(
         pageCount: 1,
         pagesProcessed: 0,
         latencyMs: 0,
-        estimatedCostUsd: 0,
+        estimatedCostUsd: null,
         sanitizedResponse: null,
       },
     }
@@ -347,11 +346,6 @@ async function readSource(
         runPageLimit: MAX_OCR_PAGES_PER_RUN,
       })
 
-      const costUsd = estimateOcrCostUsd(
-        readConfig(env),
-        read.usage.pagesProcessed
-      )
-
       generation.update({
         output: {
           pageCount: read.pages.length,
@@ -360,11 +354,6 @@ async function readSource(
         },
         usageDetails: { pages: read.usage.pagesProcessed },
       })
-
-      // An unconfigured price is no cost, not a zero cost.
-      if (costUsd !== null) {
-        generation.update({ costDetails: { pages: costUsd, total: costUsd } })
-      }
 
       return read
     },
@@ -390,10 +379,7 @@ async function readSource(
       pageCount: document.pages.length,
       pagesProcessed: document.usage.pagesProcessed,
       latencyMs: document.latencyMs,
-      estimatedCostUsd: estimateOcrCostUsd(
-        readConfig(env),
-        document.usage.pagesProcessed
-      ),
+      estimatedCostUsd: null,
       sanitizedResponse: document.sanitizedResponse,
     },
   }
@@ -411,16 +397,8 @@ function totalsOf(sources: SourceEvidence[], elapsedMs: number) {
       (total, source) => total + (source.latencyMs ?? 0),
       0
     ),
-    // One uncosted source makes the whole total unknown rather than
-    // understated, so the interface can say so instead of showing $0.0000.
-    estimatedCostUsd: sources.some((source) => source.estimatedCostUsd === null)
-      ? null
-      : Math.round(
-          sources.reduce(
-            (total, source) => total + (source.estimatedCostUsd ?? 0),
-            0
-          ) * 1e6
-        ) / 1e6,
+    // OCR price resolution now belongs to Langfuse's model table.
+    estimatedCostUsd: null,
     elapsedMs,
   }
 }

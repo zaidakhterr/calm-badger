@@ -25,7 +25,6 @@ import type { z } from "zod"
 import type { AppConfig } from "../env"
 
 import { createContractFakeRerankProvider } from "./contract-fake-rerank"
-import { estimateOpenRouterCostUsd } from "./openrouter-cost"
 import { createOpenRouterRerankProvider } from "./openrouter-rerank"
 
 /** One shortlisted product, as the model is allowed to see it. */
@@ -149,12 +148,4 @@ export function selectRerankProvider(config: AppConfig): RerankProvider {
   return config.rerankProvider === "contract-fake"
     ? createContractFakeRerankProvider(config)
     : createOpenRouterRerankProvider(config)
-}
-
-/** Estimated spend for one reranking call, in USD. */
-export function estimateRerankCostUsd(
-  config: AppConfig,
-  usage: RerankUsage
-): number | null {
-  return estimateOpenRouterCostUsd(config, usage)
 }

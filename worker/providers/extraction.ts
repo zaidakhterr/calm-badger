@@ -20,7 +20,6 @@ import type { ExtractionPrompt } from "../langfuse/extraction-prompt"
 import type { AppConfig } from "../env"
 
 import { createContractFakeExtractionProvider } from "./contract-fake-extraction"
-import { estimateOpenRouterCostUsd } from "./openrouter-cost"
 import { createOpenRouterExtractionProvider } from "./openrouter-extraction"
 
 /** One page of already-read document text handed to the model. */
@@ -121,12 +120,4 @@ export function selectExtractionProvider(
   return config.extractionProvider === "contract-fake"
     ? createContractFakeExtractionProvider()
     : createOpenRouterExtractionProvider(config)
-}
-
-/** Estimated spend for one extraction call. Shared with reranking. */
-export function estimateExtractionCostUsd(
-  config: AppConfig,
-  usage: ExtractionUsage
-): number | null {
-  return estimateOpenRouterCostUsd(config, usage)
 }
