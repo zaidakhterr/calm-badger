@@ -40,7 +40,16 @@ export function createContractFakeLangfuseProvider(): LangfuseProvider {
       write(score) {
         const previous = captured.findIndex((entry) => entry.id === score.id)
         if (previous === -1) captured.push(structuredClone(score))
-        else captured[previous] = structuredClone(score)
+        else {
+          const replacement = structuredClone(score)
+          if (
+            replacement.comment === undefined &&
+            captured[previous].comment !== undefined
+          ) {
+            replacement.comment = captured[previous].comment
+          }
+          captured[previous] = replacement
+        }
         return Promise.resolve()
       },
     },

@@ -1193,6 +1193,34 @@ export async function settleReview(
   return body.review
 }
 
+export type OwnerFeedbackTarget = number | "quote"
+export type OwnerFeedbackValue = "up" | "down"
+
+/** Owner-only: records one thumbs signal on a matched line or the quote. */
+export async function submitOwnerFeedback(
+  viewId: string,
+  target: OwnerFeedbackTarget,
+  value: OwnerFeedbackValue,
+  comment?: string
+): Promise<void> {
+  const response = await fetch(
+    `/api/runs/${encodeURIComponent(viewId)}/feedback`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json", ...ownerHeaders(viewId) },
+      body: JSON.stringify({ target, value, comment }),
+    }
+  )
+
+  if (!response.ok) throw new Error(await readError(response))
+
+  await readBody(
+    response,
+    z.object({ status: z.literal("recorded") }),
+    "owner feedback"
+  )
+}
+
 const CATALOG_SEARCH_RESULT_SCHEMA = z.object({
   sku: z.string(),
   name: z.string(),
