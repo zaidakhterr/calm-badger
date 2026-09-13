@@ -1,4 +1,6 @@
 import type { LangfuseProvider, LangfuseScore } from "../langfuse/contract"
+import { z } from "zod"
+import { compatibleExtractionPrompt } from "../langfuse/extraction-prompt"
 import { bundledPrompt } from "../langfuse/fallbacks"
 
 const captured: LangfuseScore[] = []
@@ -6,7 +8,31 @@ const captured: LangfuseScore[] = []
 export function createContractFakeLangfuseProvider(): LangfuseProvider {
   return {
     name: "contract-fake",
-    prompts: { get: (name) => Promise.resolve(bundledPrompt(name)) },
+    prompts: {
+      get(name, sourceLabels = []) {
+        const prompt = bundledPrompt(name)
+        if (
+          name === "rfq/extract" &&
+          sourceLabels.some((label) =>
+            label.includes("trigger-prompt-incompatible")
+          )
+        ) {
+          const schema = z
+            .object({ required: z.array(z.string()) })
+            .passthrough()
+            .parse(prompt.config.response_format)
+          schema.required = schema.required.filter(
+            (field) => field !== "customer"
+          )
+          prompt.config.response_format = z.json().parse(schema)
+          prompt.version = 999
+          prompt.isFallback = false
+        }
+        return Promise.resolve(
+          name === "rfq/extract" ? compatibleExtractionPrompt(prompt) : prompt
+        )
+      },
+    },
     scores: {
       write(score) {
         const previous = captured.findIndex((entry) => entry.id === score.id)

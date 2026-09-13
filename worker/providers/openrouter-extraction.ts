@@ -9,8 +9,8 @@
  * turns on OpenRouter usage accounting, which reports the credits spent under
  * `providerMetadata.openrouter.usage`.
  *
- * The AI SDK parses the response against the schema itself. That parse is not
- * treated as authoritative here: the model's raw text is returned either way,
+ * OpenRouter receives the original JSON Schema without a conversion round trip.
+ * The AI SDK parses JSON, but the workflow owns validation: raw text is returned,
  * and the workflow step performs the single repair attempt, the Zod check, and
  * the business checks. When the SDK cannot parse the response at all it raises
  * `NoObjectGeneratedError`, which still carries the generated text, so that
@@ -34,7 +34,13 @@
  */
 
 import { createOpenRouter } from "@openrouter/ai-sdk-provider"
-import { APICallError, generateText, NoObjectGeneratedError, Output } from "ai"
+import {
+  APICallError,
+  generateText,
+  jsonSchema,
+  NoObjectGeneratedError,
+  Output,
+} from "ai"
 
 import type { AppConfig } from "../env"
 
@@ -53,7 +59,6 @@ import {
 
 const PROVIDER = "openrouter"
 const REQUEST_TIMEOUT_MS = 60_000
-const MAX_OUTPUT_TOKENS = 4_000
 
 const UNRECOGNISED_RESPONSE =
   "The extraction model returned a response in an unrecognised shape."
@@ -62,13 +67,11 @@ export function createOpenRouterExtractionProvider(
   config: AppConfig,
   requestFetch: typeof fetch = fetch
 ): ExtractionProvider {
-  const model = config.extractionModel
-
   return {
     name: PROVIDER,
-    model,
 
     async extract(request: ExtractionRequest): Promise<ExtractionResult> {
+      const { model, temperature, max_tokens } = request.prompt.config
       const apiKey = config.openRouterApiKey
 
       if (!apiKey) {
@@ -92,17 +95,27 @@ export function createOpenRouterExtractionProvider(
           system: modelInput.system,
           prompt: modelInput.user,
           output: Output.object({
-            schema: request.schema,
+            schema: jsonSchema(request.prompt.config.response_format),
             name: request.schemaName,
             description: request.schemaDescription,
           }),
-          temperature: 0,
-          maxOutputTokens: MAX_OUTPUT_TOKENS,
+          temperature,
+          maxOutputTokens: max_tokens,
           maxRetries: 0,
           abortSignal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
           // Names the generation in the trace. Which trace, if any, is the
           // caller's context; this client never learns it.
-          telemetry: { functionId: "extract-rfq" },
+          runtimeContext: {
+            langfusePrompt: {
+              name: request.prompt.prompt.name,
+              version: request.prompt.prompt.version,
+              isFallback: request.prompt.prompt.isFallback,
+            },
+          },
+          telemetry: {
+            functionId: "extract-rfq",
+            includeRuntimeContext: { langfusePrompt: true },
+          },
         })
 
         // The one boundary this client reads the provider across. A result

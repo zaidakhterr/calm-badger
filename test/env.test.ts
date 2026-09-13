@@ -25,7 +25,6 @@ const EXAMPLE_VARIABLES = {
   MISTRAL_OCR_MODEL: "mistral-ocr-latest",
   OCR_COST_PER_1000_PAGES_USD: "1",
   EXTRACTION_PROVIDER: "openrouter",
-  OPENROUTER_EXTRACTION_MODEL: "openai/gpt-5.6-luna",
   RERANK_PROVIDER: "openrouter",
   OPENROUTER_RERANK_MODEL: "openai/gpt-5.6-luna",
   MATCH_WINNER_STRENGTH: "0.55",
@@ -60,7 +59,6 @@ describe("the configuration schema", () => {
     expect(config.extractionProvider).toBe("openrouter")
     expect(config.rerankProvider).toBe("openrouter")
     expect(config.mistralOcrModel).toBe("mistral-ocr-latest")
-    expect(config.extractionModel).toBe("openai/gpt-5.6-luna")
 
     // Blank secrets are not configured secrets, and say so in one way.
     expect(config.mistralApiKey).toBeNull()

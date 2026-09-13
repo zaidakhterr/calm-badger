@@ -21,6 +21,8 @@
 import { z } from "zod"
 
 import { readConfig } from "./env"
+import { extractionPrompt } from "./langfuse/extraction-prompt"
+import { selectLangfuseProvider } from "./providers/langfuse"
 import {
   estimateExtractionCostUsd,
   ExtractionProviderError,
@@ -35,11 +37,9 @@ import {
   parseModelOutput,
   RFQ_CUSTOMER_SCHEMA,
   RFQ_DEADLINE_SCHEMA,
-  RFQ_EXTRACTION_INSTRUCTION,
   RFQ_SCHEMA_DESCRIPTION,
   RFQ_SCHEMA_NAME,
   RFQ_SOURCE_SCHEMA,
-  rfqExtractionSchema,
   scoreExtraction,
   SOURCE_REFERENCES_SCHEMA,
   validateAgainstSchema,
@@ -209,12 +209,18 @@ async function structure(
   const startedAt = Date.now()
   await recorder.begin("Extracting the customer, deadline, and lines…")
 
-  const provider = selectExtractionProvider(readConfig(env))
+  const config = readConfig(env)
+  const prompt = extractionPrompt(
+    await selectLangfuseProvider(config).prompts.get(
+      "rfq/extract",
+      documents.map((document) => document.label)
+    )
+  )
+  const provider = selectExtractionProvider(config)
   const extractionRequest = {
     runId,
-    instruction: RFQ_EXTRACTION_INSTRUCTION,
+    prompt,
     documents,
-    schema: rfqExtractionSchema,
     schemaName: RFQ_SCHEMA_NAME,
     schemaDescription: RFQ_SCHEMA_DESCRIPTION,
   }
@@ -242,7 +248,7 @@ async function structure(
 
     await recorder.attachEvidence(STRUCTURE_EVIDENCE_KIND, {
       provider: provider.name,
-      model: provider.model,
+      model: prompt.config.model,
       state: "error",
       message,
       repaired: false,
@@ -285,7 +291,7 @@ async function structure(
     })
   }
 
-  const checked = validateAgainstSchema(parsed.json)
+  const checked = validateAgainstSchema(parsed.json, prompt.schema)
 
   if (checked.state === "invalid") {
     return await stopWithValidationFailure(runId, recorder, {

@@ -29,7 +29,8 @@
     "test": "vitest run",
     "typecheck": "wrangler types --check --env-file .dev.vars.example && tsc -b --pretty false",
     "wizard:check": "bash -n scripts/setup-infrastructure.sh test/cloudflare-resume.sh test/fixtures/wizard-command-stub.sh && scripts/setup-infrastructure.sh --check && bash test/cloudflare-resume.sh && node --test test/wrangler-config-updater.node.mjs && (! command -v shellcheck >/dev/null 2>&1 || shellcheck scripts/setup-infrastructure.sh test/cloudflare-resume.sh test/fixtures/wizard-command-stub.sh)",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "langfuse:sync": "node scripts/langfuse-sync.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",

@@ -106,7 +106,6 @@ const VARIABLES_SCHEMA = z.object({
   EXTRACTION_PROVIDER: z
     .enum(["openrouter", "contract-fake"])
     .default("openrouter"),
-  OPENROUTER_EXTRACTION_MODEL: text(DEFAULT_OPENROUTER_MODEL),
   RERANK_PROVIDER: z
     .enum(["openrouter", "contract-fake"])
     .default("openrouter"),
@@ -263,7 +262,6 @@ export const APP_CONFIG_SCHEMA = VARIABLES_SCHEMA.superRefine(
   ocrCostPer1000PagesUsd: variables.OCR_COST_PER_1000_PAGES_USD,
 
   extractionProvider: variables.EXTRACTION_PROVIDER,
-  extractionModel: variables.OPENROUTER_EXTRACTION_MODEL,
   rerankProvider: variables.RERANK_PROVIDER,
   rerankModel: variables.OPENROUTER_RERANK_MODEL,
   openRouterApiKey: variables.OPENROUTER_API_KEY,

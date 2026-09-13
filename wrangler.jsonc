@@ -43,7 +43,6 @@
     // provider used by tests and fixture evaluation; it refuses to run when
     // APP_ENV is production.
     "EXTRACTION_PROVIDER": "openrouter",
-    "OPENROUTER_EXTRACTION_MODEL": "openai/gpt-5.6-luna",
     // "openrouter" is the live reranker. "contract-fake" is the deterministic
     // provider used by tests and fixture evaluation; it refuses to run when
     // APP_ENV is production.

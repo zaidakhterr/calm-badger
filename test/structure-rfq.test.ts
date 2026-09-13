@@ -15,6 +15,8 @@ import { describe, expect, it, vi } from "vitest"
 
 import { z } from "zod"
 
+import { bundledPrompt } from "../worker/langfuse/fallbacks"
+import { extractionPrompt } from "../worker/langfuse/extraction-prompt"
 import { readConfig } from "../worker/env"
 import { loadCustomerEvidence, loadStructureEvidence } from "../worker/evidence"
 import {
@@ -30,6 +32,7 @@ import {
   parseModelOutput,
   repairJson,
   RFQ_EXTRACTION_INSTRUCTION,
+  RFQ_EXTRACTION_CONTRACT,
   validateAgainstSchema,
 } from "../worker/rfq-extraction"
 import { SCENARIOS } from "../worker/scenarios"
@@ -193,6 +196,66 @@ async function runIdOf(viewId: string): Promise<string> {
 /* -------------------------------------------------------------------------- */
 
 describe("structuring a curated request", () => {
+  it("completes on the fallback when the source label triggers an incompatible prompt", async () => {
+    const warn = vi.spyOn(console, "warn")
+    try {
+      const form = new FormData()
+      form.set("emailBody", "Please quote 4 NX-FLT-1120 filters.")
+      form.append(
+        "files",
+        new File(
+          ["%PDF-1.4\n(Please quote 4 NX-FLT-1120 filters.) Tj"],
+          "trigger-prompt-incompatible.pdf",
+          { type: "application/pdf" }
+        )
+      )
+      const response = await exports.default.fetch(`${base}/api/runs`, {
+        method: "POST",
+        body: form,
+      })
+      expect(response.status).toBe(201)
+      const { run } = await response.json<{ run: Run }>()
+      await waitForStep(run.viewId, "structure-rfq", ["complete"])
+      expect((await readStructure(run.viewId)).state).toBe("complete")
+      expect((await readStructure(run.viewId)).modelInput?.system).toBe(
+        RFQ_EXTRACTION_INSTRUCTION
+      )
+      expect(warn).toHaveBeenCalledWith(
+        JSON.stringify({
+          event: "prompt_incompatible",
+          name: "rfq/extract",
+          version: 999,
+        })
+      )
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it("validates the promoted schema before the app contract", async () => {
+    const { run } = await createCuratedRun("routine-replenishment")
+    await waitForStep(run.viewId, "structure-rfq", ["complete"])
+    const evidence = await readStructure(run.viewId)
+    const prompt = bundledPrompt("rfq/extract")
+    const config = z
+      .record(z.string(), z.json())
+      .parse(prompt.config.response_format)
+    const properties = z.record(z.string(), z.json()).parse(config.properties)
+    const lines = z.record(z.string(), z.json()).parse(properties.lineItems)
+    lines.maxItems = 1
+    properties.lineItems = lines
+    config.properties = properties
+    prompt.config.response_format = config
+    const selected = extractionPrompt(prompt)
+    expect(
+      validateAgainstSchema(evidence.originalOutput!, selected.schema).state
+    ).toBe("invalid")
+    expect(
+      validateAgainstSchema(evidence.originalOutput!, RFQ_EXTRACTION_CONTRACT)
+        .state
+    ).toBe("valid")
+  })
+
   it("validates every line of a request that quotes article numbers", async () => {
     const { run } = await createCuratedRun("routine-replenishment")
     const step = await waitForStep(run.viewId, "structure-rfq", [
@@ -695,7 +758,17 @@ describe("validation in isolation", () => {
 function extractionRequest(): ExtractionRequest {
   return {
     runId: "run-id",
-    instruction: "Answer with the probe object.",
+    prompt: {
+      ...extractionPrompt(bundledPrompt("rfq/extract")),
+      config: {
+        model: "openrouter/probe",
+        temperature: 0,
+        max_tokens: 4000,
+        response_format: z
+          .record(z.string(), z.json())
+          .parse(z.toJSONSchema(z.object({ ok: z.boolean() }))),
+      },
+    },
     documents: [
       {
         label: "Email body",
@@ -704,7 +777,6 @@ function extractionRequest(): ExtractionRequest {
         markdown: "Please quote 4 belts",
       },
     ],
-    schema: z.object({ ok: z.boolean() }),
     schemaName: "probe",
     schemaDescription: "A probe answer, so no run data reaches the stub.",
   }

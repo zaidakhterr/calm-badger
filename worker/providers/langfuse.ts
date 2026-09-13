@@ -5,6 +5,7 @@ import {
   LANGFUSE_PROMPT_SCHEMA,
   type LangfuseProvider,
 } from "../langfuse/contract"
+import { compatibleExtractionPrompt } from "../langfuse/extraction-prompt"
 import { bundledPrompt } from "../langfuse/fallbacks"
 
 import { createContractFakeLangfuseProvider } from "./contract-fake-langfuse"
@@ -49,7 +50,11 @@ export function selectLangfuseProvider(config: AppConfig): LangfuseProvider {
             fetchTimeoutMs: 3000,
           })
           const parsed = LANGFUSE_PROMPT_SCHEMA.safeParse(prompt)
-          if (parsed.success && parsed.data.name === name) return parsed.data
+          if (parsed.success && parsed.data.name === name) {
+            return name === "rfq/extract"
+              ? compatibleExtractionPrompt(parsed.data)
+              : parsed.data
+          }
         } catch {
           // Never log an SDK error: it can carry request or response content.
         }

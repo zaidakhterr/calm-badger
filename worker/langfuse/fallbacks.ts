@@ -12,7 +12,7 @@ import {
   type PromptName,
 } from "./contract"
 
-/** Bundled copies reference the existing instructions; model calls still use those directly. */
+/** Bundled copies keep cold isolates available when managed prompts cannot be fetched. */
 const fallbacks = {
   "rfq/extract": LANGFUSE_PROMPT_SCHEMA.parse({
     name: "rfq/extract",

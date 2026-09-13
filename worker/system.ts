@@ -147,8 +147,8 @@ export async function loadSystemDetails(env: Env): Promise<SystemDetails> {
       providerEntry(
         "RFQ structuring",
         config.extractionProvider,
-        config.extractionModel,
-        "Extracts data with a fixed schema. Repairs JSON once. Then it validates the result and checks the catalogue."
+        null,
+        "Uses the model and schema from the extraction prompt in Langfuse. Repairs JSON once. Then it checks the catalogue."
       ),
       providerEntry(
         "Candidate reranking",

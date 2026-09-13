@@ -23,7 +23,6 @@
  * repair, schema, and business-validation contracts are exercised.
  */
 
-import type { AppConfig } from "../env"
 import type { RfqExtraction } from "../rfq-extraction"
 
 import {
@@ -74,16 +73,12 @@ type DraftLine = {
   sourcePage: number
 }
 
-export function createContractFakeExtractionProvider(
-  config: AppConfig
-): ExtractionProvider {
-  const model = `${config.extractionModel}-contract-fake`
-
+export function createContractFakeExtractionProvider(): ExtractionProvider {
   return {
     name: PROVIDER,
-    model,
 
     extract(request: ExtractionRequest): Promise<ExtractionResult> {
+      const model = `${request.prompt.config.model}-contract-fake`
       const startedAt = Date.now()
       const corpus = request.documents
         .map((document) => document.markdown)

@@ -34,7 +34,9 @@ export type LangfuseScore = {
 
 export interface LangfuseProvider {
   readonly name: "langfuse" | "contract-fake" | "none"
-  prompts: { get(name: PromptName): Promise<LangfusePrompt> }
+  prompts: {
+    get(name: PromptName, sourceLabels?: string[]): Promise<LangfusePrompt>
+  }
   /** Resolves after ingestion succeeds; callers must await it or use waitUntil. */
   scores: { write(score: LangfuseScore): Promise<void> }
 }

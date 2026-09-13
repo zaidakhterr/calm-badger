@@ -1,3 +1,7 @@
+import { z } from "zod"
+import { extractionPrompt } from "../worker/langfuse/extraction-prompt"
+import { bundledPrompt } from "../worker/langfuse/fallbacks"
+import { createOpenRouterExtractionProvider } from "../worker/providers/openrouter-extraction"
 import { env } from "cloudflare:workers"
 import { createTraceId, startObservation } from "@langfuse/tracing"
 import { LangfuseVercelAiSdkIntegration } from "@langfuse/vercel-ai-sdk"
@@ -10,7 +14,7 @@ import {
   SimpleSpanProcessor,
 } from "@opentelemetry/sdk-trace-base"
 import type { Span } from "@opentelemetry/sdk-trace-base"
-import { generateText } from "ai"
+import { generateText, registerTelemetry } from "ai"
 import { MockLanguageModelV4 } from "ai/test"
 import { afterAll, beforeEach, describe, expect, it } from "vitest"
 
@@ -51,6 +55,7 @@ const provider = new BasicTracerProvider({
 
 context.setGlobalContextManager(new AsyncLocalStorageContextManager())
 trace.setGlobalTracerProvider(provider)
+registerTelemetry(new LangfuseVercelAiSdkIntegration())
 
 afterAll(async () => {
   await provider.shutdown()
@@ -91,6 +96,72 @@ function mockModel() {
     },
   })
 }
+
+it("links the fetched extraction version on the actual provider generation", async () => {
+  const prompt = bundledPrompt("rfq/extract")
+  prompt.version = 41
+  prompt.isFallback = false
+  const selected = extractionPrompt(prompt)
+  const requests: z.infer<ReturnType<typeof z.json>>[] = []
+  const client = createOpenRouterExtractionProvider(
+    readConfig(envWith({ OPENROUTER_API_KEY: "offline-test" })),
+    (_url, init) => {
+      requests.push(z.json().parse(JSON.parse(z.string().parse(init?.body))))
+      return Promise.resolve(
+        Response.json({
+          id: "generation-probe",
+          model: selected.config.model,
+          choices: [
+            {
+              index: 0,
+              message: { role: "assistant", content: "{}" },
+              finish_reason: "stop",
+            },
+          ],
+          usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
+        })
+      )
+    }
+  )
+  await traceRunStep(env, RUN, { name: "structure-rfq" }, async () => {
+    await client.extract({
+      runId: RUN.runId,
+      prompt: selected,
+      documents: [
+        {
+          label: "email",
+          kind: "email_body",
+          pageNumber: 1,
+          markdown: "Please quote belts",
+        },
+      ],
+      schemaName: "rfq_extraction",
+      schemaDescription: "RFQ facts",
+    })
+    return { state: "complete" }
+  })
+  const sent = z
+    .object({
+      model: z.string(),
+      temperature: z.number(),
+      response_format: z.object({
+        json_schema: z.object({ schema: z.record(z.string(), z.json()) }),
+      }),
+    })
+    .parse(requests[0])
+  expect(sent.model).toBe(selected.config.model)
+  expect(sent.temperature).toBe(selected.config.temperature)
+  expect(sent.response_format.json_schema.schema).toEqual(
+    selected.config.response_format
+  )
+  const generation = exporter
+    .getFinishedSpans()
+    .find(
+      (span) =>
+        span.attributes["langfuse.observation.prompt.name"] === "rfq/extract"
+    )
+  expect(generation?.attributes["langfuse.observation.prompt.version"]).toBe(41)
+})
 
 describe("tracing configuration", () => {
   it("is off until every Langfuse value is present", () => {
