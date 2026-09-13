@@ -266,18 +266,15 @@ function SystemDetailsBody({
         </ul>
       </Section>
 
-      <Section
-        title="Evaluation"
-        badge={details.evaluation.state === "measured" ? null : "Planned"}
-      >
-        <p className="text-[13px] leading-5 text-muted-foreground">
-          {details.evaluation.summary}
-        </p>
-        <ul className="mt-2 space-y-1.5 text-[13px] leading-5 text-muted-foreground">
-          {details.evaluation.rows.map((row) => (
-            <li key={row}>· {row}</li>
-          ))}
-        </ul>
+      <Section title="Evaluation">
+        <a
+          href={details.evaluation.url}
+          target="_blank"
+          rel="noreferrer"
+          className="text-[13px] underline underline-offset-4"
+        >
+          View experiments in Langfuse
+        </a>
       </Section>
     </div>
   )

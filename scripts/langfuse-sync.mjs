@@ -1,5 +1,6 @@
 /** Seed a fresh project. Existing UI-authored prompts and labels remain authoritative. */
 import { spawnSync } from "node:child_process"
+import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { createServer } from "vite"
 import { z } from "zod"
@@ -79,81 +80,96 @@ async function syncPrompts(loader) {
 async function syncDataset(loader) {
   const datasetName = "rfq-scenarios"
   const existing = cli(["datasets", "get", datasetName])
-  if (existing.status === 404) {
-    const created = cli(
-      ["datasets", "create", "--body-file", "-"],
-      JSON.stringify({
-        name: datasetName,
-        description:
-          "Curated RFQ Relay scenarios and gold answers for end-to-end experiments.",
-      })
-    )
-    if (created.status < 200 || created.status >= 300)
-      throw new Error(`Dataset creation failed (${created.status})`)
-  } else if (existing.status !== 200) {
-    throw new Error(`Dataset lookup failed (${existing.status})`)
+  const { SCENARIO_INPUT, EXPECTED_OUTPUT, SCENARIO_METADATA } =
+    await loader.ssrLoadModule("/evals/_contracts.ts")
+  const { SCENARIOS } = await loader.ssrLoadModule("/worker/scenarios.ts")
+  const item = z.object({
+    input: SCENARIO_INPUT,
+    expectedOutput: EXPECTED_OUTPUT,
+    metadata: z.json().optional(),
+  })
+  const exported = z.object({ items: z.array(item) })
+  const validate = (items) => {
+    for (const entry of items) SCENARIO_METADATA.parse(entry.metadata)
+    if (
+      items.length !== SCENARIOS.length ||
+      SCENARIOS.some(
+        (scenario) =>
+          items.filter((entry) => entry.input.scenarioId === scenario.id)
+            .length !== 1
+      )
+    ) {
+      throw new Error("Dataset must contain each curated scenario exactly once")
+    }
   }
-
-  const [{ SCENARIOS }, { GOLD_SCENARIOS }] = await Promise.all([
-    loader.ssrLoadModule("/worker/scenarios.ts"),
-    loader.ssrLoadModule("/test/fixtures/gold-scenarios.ts"),
-  ])
-  for (const gold of GOLD_SCENARIOS) {
-    const scenario = SCENARIOS.find(
-      (candidate) => candidate.id === gold.scenarioId
+  if (existing.status === 200) {
+    const response = cli([
+      "dataset-items",
+      "list",
+      "--dataset-name",
+      datasetName,
+      "--limit",
+      "100",
+    ])
+    if (response.status !== 200)
+      throw new Error(`Dataset item lookup failed (${response.status})`)
+    const listing = z
+      .object({
+        data: z.array(
+          z.object({
+            status: z.string(),
+            input: z.json(),
+            expectedOutput: z.json(),
+            metadata: z.json().optional(),
+          })
+        ),
+        meta: z.object({ totalItems: z.number() }),
+      })
+      .parse(response.body)
+    if (listing.meta.totalItems > listing.data.length)
+      throw new Error(
+        "Dataset has more items than this curated experiment supports"
+      )
+    validate(
+      listing.data
+        .filter((entry) => entry.status === "ACTIVE")
+        .map((entry) => item.parse(entry))
     )
-    if (!scenario)
-      throw new Error(`No scenario for gold fixture: ${gold.scenarioId}`)
-    const expectedReview = gold.expectedReviewPositions.length > 0
-    const item = cli(
+    console.log("Preserved rfq-scenarios; Langfuse owns expected answers.")
+    return
+  }
+  if (existing.status !== 404)
+    throw new Error(`Dataset lookup failed (${existing.status})`)
+  const bootstrapFile = process.env.LANGFUSE_DATASET_BOOTSTRAP
+  if (!bootstrapFile)
+    throw new Error(
+      "Fresh project needs LANGFUSE_DATASET_BOOTSTRAP: an uncommitted export of rfq-scenarios with an items array. Expected answers live in Cloud."
+    )
+  const dataset = exported.parse(
+    JSON.parse(readFileSync(bootstrapFile, "utf8"))
+  )
+  validate(dataset.items)
+  const created = cli(
+    ["datasets", "create", "--body-file", "-"],
+    JSON.stringify({
+      name: datasetName,
+      description: "Curated RFQ Relay scenarios for public API experiments.",
+    })
+  )
+  if (created.status < 200 || created.status >= 300)
+    throw new Error(`Dataset creation failed (${created.status})`)
+  for (const entry of dataset.items) {
+    const response = cli(
       ["dataset-items", "create", "--body-file", "-"],
       JSON.stringify({
         datasetName,
-        id: `rfq-scenarios-${gold.scenarioId}`,
-        input: {
-          scenarioId: gold.scenarioId,
-          sources: [
-            "Email body",
-            scenario.inlineImage.filename,
-            scenario.pdfAttachment.filename,
-          ],
-        },
-        expectedOutput: {
-          customerId: gold.customer.customerId,
-          contactEmail: gold.customer.contactEmail,
-          locationId: gold.customer.locationId,
-          lines: gold.matches.map(
-            ({
-              position,
-              sourceReference,
-              quantity,
-              expectedSku,
-              decision,
-              basis,
-              alternatives,
-            }) => ({
-              position,
-              sourceReference,
-              quantity,
-              expectedSku,
-              decision,
-              basis,
-              alternatives,
-            })
-          ),
-          expectedReviewPositions: gold.expectedReviewPositions,
-        },
-        metadata: {
-          difficulty: scenario.difficulty.level,
-          expectedReview,
-        },
+        id: `rfq-scenarios-${entry.input.scenarioId}`,
+        ...entry,
       })
     )
-    if (item.status < 200 || item.status >= 300)
-      throw new Error(
-        `Dataset item upsert failed for ${gold.scenarioId} (${item.status})`
-      )
-    console.log(`Upserted dataset item ${gold.scenarioId}.`)
+    if (response.status < 200 || response.status >= 300)
+      throw new Error(`Dataset item creation failed (${response.status})`)
+    console.log(`Created dataset item ${entry.input.scenarioId}.`)
   }
 }
 

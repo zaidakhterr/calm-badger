@@ -11,8 +11,6 @@
 import { ADAPTERS, DEFAULT_ADAPTER } from "./adapters"
 import { SHORTLIST_SIZE } from "./catalog/retrieval"
 import { readConfig } from "./env"
-import { REFERENCE_EVALUATION } from "./evaluation-report"
-import { evaluationSection } from "./evaluation-summary"
 import { RATE_LIMIT_MAX_RUNS } from "./rate-limit"
 
 export type SystemDetails = {
@@ -52,7 +50,7 @@ export type SystemDetails = {
       simulated: boolean
     }[]
   }
-  evaluation: { state: "planned" | "measured"; summary: string; rows: string[] }
+  evaluation: { url: string }
 }
 
 const COUNT_QUERY = `
@@ -218,10 +216,8 @@ export async function loadSystemDetails(env: Env): Promise<SystemDetails> {
         simulated: true,
       })),
     },
-    // Measured, not asserted in copy: the counts come from the committed
-    // scoreboard that `pnpm eval:fixtures` regenerates by replaying the three
-    // curated requests across this API. What it says is true of those fixtures
-    // under the contract fakes, which is exactly what it claims.
-    evaluation: evaluationSection(REFERENCE_EVALUATION),
+    evaluation: {
+      url: "https://cloud.langfuse.com/project/cmtykeufs0geead0ii4y5mwhq/datasets/cmu09dh30014aad0cq703wi5l/experiments",
+    },
   }
 }

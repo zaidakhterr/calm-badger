@@ -72,21 +72,6 @@ describe("choosing a curated request", () => {
     ).toHaveLength(1)
   })
 
-  it("never serves the expected outcome of a scenario", async () => {
-    const response = await exports.default.fetch(`${base}/api/scenarios`)
-    const payload = await response.text()
-
-    for (const leaked of [
-      "expectedSku",
-      "auto_accept",
-      "model_match",
-      "goldScenario",
-      "expectedReviewPositions",
-    ]) {
-      expect(payload).not.toContain(leaked)
-    }
-  })
-
   it("rejects unsupported methods", async () => {
     const response = await exports.default.fetch(`${base}/api/scenarios`, {
       method: "POST",

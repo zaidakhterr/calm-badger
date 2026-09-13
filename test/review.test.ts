@@ -1168,7 +1168,9 @@ describe("review outcome scores", () => {
     await settledRun(run.viewId, "delivered", "a scored approved run")
 
     const traceId = await createTraceId(runId)
-    const scores = capturedLangfuseScores()
+    const scores = capturedLangfuseScores().filter(
+      (score) => score.traceId === traceId
+    )
 
     expect(scores).toHaveLength(productItems.length + 1)
 
@@ -1228,7 +1230,9 @@ describe("review outcome scores", () => {
     await settledRun(run.viewId, "delivered", "a scored accepted proposal")
 
     const traceId = await createTraceId(runId)
-    expect(capturedLangfuseScores()).toContainEqual({
+    expect(
+      capturedLangfuseScores().filter((score) => score.traceId === traceId)
+    ).toContainEqual({
       id: await createScoreId(
         runId,
         LANGFUSE_SCORE_NAMES.reviewLineCorrect,
@@ -1285,7 +1289,9 @@ describe("review outcome scores", () => {
       await settledRun(run.viewId, "delivered", `a scored ${expected.kind}`)
 
       const traceId = await createTraceId(runId)
-      expect(capturedLangfuseScores()).toContainEqual({
+      expect(
+        capturedLangfuseScores().filter((score) => score.traceId === traceId)
+      ).toContainEqual({
         id: await createScoreId(
           runId,
           LANGFUSE_SCORE_NAMES.reviewLineCorrect,
@@ -1329,7 +1335,9 @@ describe("review outcome scores", () => {
     await settledRun(run.viewId, "delivered", "an approved run without matches")
 
     const traceId = await createTraceId(runId)
-    expect(capturedLangfuseScores()).toEqual([
+    expect(
+      capturedLangfuseScores().filter((score) => score.traceId === traceId)
+    ).toEqual([
       {
         id: await createScoreId(
           runId,
@@ -1353,7 +1361,9 @@ describe("review outcome scores", () => {
     await settledRun(run.viewId, "review_rejected", "a scored rejected run")
 
     const traceId = await createTraceId(runId)
-    expect(capturedLangfuseScores()).toEqual([
+    expect(
+      capturedLangfuseScores().filter((score) => score.traceId === traceId)
+    ).toEqual([
       {
         id: await createScoreId(
           runId,

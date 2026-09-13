@@ -7,8 +7,8 @@
  * at the synthetic dataset in `worker/catalog/dataset.ts`; none of it refers to
  * a real company, customer, or document.
  *
- * The expected outcomes for these requests are not here. They live beside the
- * tests in `test/fixtures/gold-scenarios.ts` so that nothing in the runtime can
+ * The expected outcomes for these requests are not here. They live in
+ * the Langfuse dataset `rfq-scenarios` so that nothing in the runtime can
  * read an answer instead of producing one.
  *
  * This module is self-contained (no imports): the asset build script loads it

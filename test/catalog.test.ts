@@ -7,12 +7,10 @@ import {
   type Catalog,
   type Product,
 } from "../worker/catalog/dataset"
-import { SCENARIOS } from "../worker/scenarios"
-import { GOLD_SCENARIOS, goldScenario } from "./fixtures/gold-scenarios"
 
 /**
  * Pinned so that any change to generation is a deliberate, reviewable one: the
- * committed seed SQL and the gold fixtures are only trustworthy while this
+ * committed seed SQL are only trustworthy while this
  * value holds.
  */
 const EXPECTED_FINGERPRINT = "b09dc2e0"
@@ -150,147 +148,6 @@ describe("the synthetic distributor dataset", () => {
         expect(product(catalog, line.sku)?.status).toBe("active")
         expect(line.quantity).toBeGreaterThan(0)
         expect(line.unitPriceCents).toBeGreaterThan(0)
-      }
-    }
-  })
-})
-
-describe("gold expectations for the curated scenarios", () => {
-  it("covers every scenario exactly once", () => {
-    expect(GOLD_SCENARIOS.map((gold) => gold.scenarioId).sort()).toEqual(
-      SCENARIOS.map((scenario) => scenario.id).sort()
-    )
-  })
-
-  it("resolves against the generated dataset", () => {
-    for (const gold of GOLD_SCENARIOS) {
-      const customer = catalog.customers.find(
-        (entry) => entry.id === gold.customer.customerId
-      )
-      expect(customer, gold.scenarioId).toBeDefined()
-      expect(
-        customer!.contacts.some(
-          (contact) => contact.email === gold.customer.contactEmail
-        )
-      ).toBe(true)
-      expect(
-        customer!.locations.some(
-          (location) => location.id === gold.customer.locationId
-        )
-      ).toBe(true)
-
-      for (const match of gold.matches) {
-        const expected = product(catalog, match.expectedSku)
-        expect(expected, `${gold.scenarioId} #${match.position}`).toBeDefined()
-        expect(expected!.status).toBe("active")
-
-        for (const alternative of match.alternatives) {
-          expect(product(catalog, alternative)).toBeDefined()
-        }
-      }
-    }
-  })
-
-  it("is decidable from catalogue evidence", () => {
-    for (const gold of GOLD_SCENARIOS) {
-      for (const match of gold.matches) {
-        const aliases = catalog.products.flatMap((entry) =>
-          entry.aliases.map((alias) => ({ sku: entry.sku, ...alias }))
-        )
-
-        if (match.basis === "sku") {
-          expect(match.sourceReference).toBe(match.expectedSku)
-        }
-
-        if (match.basis === "alias" || match.basis === "typo_alias") {
-          const reference = match.sourceReference.toLowerCase()
-          const supporting = aliases.filter(
-            (alias) =>
-              alias.sku === match.expectedSku &&
-              (reference.includes(alias.alias.toLowerCase()) ||
-                alias.alias.toLowerCase().includes(reference))
-          )
-          expect(
-            supporting.length,
-            `${gold.scenarioId} #${match.position}`
-          ).toBeGreaterThan(0)
-        }
-
-        if (match.basis === "legacy_alias") {
-          // A superseded number must lead to an archived product whose
-          // successor is the expected answer.
-          const legacy = aliases.find(
-            (alias) =>
-              alias.kind === "legacy" &&
-              match.sourceReference
-                .toLowerCase()
-                .includes(alias.alias.toLowerCase())
-          )
-          expect(legacy, `${gold.scenarioId} #${match.position}`).toBeDefined()
-          const archived = product(catalog, legacy!.sku)!
-          expect(archived.status).toBe("archived")
-          expect(archived.replacementSku).toBe(match.expectedSku)
-          expect(match.alternatives).toContain(archived.sku)
-        }
-      }
-    }
-  })
-
-  it("only asks for review where the catalogue is genuinely ambiguous", () => {
-    for (const gold of GOLD_SCENARIOS) {
-      const reviewPositions = gold.matches
-        .filter((match) => match.decision === "review")
-        .map((match) => match.position)
-
-      expect(reviewPositions).toEqual(gold.expectedReviewPositions)
-
-      for (const match of gold.matches) {
-        if (match.decision !== "review") continue
-
-        const expected = product(catalog, match.expectedSku)!
-        const contested = match.alternatives.map((sku) =>
-          product(catalog, sku)!
-        )
-
-        const ambiguous = contested.some(
-          (alternative) =>
-            alternative.status === "archived" ||
-            alternative.nearDuplicateOf === expected.sku ||
-            expected.nearDuplicateOf === alternative.sku
-        )
-
-        expect(ambiguous, `${gold.scenarioId} #${match.position}`).toBe(true)
-      }
-    }
-  })
-
-  it("expects the featured scenario to pause and the routine one to finish", () => {
-    expect(
-      goldScenario("routine-replenishment").expectedReviewPositions
-    ).toEqual([])
-    expect(
-      goldScenario("messy-forwarded-request").expectedReviewPositions.length
-    ).toBeGreaterThan(0)
-    expect(
-      goldScenario("ambiguous-replacement-parts").expectedReviewPositions.length
-    ).toBeGreaterThan(0)
-  })
-
-  it("matches the six requested lines of each scenario", () => {
-    for (const scenario of SCENARIOS) {
-      const gold = goldScenario(scenario.id)
-
-      expect(scenario.requestedItems).toHaveLength(6)
-      expect(gold.matches).toHaveLength(6)
-      expect(gold.extraction.lineItemCount).toBe(6)
-
-      for (const item of scenario.requestedItems) {
-        const match = gold.matches.find(
-          (entry) => entry.position === item.position
-        )
-        expect(match, `${scenario.id} #${item.position}`).toBeDefined()
-        expect(match!.quantity).toBe(item.quantity)
-        expect(match!.sourceReference).toBe(item.reference)
       }
     }
   })

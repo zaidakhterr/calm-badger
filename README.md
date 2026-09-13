@@ -32,7 +32,6 @@ This style is based on ASD-STE100 Simplified Technical English.
 - [Analytics](#analytics)
 - [Local development](#local-development)
 - [Checks](#checks)
-- [Evaluation](#evaluation)
 - [Cloudflare resources](#cloudflare-resources)
 - [First setup](#first-setup)
 - [Continuous integration and deployment](#continuous-integration-and-deployment)
@@ -199,7 +198,7 @@ or delete stored records.
 
 `GET /api/scenarios` returns three sample requests. Each request contains email
 text, one photo, one PDF file, and six lines. Expected results stay in
-`test/fixtures/gold-scenarios.ts`. Runtime code cannot read them.
+the Langfuse dataset `rfq-scenarios`. Runtime code cannot read them.
 
 Custom requests can contain email text and PDF, JPEG, or PNG files. The maximum
 size is 10 MB. A run can contain a maximum of 20 pages.
@@ -345,27 +344,7 @@ The lint command runs ESLint and Oxlint. The local Oxlint plug-in requires code
 to parse data at each interface. Zod schemas define stored evidence, provider
 responses, configuration, client responses, and script data.
 
-## Evaluation
-
-The test replays all three sample requests through the public API. It compares
-the results with the expected fixtures.
-
-```bash
-pnpm eval:fixtures
-node scripts/run-evaluation.mjs --check
-```
-
-Test providers make this evaluation repeatable. The command does not need a
-provider key. It does not make a network request or have a provider cost.
-
-Run the same evaluation with live providers:
-
-```bash
-pnpm eval:live
-```
-
-The live command reports latency, token use, estimated cost, and differences.
-It can have a provider cost. CI does not run it.
+For experiments with real providers, see [RFQ experiments](evals/README.md).
 
 ## Cloudflare resources
 
@@ -423,17 +402,16 @@ Run the structural check without external changes:
 ## Continuous integration and deployment
 
 `.github/workflows/validate.yml` runs for pull requests and non-main branches.
-It runs `pnpm check` and the fixture evaluation.
+It runs `pnpm check`.
 
 `.github/workflows/deploy.yml` runs for changes to `main` and for manual
 deployments. It performs these tasks in order:
 
 1. Runs all checks.
-2. Runs the fixture evaluation.
-3. Applies additive D1 migrations.
-4. Checks the remote catalogue.
-5. Adds the seed only when the catalogue is empty.
-6. Deploys the Worker.
+2. Applies additive D1 migrations.
+3. Checks the remote catalogue.
+4. Adds the seed only when the catalogue is empty.
+5. Deploys the Worker.
 
 A failed check stops deployment. Deployments do not overlap.
 
