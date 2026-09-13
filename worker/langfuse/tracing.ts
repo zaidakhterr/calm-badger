@@ -36,11 +36,14 @@ import { LangfuseVercelAiSdkIntegration } from "@langfuse/vercel-ai-sdk"
 import { context, trace } from "@opentelemetry/api"
 import { resourceFromAttributes } from "@opentelemetry/resources"
 import { BasicTracerProvider } from "@opentelemetry/sdk-trace-base"
+import type { ReadableSpan, SpanProcessor } from "@opentelemetry/sdk-trace-base"
 import { registerTelemetry } from "ai"
+import { z } from "zod"
 
 import { readConfig } from "../env"
 import type { LangfuseTarget } from "./target"
 import { loadSources } from "../sources"
+import { privateValueHash } from "../rate-limit"
 
 import { AsyncLocalStorageContextManager } from "./context-manager"
 
@@ -77,6 +80,7 @@ export type TracedSource = {
 export type RunTraceContext = {
   runId: string
   viewId: string
+  userId: string
   sourceKind: string
   scenarioId: string | null
   sources: TracedSource[]
@@ -84,6 +88,7 @@ export type RunTraceContext = {
 
 type RunTraceRow = {
   view_id: string
+  owner_capability_hash: string
   source_kind: string
   scenario_id: string | null
 }
@@ -96,20 +101,35 @@ export async function loadRunTraceContext(
   env: Env,
   runId: string
 ): Promise<RunTraceContext | null> {
-  let row: RunTraceRow | null
-  let sources: TracedSource[]
-
   try {
-    row = await env.DB.prepare(
-      `SELECT view_id, source_kind, scenario_id FROM runs WHERE id = ?`
+    const row = await env.DB.prepare(
+      `SELECT view_id, owner_capability_hash, source_kind, scenario_id
+         FROM runs WHERE id = ?`
     )
       .bind(runId)
       .first<RunTraceRow>()
-    sources = (await loadSources(env, runId)).map((source) => ({
+
+    if (!row) return null
+
+    const sources = (await loadSources(env, runId)).map((source) => ({
       label: source.label,
       mediaType: source.mediaType,
       byteSize: source.byteSize,
     }))
+    const userId = await privateValueHash(
+      env,
+      "langfuse-user",
+      row.owner_capability_hash
+    )
+
+    return {
+      runId,
+      viewId: row.view_id,
+      userId,
+      sourceKind: row.source_kind,
+      scenarioId: row.scenario_id,
+      sources,
+    }
   } catch (error) {
     console.error(
       JSON.stringify({
@@ -119,16 +139,6 @@ export async function loadRunTraceContext(
       })
     )
     return null
-  }
-
-  if (!row) return null
-
-  return {
-    runId,
-    viewId: row.view_id,
-    sourceKind: row.source_kind,
-    scenarioId: row.scenario_id,
-    sources,
   }
 }
 
@@ -218,6 +228,8 @@ export async function traceRunStep<T extends StepOutcome>(
     return await propagateAttributes(
       {
         traceName: RUN_TRACE_NAME,
+        sessionId: run.viewId,
+        userId: run.userId,
         tags: [run.sourceKind],
         metadata: {
           runId: run.runId,
@@ -286,10 +298,11 @@ function installLangfuse(
     baseUrl: target.baseUrl,
     environment,
     exportMode: "immediate",
+    mask: maskContactDetails,
   })
 
   const provider = new BasicTracerProvider({
-    spanProcessors: [processor],
+    spanProcessors: [contactMaskingSpanProcessor(), processor],
     resource: resourceFromAttributes({ "service.name": "calm-badger" }),
   })
 
@@ -297,6 +310,109 @@ function installLangfuse(
   trace.setGlobalTracerProvider(provider)
 
   return processor
+}
+
+/** Fixed values written in place of contact details before an export. */
+export const MASKED_EMAIL = "[EMAIL_REDACTED]"
+export const MASKED_PHONE = "[PHONE_REDACTED]"
+
+const EMAIL_PATTERN =
+  /(^|\\(?:n|r|t)|[^\w@.+%-])(?:[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})(?![A-Z0-9-])/gi
+const STRING_ATTRIBUTE_SCHEMA = z.string()
+
+/** Content-bearing attributes emitted by the current AI SDK integration. */
+const AI_SDK_CONTACT_DATA_ATTRIBUTES = new Set([
+  "gen_ai.system_instructions",
+  "gen_ai.input.messages",
+  "gen_ai.output.messages",
+  "gen_ai.tool.definitions",
+  "gen_ai.tool.call.arguments",
+  "gen_ai.tool.call.result",
+])
+
+/** Langfuse-native attributes whose values can hold traced business content. */
+const LANGFUSE_CONTACT_DATA_ATTRIBUTES = new Set([
+  "langfuse.observation.input",
+  "langfuse.trace.input",
+  "langfuse.observation.output",
+  "langfuse.trace.output",
+  "langfuse.observation.metadata",
+  "langfuse.trace.metadata",
+])
+
+const LANGFUSE_METADATA_PREFIXES = [
+  "langfuse.observation.metadata.",
+  "langfuse.trace.metadata.",
+]
+
+/**
+ * Matches common phone numbers without treating UUIDs, SKUs, or amounts as
+ * contact details. International numbers need a leading plus. Local numbers
+ * need either an area-code pair of parentheses or the 3-3-4 hyphen form.
+ */
+const PHONE_PATTERN =
+  /(^|[^\w-]|\\(?:n|r|t))(?:\+\d{8,15}|\+\d{1,3}[ .-]?(?:\(\d{2,5}\)|\d{2,5})(?:[ .-]?\d{2,8}){1,4}|\(\d{2,4}\)[ .-]\d{3,4}(?:[ .-]\d{2,4}){1,2}|\d{3}-\d{3}-\d{4})(?![\w-])/g
+
+/**
+ * Masks the stringified input, output, or metadata value supplied by the
+ * Langfuse span processor. Replacing in the JSON text reaches nested values
+ * and values that themselves contain JSON.
+ */
+export function maskContactDetails({ data }: { data: string }): string {
+  return data
+    .replace(
+      EMAIL_PATTERN,
+      (_emailWithBoundary, boundary: string) => `${boundary}${MASKED_EMAIL}`
+    )
+    .replace(
+      PHONE_PATTERN,
+      (_phoneWithBoundary, boundary: string) => `${boundary}${MASKED_PHONE}`
+    )
+}
+
+function carriesContactData(attributeName: string): boolean {
+  return (
+    AI_SDK_CONTACT_DATA_ATTRIBUTES.has(attributeName) ||
+    LANGFUSE_CONTACT_DATA_ATTRIBUTES.has(attributeName) ||
+    LANGFUSE_METADATA_PREFIXES.some((prefix) =>
+      attributeName.startsWith(prefix)
+    )
+  )
+}
+
+/**
+ * Masks third-party OpenTelemetry attributes before the Langfuse processor
+ * receives them. The Langfuse mask hook covers its native attributes, but the
+ * AI SDK 7 integration records model content in `gen_ai.*` attributes.
+ */
+class ContactMaskingSpanProcessor implements SpanProcessor {
+  onStart(): void {}
+
+  onEnd(span: ReadableSpan): void {
+    const attributes = span.attributes
+
+    for (const [attributeName, attributeValue] of Object.entries(attributes)) {
+      if (!carriesContactData(attributeName)) continue
+
+      const stringValue = STRING_ATTRIBUTE_SCHEMA.safeParse(attributeValue)
+      if (!stringValue.success) continue
+
+      attributes[attributeName] = maskContactDetails({ data: stringValue.data })
+    }
+  }
+
+  forceFlush(): Promise<void> {
+    return Promise.resolve()
+  }
+
+  shutdown(): Promise<void> {
+    return Promise.resolve()
+  }
+}
+
+/** A new processor instance for each OpenTelemetry provider. */
+export function contactMaskingSpanProcessor(): SpanProcessor {
+  return new ContactMaskingSpanProcessor()
 }
 
 /**
