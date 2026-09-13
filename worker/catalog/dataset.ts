@@ -5,7 +5,7 @@
  * wholesaler — products, aliases, customers, contacts, locations, order
  * history, and pricing exceptions — is derived from one integer seed. The same
  * seed always produces byte-identical output, so the committed seed SQL, the
- * curated scenarios, and the gold evaluation fixtures stay in agreement.
+ * curated scenarios, and the Langfuse dataset stay in agreement.
  *
  * This module is intentionally self-contained (no imports): the seed build
  * script loads it directly through Node type stripping, which cannot resolve

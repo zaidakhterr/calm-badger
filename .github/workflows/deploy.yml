@@ -40,14 +40,6 @@ jobs:
       - name: Validate application
         run: pnpm check
 
-      # The same fixture evaluation the validate workflow runs, repeated here
-      # because this is the only path that deploys. It replays the three
-      # curated workflows through the deterministic contract fakes and fails if
-      # the committed summary that System details serves has drifted, so a
-      # deployment can never advertise numbers it does not reproduce.
-      - name: Evaluate reference fixtures
-        run: node scripts/run-evaluation.mjs --check
-
       # Additive only. Migrations run before the catalogue-readiness gate below.
       - name: Apply additive D1 migrations
         uses: cloudflare/wrangler-action@v3

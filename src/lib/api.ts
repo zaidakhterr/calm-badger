@@ -860,9 +860,7 @@ const SYSTEM_DETAILS_SCHEMA = z.object({
     ),
   }),
   evaluation: z.object({
-    state: z.enum(["planned", "measured"]),
-    summary: z.string(),
-    rows: z.array(z.string()),
+    url: z.url(),
   }),
 })
 
