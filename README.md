@@ -282,6 +282,11 @@ model calls of a step nest under it. The trace carries the `environment` from
 `APP_ENV`, a tag with the source kind (`curated` or `custom`), and the run,
 view, and scenario identifiers as metadata.
 
+Each trace uses its run view ID as the session ID. The user ID is a salted hash
+of the stored owner-capability hash. The app currently creates a new owner
+capability for each run. User grouping is per run until the app stores one
+owner identity across runs.
+
 Unlike analytics, tracing sends business content. Langfuse receives:
 
 - the model input and output of every extraction and reranking call. The
@@ -290,6 +295,9 @@ Unlike analytics, tracing sends business content. Langfuse receives:
 - the name, media type, and size of every document, but not the document bytes
 - the page count and cost of every document read
 - the outcome and message of every step
+
+Langfuse masks email addresses and phone numbers before export. It does not
+mask names.
 
 Custom runs are tagged `custom`, so their traces can be filtered or deleted to
 match the 24-hour retention of the run.

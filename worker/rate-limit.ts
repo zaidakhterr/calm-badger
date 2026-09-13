@@ -35,6 +35,9 @@ export type RateLimitDecision = {
   resetAt: string
 }
 
+/** Why a private value is hashed, so identifiers cannot be joined by accident. */
+export type PrivateHashPurpose = "rate-limit" | "analytics" | "langfuse-user"
+
 /**
  * Counts this request and says whether it may proceed.
  *
@@ -102,7 +105,23 @@ export async function visitorHash(
   // A request without a client address is counted in one shared bucket. That is
   // stricter than letting it through unlimited, and it identifies no one.
   const address = request.headers.get("cf-connecting-ip")?.trim() || "unknown"
-  const material = `${rotatingSalt(readConfig(env))}:${purpose}:${windowStart.toISOString()}:${address}`
+  return privateValueHash(
+    env,
+    purpose,
+    `${windowStart.toISOString()}:${address}`
+  )
+}
+
+/**
+ * Hashes one private value with the configured rotating secret and a purpose.
+ * The purpose prevents a Langfuse user identifier from matching another hash.
+ */
+export async function privateValueHash(
+  env: Env,
+  purpose: PrivateHashPurpose,
+  value: string
+): Promise<string> {
+  const material = `${rotatingSalt(readConfig(env))}:${purpose}:${value}`
 
   const digest = await crypto.subtle.digest(
     "SHA-256",
