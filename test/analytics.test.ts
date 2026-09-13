@@ -338,6 +338,7 @@ describe("which analytics provider a deployment gets", () => {
       OCR_PROVIDER: "mistral",
       EXTRACTION_PROVIDER: "openrouter",
       RERANK_PROVIDER: "openrouter",
+      LANGFUSE_PROVIDER: "none",
       ...overrides,
     })
   }

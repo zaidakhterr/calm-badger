@@ -28,6 +28,8 @@
 
 import { z } from "zod"
 
+import { langfuseTarget, tracingTarget } from "./langfuse/target"
+
 /** The deployed defaults, repeated here so a missing variable is not fatal. */
 const DEFAULT_MISTRAL_OCR_MODEL = "mistral-ocr-latest"
 const DEFAULT_OPENROUTER_MODEL = "openai/gpt-5.6-luna"
@@ -127,6 +129,9 @@ const VARIABLES_SCHEMA = z.object({
 
   RATE_LIMIT_SALT: secret,
 
+  LANGFUSE_PROVIDER: z
+    .enum(["langfuse", "contract-fake", "none"])
+    .default("none"),
   LANGFUSE_PUBLIC_KEY: secret,
   LANGFUSE_SECRET_KEY: secret,
   LANGFUSE_BASE_URL: secret,
@@ -151,42 +156,6 @@ export type AnalyticsTarget =
   | PosthogTarget
   | { provider: "contract-fake" }
   | { provider: "none"; reason: AnalyticsDisabledReason }
-
-/** A live Langfuse project. It cannot be built without all three values. */
-export type LangfuseTarget = {
-  provider: "langfuse"
-  publicKey: string
-  secretKey: string
-  /** Already stripped of trailing slashes, so a caller can append a path. */
-  baseUrl: string
-}
-
-/** Which tracing implementation this deployment resolves to, and with what. */
-export type TracingTarget =
-  LangfuseTarget | { provider: "none"; reason: "unconfigured" }
-
-/**
- * Tracing resolves like measurement does: one settled decision, so no call site
- * asks whether a key is present. Unlike PostHog it is not gated on production:
- * the `environment` attribute keeps development traces apart in Langfuse, and
- * seeing a local run's trace is the reason a developer configures it at all.
- */
-function tracingTarget(variables: Variables): TracingTarget {
-  const publicKey = variables.LANGFUSE_PUBLIC_KEY
-  const secretKey = variables.LANGFUSE_SECRET_KEY
-  const baseUrl = variables.LANGFUSE_BASE_URL
-
-  if (publicKey === null || secretKey === null || baseUrl === null) {
-    return { provider: "none", reason: "unconfigured" }
-  }
-
-  return {
-    provider: "langfuse",
-    publicKey,
-    secretKey,
-    baseUrl: baseUrl.replace(/\/+$/, ""),
-  }
-}
 
 /**
  * Measurement resolves here rather than in the provider seam, so the seam is a
@@ -230,9 +199,29 @@ function analyticsTarget(variables: Variables): AnalyticsTarget {
  */
 export const APP_CONFIG_SCHEMA = VARIABLES_SCHEMA.superRefine(
   (variables, ctx) => {
+    if (variables.LANGFUSE_PROVIDER === "langfuse") {
+      for (const variable of [
+        "LANGFUSE_PUBLIC_KEY",
+        "LANGFUSE_SECRET_KEY",
+        "LANGFUSE_BASE_URL",
+      ] as const) {
+        if (variables[variable] !== null) continue
+        ctx.addIssue({
+          code: "custom",
+          path: [variable],
+          message: "Required when LANGFUSE_PROVIDER is langfuse",
+        })
+      }
+    }
+
     if (variables.APP_ENV !== "production") return
 
     const fakes = [
+      {
+        variable: "LANGFUSE_PROVIDER",
+        configured: variables.LANGFUSE_PROVIDER,
+        label: "Langfuse",
+      },
       {
         variable: "OCR_PROVIDER",
         configured: variables.OCR_PROVIDER,
@@ -290,7 +279,19 @@ export const APP_CONFIG_SCHEMA = VARIABLES_SCHEMA.superRefine(
   reviewWindowSecondsCustom: variables.REVIEW_WINDOW_SECONDS_CUSTOM,
 
   analytics: analyticsTarget(variables),
-  tracing: tracingTarget(variables),
+  tracing: tracingTarget(
+    variables.LANGFUSE_PUBLIC_KEY,
+    variables.LANGFUSE_SECRET_KEY,
+    variables.LANGFUSE_BASE_URL
+  ),
+  langfuse: langfuseTarget(
+    variables.LANGFUSE_PROVIDER,
+    tracingTarget(
+      variables.LANGFUSE_PUBLIC_KEY,
+      variables.LANGFUSE_SECRET_KEY,
+      variables.LANGFUSE_BASE_URL
+    )
+  ),
 
   rateLimitSalt: variables.RATE_LIMIT_SALT,
 }))

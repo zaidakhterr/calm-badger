@@ -121,6 +121,7 @@ describe("the configuration schema", () => {
       "EXTRACTION_PROVIDER",
       "RERANK_PROVIDER",
       "ANALYTICS_PROVIDER",
+      "LANGFUSE_PROVIDER",
     ]) {
       expect(() =>
         APP_CONFIG_SCHEMA.parse(
@@ -186,6 +187,7 @@ describe("reading configuration from the binding object", () => {
     expect(config.ocrProvider).toBe("contract-fake")
     expect(config.analytics).toEqual({ provider: "contract-fake" })
     expect(config.rateLimitSalt).toBe("test-rate-limit-salt")
+    expect(config.langfuse).toEqual({ provider: "contract-fake" })
   })
 
   it("fails a misconfigured deployment's first request rather than a run", async () => {
@@ -216,5 +218,53 @@ describe("reading configuration from the binding object", () => {
     expect(readConfig(overridden)).toBe(readConfig(overridden))
     expect(readConfig(overridden)).not.toBe(readConfig(env))
     expect(readConfig(overridden).ocrProvider).toBe("mistral")
+  })
+})
+
+describe("Langfuse provider configuration", () => {
+  const credentials = {
+    LANGFUSE_PUBLIC_KEY: "test-public",
+    LANGFUSE_SECRET_KEY: "test-secret",
+    LANGFUSE_BASE_URL: "https://langfuse.example.test/",
+  }
+
+  it("defaults to none and keeps tracing independent of prompt and score selection", () => {
+    expect(APP_CONFIG_SCHEMA.parse({}).langfuse).toEqual({ provider: "none" })
+    const config = APP_CONFIG_SCHEMA.parse({
+      ...credentials,
+      LANGFUSE_PROVIDER: "none",
+    })
+    expect(config.langfuse).toEqual({ provider: "none" })
+    expect(config.tracing.provider).toBe("langfuse")
+  })
+
+  it("requires all three credentials for the live provider in every environment", () => {
+    for (const appEnv of ["development", "production"]) {
+      for (const variable of Object.keys(credentials)) {
+        expect(() =>
+          APP_CONFIG_SCHEMA.parse({
+            ...credentials,
+            APP_ENV: appEnv,
+            LANGFUSE_PROVIDER: "langfuse",
+            [variable]: "",
+          })
+        ).toThrow(/Required when LANGFUSE_PROVIDER is langfuse/)
+      }
+    }
+    expect(
+      APP_CONFIG_SCHEMA.parse({ ...credentials, LANGFUSE_PROVIDER: "langfuse" })
+        .langfuse
+    ).toEqual({
+      provider: "langfuse",
+      publicKey: "test-public",
+      secretKey: "test-secret",
+      baseUrl: "https://langfuse.example.test",
+    })
+  })
+
+  it("refuses an unsupported provider name", () => {
+    expect(() =>
+      APP_CONFIG_SCHEMA.parse({ LANGFUSE_PROVIDER: "langfus" })
+    ).toThrow()
   })
 })

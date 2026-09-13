@@ -38,7 +38,8 @@ import { resourceFromAttributes } from "@opentelemetry/resources"
 import { BasicTracerProvider } from "@opentelemetry/sdk-trace-base"
 import { registerTelemetry } from "ai"
 
-import { readConfig, type LangfuseTarget } from "../env"
+import { readConfig } from "../env"
+import type { LangfuseTarget } from "./target"
 import { loadSources } from "../sources"
 
 import { AsyncLocalStorageContextManager } from "./context-manager"
