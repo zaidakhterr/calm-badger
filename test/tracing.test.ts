@@ -15,12 +15,12 @@ import { MockLanguageModelV4 } from "ai/test"
 import { afterAll, beforeEach, describe, expect, it } from "vitest"
 
 import { readConfig } from "../worker/env"
-import { AsyncLocalStorageContextManager } from "../worker/tracing/context-manager"
+import { AsyncLocalStorageContextManager } from "../worker/langfuse/context-manager"
 import {
   RUN_TRACE_NAME,
   traceRunStep,
   type RunTraceContext,
-} from "../worker/tracing"
+} from "../worker/langfuse/tracing"
 
 /**
  * What a run's trace looks like, without a Langfuse project.

@@ -8,9 +8,9 @@ import { defineConfig } from "vitest/config"
  * The live evaluation (`pnpm eval:live`).
  *
  * Same Worker, same public API, same scoring as the deterministic run — only
- * the provider seams differ. Nothing here selects a fake, so a missing key
- * fails the run visibly rather than quietly measuring a fake and calling it
- * live. Keys come from the environment or from `.dev.vars`, which the pool
+ * the OCR and model provider seams differ. Missing provider keys fail the run
+ * visibly. Langfuse stays offline through its contract fake and blank keys.
+ * Provider keys come from the environment or `.dev.vars`, which the pool
  * loads for the local Worker; this file never reads or prints their values.
  *
  * It is never part of continuous integration: it costs money, needs credentials,
@@ -46,6 +46,12 @@ export default defineConfig({
           OCR_PROVIDER: provider("OCR_PROVIDER", "mistral"),
           EXTRACTION_PROVIDER: provider("EXTRACTION_PROVIDER", "openrouter"),
           RERANK_PROVIDER: provider("RERANK_PROVIDER", "openrouter"),
+          // This legacy evaluation uses live OCR and models but never calls
+          // Langfuse. Blank keys also keep its tracing exporter disabled.
+          LANGFUSE_PROVIDER: "contract-fake",
+          LANGFUSE_PUBLIC_KEY: "",
+          LANGFUSE_SECRET_KEY: "",
+          LANGFUSE_BASE_URL: "",
           ANALYTICS_PROVIDER: "none",
           POSTHOG_API_KEY: "",
           RATE_LIMIT_SALT: "local-evaluation-salt",

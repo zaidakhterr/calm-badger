@@ -25,7 +25,7 @@ import {
   loadRunTraceContext,
   traceRunStep,
   type RunTraceContext,
-} from "./tracing"
+} from "./langfuse/tracing"
 
 export type RfqWorkflowParams = {
   runId: string

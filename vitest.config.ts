@@ -29,6 +29,7 @@ export default defineConfig({
           // Tracing stays off in tests, whatever `.dev.vars` holds: a test
           // run must not export traces to a real Langfuse project. The
           // tracing suite installs its own in-memory provider instead.
+          LANGFUSE_PROVIDER: "contract-fake",
           LANGFUSE_PUBLIC_KEY: "",
           LANGFUSE_SECRET_KEY: "",
           LANGFUSE_BASE_URL: "",
@@ -60,6 +61,7 @@ export default defineConfig({
             "@opentelemetry/sdk-trace-base",
             "@opentelemetry/resources",
             "@opentelemetry/exporter-trace-otlp-http",
+            "@langfuse/client",
             "@langfuse/tracing",
             "@langfuse/otel",
             "@langfuse/vercel-ai-sdk",
