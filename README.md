@@ -30,6 +30,7 @@ This style is based on ASD-STE100 Simplified Technical English.
 - [Security](#security)
 - [Data retention](#data-retention)
 - [Analytics](#analytics)
+- [Langfuse](#langfuse)
 - [Local development](#local-development)
 - [Checks](#checks)
 - [Cloudflare resources](#cloudflare-resources)
@@ -262,9 +263,11 @@ Set `ANALYTICS_PROVIDER=none` to turn analytics off. Set
 `APP_ENV=development` in `.dev.vars` to keep local events out of production
 analytics.
 
-## Tracing
+## Langfuse
 
-Langfuse tracing is optional. It is off until all three values are set:
+Langfuse Cloud EU manages prompts, traces, evaluation data, feedback, cost, and
+operations metrics. Set `LANGFUSE_PROVIDER=langfuse` to fetch prompts and write
+scores. Tracing starts when all three values are set:
 
 ```bash
 pnpm wrangler secret put LANGFUSE_PUBLIC_KEY
@@ -272,9 +275,22 @@ pnpm wrangler secret put LANGFUSE_SECRET_KEY
 pnpm wrangler secret put LANGFUSE_BASE_URL
 ```
 
-For local development, set the same three values in `.dev.vars`. Use the
-European Union region, `https://cloud.langfuse.com`, to match the analytics
-choice above, or the URL of a self-hosted Langfuse.
+For local development, set the same values in `.dev.vars`. Use
+`https://cloud.langfuse.com` for the European Union region.
+
+The `rfq/extract` and `rfq/rerank` prompts store the model, settings, and output
+schema. The rerank prompt also stores its product-match limits. Production uses
+the `production` label. Development uses `latest` without a cache delay. The
+Worker uses a bundled fallback when a prompt is unavailable or incompatible.
+
+Expected results live in the Langfuse dataset `rfq-scenarios`. The pull request
+workflow runs these scenarios with real providers. It posts scores and a
+comparison link on the pull request. The [experiment view](https://cloud.langfuse.com/project/cmtykeufs0geead0ii4y5mwhq/datasets/cmu09dh30014aad0cq703wi5l/experiments)
+keeps the accuracy record.
+
+Review decisions create `review-approved` and `review-line-correct` scores.
+Owner thumbs create `owner-quote-thumbs` and `owner-line-thumbs` scores. The
+Worker writes these scores, so no Langfuse key reaches the browser.
 
 One run is one trace. Each business step is one observation in it, and the
 model calls of a step nest under it. The trace carries the `environment` from
@@ -296,11 +312,34 @@ Unlike analytics, tracing sends business content. Langfuse receives:
   configured model price.
 - the outcome and message of every step
 
-Langfuse masks email addresses and phone numbers before export. It does not
-mask names.
+Langfuse masks email addresses and phone numbers before export. Names remain
+visible.
+
+Langfuse uses the cost reported by OpenRouter. It calculates optical character
+recognition (OCR) cost from the `pages` price in its model table. The product
+shows only provider-reported cost and does not estimate a missing value.
 
 Custom runs are tagged `custom`, so their traces can be filtered or deleted to
 match the 24-hour retention of the run.
+
+The [RFQ Relay operations dashboard](https://cloud.langfuse.com/project/cmtykeufs0geead0ii4y5mwhq/dashboards/cmu0d75jf027ead0imtrxhgio?dateRange=30d)
+shows runs per day and P95 latency for each business step. It also shows exact
+components for error rate, review rate, and cost per run. Divide error runs by
+all runs. Divide `open-review` runs by all runs. Divide total cost by distinct
+run traces. Langfuse v4 custom widgets do not support calculated fields.
+
+The parent case-study workspace contains a project `.mcp.json` for Claude Code.
+Start Claude Code from the workspace root with the existing `.dev.vars` values:
+
+```bash
+set -a
+source calm-badger/.dev.vars
+set +a
+LANGFUSE_MCP_AUTH="$(printf '%s:%s' "$LANGFUSE_PUBLIC_KEY" "$LANGFUSE_SECRET_KEY" | base64 | tr -d '\n')" claude
+```
+
+This command keeps the derived Basic authentication value in the Claude Code
+process. It does not store the value in the workspace config.
 
 ## Local development
 
@@ -438,6 +477,9 @@ PostHog for the local Worker.
 
 ## Production gaps
 
+Langfuse addresses the operations-console gap. The saved dashboard shows run
+volume, failures, review demand, cost, and business-step latency.
+
 The demo does not implement these production functions:
 
 - User accounts, organizations, roles, and tenant isolation.
@@ -445,10 +487,10 @@ The demo does not implement these production functions:
 - Automatic retry, backoff, dead-letter handling, and operator recovery.
 - Real delivery, idempotency, a durable outbox, and reconciliation.
 - GAEB, spreadsheet, Word, presentation, voice, and batch RFQ inputs.
-- Service-level objectives, alerts, cost budgets, and full provider traces.
-- A held-out evaluation set, quality gates, and confidence calibration.
+- Service-level objectives, alerts, and cost budgets.
+- A held-out evaluation set and confidence calibration.
 - Global learning from human feedback.
-- PDF quote generation and a production activity dashboard.
+- PDF quote generation.
 
 ## License
 
