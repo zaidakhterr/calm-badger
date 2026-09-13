@@ -3,8 +3,8 @@
  *
  * `Env` is the Cloudflare binding object: `DB`, `ARTIFACTS`, `RFQ_WORKFLOW`,
  * `ASSETS`, and a set of strings. Everything on it that is a string is parsed
- * here, once, into `AppConfig` — provider names as enums, models as non-empty
- * text, costs and thresholds and windows as numbers, secrets as `string | null`
+ * here, once, into `AppConfig` — provider names as enums, costs and windows as
+ * numbers, secrets as `string | null`
  * — so that no call site anywhere else reads a raw variable off the binding
  * object and decides for itself what a blank one means.
  *
@@ -15,12 +15,12 @@
  *   that has one;
  * - an *effective* PostHog target cannot exist without a project key, so the
  *   analytics provider never has to ask whether its key is present;
- * - thresholds are ratios and review windows are positive.
+ * - review windows are positive.
  *
  * Where a bad value has an honest fallback the schema takes it, because that
  * is the behaviour these variables already had: a malformed price yields `null`
  * (an uncosted call and a free call are different facts), and a nonsense
- * threshold or window yields the documented default. Where a bad value has no
+ * window yields the documented default. Where a bad value has no
  * honest fallback — an unknown provider, a fake in production — parsing fails,
  * and the Worker and the workflow turn that into one clear line rather than a
  * surprise halfway through a run.
@@ -32,16 +32,7 @@ import { langfuseTarget, tracingTarget } from "./langfuse/target"
 
 /** The deployed defaults, repeated here so a missing variable is not fatal. */
 const DEFAULT_MISTRAL_OCR_MODEL = "mistral-ocr-latest"
-const DEFAULT_OPENROUTER_MODEL = "openai/gpt-5.6-luna"
 const DEFAULT_POSTHOG_HOST = "https://eu.i.posthog.com"
-
-/**
- * The winner-strength default is the same 0.55 that separates a Medium
- * confidence label from a Review one, so "accepted" and "at least Medium" mean
- * the same thing.
- */
-const DEFAULT_WINNER_STRENGTH = 0.55
-const DEFAULT_WINNER_GAP = 0.12
 
 /**
  * How long an owner has to decide. The window mirrors the run's own retention,
@@ -71,16 +62,6 @@ const priceUsd = z
   .nullable()
   .catch(null)
 
-/** A demo heuristic between 0 and 1. Nonsense takes the documented default. */
-function ratio(fallback: number) {
-  return z
-    .string()
-    .trim()
-    .transform((raw) => Number.parseFloat(raw))
-    .refine((value) => Number.isFinite(value) && value >= 0 && value <= 1)
-    .catch(fallback)
-}
-
 /** A positive duration in seconds. Nonsense takes the documented default. */
 function seconds(fallback: number) {
   return z
@@ -109,13 +90,9 @@ const VARIABLES_SCHEMA = z.object({
   RERANK_PROVIDER: z
     .enum(["openrouter", "contract-fake"])
     .default("openrouter"),
-  OPENROUTER_RERANK_MODEL: text(DEFAULT_OPENROUTER_MODEL),
   OPENROUTER_API_KEY: secret,
   OPENROUTER_COST_PER_1M_INPUT_TOKENS_USD: priceUsd,
   OPENROUTER_COST_PER_1M_OUTPUT_TOKENS_USD: priceUsd,
-
-  MATCH_WINNER_STRENGTH: ratio(DEFAULT_WINNER_STRENGTH),
-  MATCH_WINNER_GAP: ratio(DEFAULT_WINNER_GAP),
 
   REVIEW_WINDOW_SECONDS_CURATED: seconds(DEFAULT_WINDOW_SECONDS_CURATED),
   REVIEW_WINDOW_SECONDS_CUSTOM: seconds(DEFAULT_WINDOW_SECONDS_CUSTOM),
@@ -263,15 +240,11 @@ export const APP_CONFIG_SCHEMA = VARIABLES_SCHEMA.superRefine(
 
   extractionProvider: variables.EXTRACTION_PROVIDER,
   rerankProvider: variables.RERANK_PROVIDER,
-  rerankModel: variables.OPENROUTER_RERANK_MODEL,
   openRouterApiKey: variables.OPENROUTER_API_KEY,
   openRouterCostPer1MInputTokensUsd:
     variables.OPENROUTER_COST_PER_1M_INPUT_TOKENS_USD,
   openRouterCostPer1MOutputTokensUsd:
     variables.OPENROUTER_COST_PER_1M_OUTPUT_TOKENS_USD,
-
-  matchWinnerStrength: variables.MATCH_WINNER_STRENGTH,
-  matchWinnerGap: variables.MATCH_WINNER_GAP,
 
   reviewWindowSecondsCurated: variables.REVIEW_WINDOW_SECONDS_CURATED,
   reviewWindowSecondsCustom: variables.REVIEW_WINDOW_SECONDS_CUSTOM,

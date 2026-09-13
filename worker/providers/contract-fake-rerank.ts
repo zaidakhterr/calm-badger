@@ -29,7 +29,6 @@
  * schema, and integrity contracts are exercised.
  */
 
-import type { AppConfig } from "../env"
 import type { RankedCandidate, RerankRanking } from "../product-matching"
 
 import {
@@ -64,16 +63,12 @@ const STOP_WORDS = new Set([
   "with",
 ])
 
-export function createContractFakeRerankProvider(
-  config: AppConfig
-): RerankProvider {
-  const model = `${config.rerankModel}-contract-fake`
-
+export function createContractFakeRerankProvider(): RerankProvider {
   return {
     name: PROVIDER,
-    model,
 
     rerank(request: RerankRequest): Promise<RerankResult> {
+      const model = `${request.prompt.config.model}-contract-fake`
       const startedAt = Date.now()
       const wording =
         `${request.reference} ${request.description}`.toLowerCase()

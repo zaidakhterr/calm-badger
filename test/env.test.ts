@@ -26,9 +26,6 @@ const EXAMPLE_VARIABLES = {
   OCR_COST_PER_1000_PAGES_USD: "1",
   EXTRACTION_PROVIDER: "openrouter",
   RERANK_PROVIDER: "openrouter",
-  OPENROUTER_RERANK_MODEL: "openai/gpt-5.6-luna",
-  MATCH_WINNER_STRENGTH: "0.55",
-  MATCH_WINNER_GAP: "0.12",
   REVIEW_WINDOW_SECONDS_CURATED: "604800",
   REVIEW_WINDOW_SECONDS_CUSTOM: "86400",
   OPENROUTER_COST_PER_1M_INPUT_TOKENS_USD: "1.25",
@@ -66,26 +63,22 @@ describe("the configuration schema", () => {
     expect(config.rateLimitSalt).toBeNull()
   })
 
-  it("reads costs, thresholds, and windows as numbers", () => {
+  it("reads costs and windows as numbers", () => {
     const config = APP_CONFIG_SCHEMA.parse(EXAMPLE_VARIABLES)
 
     expect(config.ocrCostPer1000PagesUsd).toBe(1)
     expect(config.openRouterCostPer1MInputTokensUsd).toBe(1.25)
     expect(config.openRouterCostPer1MOutputTokensUsd).toBe(10)
-    expect(config.matchWinnerStrength).toBe(0.55)
-    expect(config.matchWinnerGap).toBe(0.12)
     expect(config.reviewWindowSecondsCurated).toBe(604800)
     expect(config.reviewWindowSecondsCustom).toBe(86400)
   })
 
-  it("reports an unknown price rather than zero, and keeps demo defaults", () => {
+  it("reports an unknown price rather than zero, and keeps window defaults", () => {
     const config = APP_CONFIG_SCHEMA.parse(
       exampleWith({
         OCR_COST_PER_1000_PAGES_USD: "",
         OPENROUTER_COST_PER_1M_INPUT_TOKENS_USD: "free",
         OPENROUTER_COST_PER_1M_OUTPUT_TOKENS_USD: "-1",
-        MATCH_WINNER_STRENGTH: "strict",
-        MATCH_WINNER_GAP: "-2",
         REVIEW_WINDOW_SECONDS_CUSTOM: "0",
       })
     )
@@ -93,8 +86,6 @@ describe("the configuration schema", () => {
     expect(config.ocrCostPer1000PagesUsd).toBeNull()
     expect(config.openRouterCostPer1MInputTokensUsd).toBeNull()
     expect(config.openRouterCostPer1MOutputTokensUsd).toBeNull()
-    expect(config.matchWinnerStrength).toBe(0.55)
-    expect(config.matchWinnerGap).toBe(0.12)
     expect(config.reviewWindowSecondsCustom).toBe(86400)
   })
 
@@ -106,8 +97,6 @@ describe("the configuration schema", () => {
     expect(config.extractionProvider).toBe("openrouter")
     expect(config.rerankProvider).toBe("openrouter")
     expect(config.mistralOcrModel).toBe("mistral-ocr-latest")
-    expect(config.rerankModel).toBe("openai/gpt-5.6-luna")
-    expect(config.matchWinnerStrength).toBe(0.55)
     expect(config.reviewWindowSecondsCurated).toBe(604800)
     expect(config.ocrCostPer1000PagesUsd).toBeNull()
     expect(config.analytics).toEqual({ provider: "none", reason: "disabled" })

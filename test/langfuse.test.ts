@@ -12,7 +12,15 @@ import { beforeEach, describe, expect, it } from "vitest"
 import { APP_CONFIG_SCHEMA, readConfig } from "../worker/env"
 import type { LangfuseScore } from "../worker/langfuse/contract"
 import { bundledPrompt } from "../worker/langfuse/fallbacks"
-import { RERANK_INSTRUCTION } from "../worker/product-matching"
+import {
+  compatibleRerankPrompt,
+  rerankPrompt,
+} from "../worker/langfuse/rerank-prompt"
+import {
+  RERANK_CONTRACT,
+  RERANK_INSTRUCTION,
+  validateRerankOutput,
+} from "../worker/product-matching"
 import {
   capturedLangfuseScores,
   resetCapturedLangfuseScores,
@@ -161,6 +169,121 @@ describe("extraction prompt compatibility", () => {
         "trigger-prompt-incompatible.pdf",
       ])
     ).toEqual(bundledPrompt("rfq/extract"))
+  })
+})
+
+describe("rerank prompt compatibility", () => {
+  it.each([
+    RERANK_CONTRACT.omit({ ranked: true }),
+    RERANK_CONTRACT.extend({
+      ranked: z.array(
+        z.object({
+          score: z.number(),
+          reason: z.string(),
+        })
+      ),
+    }),
+    RERANK_CONTRACT.extend({
+      ranked: z.array(
+        z.object({
+          sku: z.string(),
+          reason: z.string(),
+        })
+      ),
+    }),
+  ])(
+    "refuses missing required ranking fields at every consumed depth",
+    (schema) => {
+      const prompt = bundledPrompt("rfq/rerank")
+      prompt.version = 42
+      prompt.isFallback = false
+      prompt.config.response_format = z.json().parse(z.toJSONSchema(schema))
+      expect(compatibleRerankPrompt(prompt)).toEqual(
+        bundledPrompt("rfq/rerank")
+      )
+    }
+  )
+
+  it("accepts additions while keeping the application contract small", () => {
+    const prompt = bundledPrompt("rfq/rerank")
+    prompt.config.response_format = z.json().parse(
+      z.toJSONSchema(
+        RERANK_CONTRACT.extend({
+          authorNote: z.string(),
+          ranked: z.array(
+            z.object({
+              sku: z.string().min(3),
+              score: z.number().min(0).max(1),
+              reason: z.string(),
+              evidence: z.string(),
+            })
+          ),
+        })
+      )
+    )
+    expect(compatibleRerankPrompt(prompt)).toEqual(prompt)
+  })
+
+  it("validates the full prompt schema before the application contract", () => {
+    const prompt = bundledPrompt("rfq/rerank")
+    prompt.config.response_format = z.json().parse(
+      z.toJSONSchema(
+        RERANK_CONTRACT.extend({
+          ranked: z.array(
+            z.object({
+              sku: z.string(),
+              score: z.number(),
+              reason: z.string(),
+              evidence: z.string(),
+            })
+          ),
+        })
+      )
+    )
+    const selected = rerankPrompt(compatibleRerankPrompt(prompt))
+    const withoutEvidence = JSON.stringify({
+      ranked: [{ sku: "NX-VLV-2210", score: 0.9, reason: "DN25." }],
+    })
+    expect(validateRerankOutput(withoutEvidence, selected.schema).state).toBe(
+      "invalid"
+    )
+
+    const withEvidence = JSON.stringify({
+      ranked: [
+        {
+          sku: "NX-VLV-2210",
+          score: 0.9,
+          reason: "DN25.",
+          evidence: "The request and product both specify DN25.",
+        },
+      ],
+    })
+    expect(validateRerankOutput(withEvidence, selected.schema)).toEqual({
+      state: "valid",
+      ranked: [{ sku: "NX-VLV-2210", score: 0.9, reason: "DN25." }],
+    })
+  })
+
+  it("reads valid thresholds and falls back for nonsense settings", () => {
+    const prompt = bundledPrompt("rfq/rerank")
+    prompt.config.winner_strength = 0.9
+    prompt.config.winner_gap = 0.3
+    expect(rerankPrompt(compatibleRerankPrompt(prompt)).config).toMatchObject({
+      winner_strength: 0.9,
+      winner_gap: 0.3,
+    })
+
+    prompt.config.winner_strength = "strict"
+    prompt.config.winner_gap = -2
+    expect(compatibleRerankPrompt(prompt)).toEqual(bundledPrompt("rfq/rerank"))
+  })
+
+  it("uses the same fallback guard for a fake incompatible request", async () => {
+    expect(
+      await selectLangfuseProvider(readConfig(env)).prompts.get("rfq/rerank", [
+        "trigger-prompt-incompatible",
+      ])
+    ).toEqual(bundledPrompt("rfq/rerank"))
   })
 })
 

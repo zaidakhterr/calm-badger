@@ -20,9 +20,8 @@
  * answer.
  */
 
-import type { z } from "zod"
-
 import type { AppConfig } from "../env"
+import type { RerankPrompt } from "../langfuse/rerank-prompt"
 
 import { createContractFakeRerankProvider } from "./contract-fake-rerank"
 import { estimateOpenRouterCostUsd } from "./openrouter-cost"
@@ -46,14 +45,13 @@ export type RerankCandidate = {
 export type RerankRequest = {
   /** Used only for structured logging. */
   runId: string
-  /** The task instruction. Built from static copy and stored as model input. */
-  instruction: string
+  /** Prompt text, settings, thresholds, and schema accepted at the Langfuse boundary. */
+  prompt: RerankPrompt
   /** The requested line, in the request's own words. */
   reference: string
   description: string
   /** At most `SHORTLIST_SIZE` products, retrieved before the model is asked. */
   candidates: RerankCandidate[]
-  schema: z.ZodType
   schemaName: string
   schemaDescription: string
 }
@@ -85,19 +83,24 @@ export function renderRerankModelInput(
       .join("\n")
   )
 
+  const renderedRequest = [
+    `Requested line: ${request.reference}`,
+    request.description && request.description !== request.reference
+      ? `Requested description: ${request.description}`
+      : null,
+    "",
+    "Candidate products:",
+    ...candidates,
+  ]
+    .filter((part) => part !== null)
+    .join("\n")
+
   return {
-    system: request.instruction,
-    user: [
-      `Requested line: ${request.reference}`,
-      request.description && request.description !== request.reference
-        ? `Requested description: ${request.description}`
-        : null,
-      "",
-      "Candidate products:",
-      ...candidates,
-    ]
-      .filter((part) => part !== null)
-      .join("\n"),
+    system: request.prompt.messages[0].content,
+    user: request.prompt.messages[1].content.replaceAll(
+      "{{request}}",
+      () => renderedRequest
+    ),
   }
 }
 
@@ -120,7 +123,6 @@ export type RerankResult = {
 
 export interface RerankProvider {
   readonly name: string
-  readonly model: string
   rerank(request: RerankRequest): Promise<RerankResult>
 }
 
@@ -147,7 +149,7 @@ export class RerankProviderError extends Error {
  */
 export function selectRerankProvider(config: AppConfig): RerankProvider {
   return config.rerankProvider === "contract-fake"
-    ? createContractFakeRerankProvider(config)
+    ? createContractFakeRerankProvider()
     : createOpenRouterRerankProvider(config)
 }
 
