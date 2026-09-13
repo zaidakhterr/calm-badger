@@ -31,6 +31,7 @@ import {
   type CatalogProduct,
 } from "./catalog/retrieval"
 import { readConfig } from "./env"
+import { MATCH_LINE_OBSERVATION_NAME, withObservationId } from "./langfuse/ids"
 import {
   applyIntegrityChecks,
   decideMatch,
@@ -318,35 +319,44 @@ async function match(
       // One observation per line, so the rerank generation it makes nests
       // under the line it decided, with the decision as the output.
       evidence.push(
-        await startActiveObservation("match-line", async (observation) => {
-          observation.update({
-            input: {
-              position: line.position,
-              reference: line.reference,
-              description: line.description,
-              shortlistSize: shortlist.length,
-            },
-          })
+        await withObservationId(
+          runId,
+          MATCH_LINE_OBSERVATION_NAME,
+          line.position,
+          () =>
+            startActiveObservation(
+              MATCH_LINE_OBSERVATION_NAME,
+              async (observation) => {
+                observation.update({
+                  input: {
+                    position: line.position,
+                    reference: line.reference,
+                    description: line.description,
+                    shortlistSize: shortlist.length,
+                  },
+                })
 
-          const matched = await matchLine(runId, provider, heuristics, {
-            line,
-            shortlist,
-            products,
-            aliases,
-          })
+                const matched = await matchLine(runId, provider, heuristics, {
+                  line,
+                  shortlist,
+                  products,
+                  aliases,
+                })
 
-          observation.update({
-            output: {
-              state: matched.state,
-              method: matched.method,
-              sku: matched.sku,
-              productName: matched.productName,
-              confidence: matched.confidence,
-            },
-          })
+                observation.update({
+                  output: {
+                    state: matched.state,
+                    method: matched.method,
+                    sku: matched.sku,
+                    productName: matched.productName,
+                    confidence: matched.confidence,
+                  },
+                })
 
-          return matched
-        })
+                return matched
+              }
+            )
+        )
       )
     } catch (error) {
       const message =

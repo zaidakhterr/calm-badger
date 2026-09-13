@@ -1,14 +1,17 @@
 import { WorkflowEntrypoint } from "cloudflare:workers"
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers"
+import { createTraceId } from "@langfuse/tracing"
 
 import { DEFAULT_ADAPTER } from "./adapters"
 import { captureFunnelEvent } from "./analytics"
 import { buildEstimate } from "./build-estimate"
 import { deliverRun, type DeliveryOutcome } from "./deliver"
 import { ConfigError, readConfig } from "./env"
+import { reviewApprovedScore, reviewLineScore } from "./langfuse/scores"
 import { applyReviewProductDecision, matchProducts } from "./match-products"
 import { readDocuments } from "./read-documents"
 import { applyReviewCustomer, resolveCustomer } from "./resolve-customer"
+import { selectLangfuseProvider } from "./providers/langfuse"
 import { retrieveCandidates } from "./retrieve-candidates"
 import type { ReviewOutcome } from "./review"
 import {
@@ -311,6 +314,7 @@ export async function applyReviewOutcome(
   const recorder = createRunStepRecorder(env, runId, REVIEW_STEP_KEY)
 
   if (outcome.state === "rejected") {
+    await writeReviewScores(env, runId, outcome)
     await recorder.complete(
       "The owner rejected the review. The run stops here.",
       { variant: "rejected" }
@@ -343,6 +347,8 @@ export async function applyReviewOutcome(
     }
   }
 
+  await writeReviewScores(env, runId, outcome)
+
   const count = outcome.decisions.length
 
   await recorder.complete(
@@ -361,6 +367,73 @@ export async function applyReviewOutcome(
 
   return "approved"
 }
+
+/**
+ * Writes the implicit signals created by the owner's settled review.
+ *
+ * Every write has a deterministic id. If the durable apply step retries after
+ * a partial Langfuse failure, it updates the same score instead of recording
+ * the review twice. Expiry is the absence of an owner decision and writes no
+ * score.
+ */
+async function writeReviewScores(
+  env: Env,
+  runId: string,
+  outcome: ReviewOutcome
+): Promise<void> {
+  if (outcome.state === "expired") return
+
+  const provider = selectLangfuseProvider(readConfig(env))
+  const traceId = await createTraceId(runId)
+
+  if (outcome.state === "approved") {
+    const lineScores = new Map<number, ReviewLineScore>()
+
+    for (const decision of outcome.decisions) {
+      if (decision.kind === "customer") continue
+
+      const current = lineScores.get(decision.position)
+
+      if (
+        decision.kind === "product" &&
+        decision.decision === "accepted_proposal"
+      ) {
+        if (!current) lineScores.set(decision.position, { value: 1 })
+        continue
+      }
+
+      const comment =
+        decision.kind === "product" ? decision.sku : current?.comment
+      const score: ReviewLineScore = { value: 0 }
+      if (comment !== undefined) score.comment = comment
+      lineScores.set(decision.position, score)
+    }
+
+    for (const [position, score] of [...lineScores].sort(
+      ([left], [right]) => left - right
+    )) {
+      await provider.scores.write(
+        await reviewLineScore(
+          runId,
+          traceId,
+          position,
+          score.value,
+          score.comment
+        )
+      )
+    }
+  }
+
+  await provider.scores.write(
+    await reviewApprovedScore(
+      runId,
+      traceId,
+      outcome.state === "approved" ? 1 : 0
+    )
+  )
+}
+
+type ReviewLineScore = { value: 0 | 1; comment?: string }
 
 /**
  * Records RFQ receipt as the trace's first observation.
