@@ -117,7 +117,7 @@ The run has nine possible steps:
 
 Each completed step can show its validated result and decision evidence.
 Technical details are optional. They include model output, latency, token use,
-and estimated cost.
+and provider-reported cost.
 
 ## Retrieval and product matching
 
@@ -292,7 +292,8 @@ Unlike analytics, tracing sends business content. Langfuse receives:
   input holds the document text after reading, and the output holds the
   customer name and contact details the model extracted.
 - the name, media type, and size of every document, but not the document bytes
-- the page count and cost of every document read
+- the page count of every document read. Langfuse calculates its cost from the
+  configured model price.
 - the outcome and message of every step
 
 Langfuse masks email addresses and phone numbers before export. It does not

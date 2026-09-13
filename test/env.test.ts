@@ -23,13 +23,10 @@ const EXAMPLE_VARIABLES = {
   APP_ENV: "development",
   OCR_PROVIDER: "mistral",
   MISTRAL_OCR_MODEL: "mistral-ocr-latest",
-  OCR_COST_PER_1000_PAGES_USD: "1",
   EXTRACTION_PROVIDER: "openrouter",
   RERANK_PROVIDER: "openrouter",
   REVIEW_WINDOW_SECONDS_CURATED: "604800",
   REVIEW_WINDOW_SECONDS_CUSTOM: "86400",
-  OPENROUTER_COST_PER_1M_INPUT_TOKENS_USD: "1.25",
-  OPENROUTER_COST_PER_1M_OUTPUT_TOKENS_USD: "10",
   ANALYTICS_PROVIDER: "posthog",
   POSTHOG_HOST: "https://eu.i.posthog.com",
   MISTRAL_API_KEY: "",
@@ -63,29 +60,20 @@ describe("the configuration schema", () => {
     expect(config.rateLimitSalt).toBeNull()
   })
 
-  it("reads costs and windows as numbers", () => {
+  it("reads windows as numbers", () => {
     const config = APP_CONFIG_SCHEMA.parse(EXAMPLE_VARIABLES)
 
-    expect(config.ocrCostPer1000PagesUsd).toBe(1)
-    expect(config.openRouterCostPer1MInputTokensUsd).toBe(1.25)
-    expect(config.openRouterCostPer1MOutputTokensUsd).toBe(10)
     expect(config.reviewWindowSecondsCurated).toBe(604800)
     expect(config.reviewWindowSecondsCustom).toBe(86400)
   })
 
-  it("reports an unknown price rather than zero, and keeps window defaults", () => {
+  it("keeps defaults for malformed windows", () => {
     const config = APP_CONFIG_SCHEMA.parse(
       exampleWith({
-        OCR_COST_PER_1000_PAGES_USD: "",
-        OPENROUTER_COST_PER_1M_INPUT_TOKENS_USD: "free",
-        OPENROUTER_COST_PER_1M_OUTPUT_TOKENS_USD: "-1",
         REVIEW_WINDOW_SECONDS_CUSTOM: "0",
       })
     )
 
-    expect(config.ocrCostPer1000PagesUsd).toBeNull()
-    expect(config.openRouterCostPer1MInputTokensUsd).toBeNull()
-    expect(config.openRouterCostPer1MOutputTokensUsd).toBeNull()
     expect(config.reviewWindowSecondsCustom).toBe(86400)
   })
 
@@ -98,7 +86,6 @@ describe("the configuration schema", () => {
     expect(config.rerankProvider).toBe("openrouter")
     expect(config.mistralOcrModel).toBe("mistral-ocr-latest")
     expect(config.reviewWindowSecondsCurated).toBe(604800)
-    expect(config.ocrCostPer1000PagesUsd).toBeNull()
     expect(config.analytics).toEqual({ provider: "none", reason: "disabled" })
   })
 

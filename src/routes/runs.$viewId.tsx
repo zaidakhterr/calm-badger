@@ -720,19 +720,7 @@ function DocumentEvidencePanel({ evidence }: { evidence: DocumentEvidence }) {
               label="Pages processed"
               value={`${evidence.totals.pagesProcessed} of ${evidence.totals.pageCount} pages`}
             />
-            <MetaRow
-              label="Estimated cost"
-              value={
-                evidence.totals.estimatedCostUsd === null
-                  ? "Unknown"
-                  : `$${evidence.totals.estimatedCostUsd.toFixed(4)}`
-              }
-            />
           </dl>
-          <p className="mt-1.5 text-[11px] text-muted-foreground">
-            This cost is an estimate. It is not a billed amount. Unknown means
-            that no page price is configured.
-          </p>
         </div>
       ) : null}
     </div>
@@ -867,14 +855,6 @@ function StructureEvidencePanel({ evidence }: { evidence: StructureEvidence }) {
                 : "—"
             }
           />
-          <MetaRow
-            label="Estimated cost"
-            value={
-              evidence.estimatedCostUsd === null
-                ? "Unknown"
-                : `$${evidence.estimatedCostUsd.toFixed(4)}`
-            }
-          />
           {evidence.reportedCostUsd !== null ? (
             <MetaRow
               label="Provider-reported cost"
@@ -882,10 +862,6 @@ function StructureEvidencePanel({ evidence }: { evidence: StructureEvidence }) {
             />
           ) : null}
         </dl>
-        <p className="mt-1.5 text-[11px] text-muted-foreground">
-          This cost is an estimate. It is not a billed amount. Unknown means
-          that no token price is configured.
-        </p>
       </div>
     </div>
   )
@@ -1240,19 +1216,13 @@ function MatchEvidencePanel({
                   : "—"
               }
             />
-            <MetaRow
-              label="Estimated cost"
-              value={
-                evidence.totals.estimatedCostUsd === null
-                  ? "Unknown"
-                  : `$${evidence.totals.estimatedCostUsd.toFixed(4)}`
-              }
-            />
+            {evidence.totals.reportedCostUsd !== null ? (
+              <MetaRow
+                label="Provider-reported cost"
+                value={`$${evidence.totals.reportedCostUsd.toFixed(4)}`}
+              />
+            ) : null}
           </dl>
-          <p className="mt-1.5 text-[11px] text-muted-foreground">
-            This cost is an estimate. It is not a billed amount. Unknown means
-            that no token price is configured.
-          </p>
         </div>
       ) : null}
     </div>

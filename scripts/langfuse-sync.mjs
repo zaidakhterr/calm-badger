@@ -8,6 +8,35 @@ import { z } from "zod"
 const root = fileURLToPath(new URL("../", import.meta.url))
 const envelope = z.object({ status: z.number(), body: z.json() })
 const promptVersion = z.object({ name: z.string(), version: z.number() })
+const modelPage = z.object({
+  data: z.array(
+    z.object({
+      id: z.string(),
+      modelName: z.string(),
+      matchPattern: z.string(),
+      isLangfuseManaged: z.boolean(),
+      unit: z.string().nullable(),
+      pricingTiers: z.array(
+        z.object({
+          isDefault: z.boolean(),
+          prices: z.record(
+            z.string(),
+            z.union([
+              z.number(),
+              z.object({ price: z.number() }).transform((value) => value.price),
+            ])
+          ),
+        })
+      ),
+    })
+  ),
+  meta: z.object({ totalPages: z.number() }),
+})
+
+const OCR_MODEL_NAME = "mistral-ocr-latest"
+const OCR_MODEL_MATCH_PATTERN = "(?i)^mistral-ocr-latest$"
+// Mistral's current OCR 4.1 price is $4 per 1,000 pages.
+const OCR_PAGE_PRICE_USD = 0.004
 
 function cli(args, input) {
   const result = spawnSync(
@@ -173,7 +202,81 @@ async function syncDataset(loader) {
   }
 }
 
+function syncOcrModel() {
+  for (let page = 1; ; page += 1) {
+    const response = cli([
+      "models",
+      "list",
+      "--page",
+      String(page),
+      "--limit",
+      "100",
+    ])
+    if (response.status !== 200)
+      throw new Error(`Model lookup failed (${response.status})`)
+    const existing = modelPage.parse(response.body)
+    const model = existing.data.find(
+      (entry) =>
+        !entry.isLangfuseManaged &&
+        entry.modelName === OCR_MODEL_NAME &&
+        entry.matchPattern === OCR_MODEL_MATCH_PATTERN
+    )
+    if (model) {
+      const defaultTier = model.pricingTiers.find((tier) => tier.isDefault)
+      if (
+        model.unit !== "REQUESTS" ||
+        defaultTier?.prices.pages !== OCR_PAGE_PRICE_USD
+      ) {
+        const updated = cli(
+          ["models", "upsert", model.id, "--body-file", "-"],
+          JSON.stringify(ocrModelBody())
+        )
+        if (updated.status < 200 || updated.status >= 300)
+          throw new Error(`Model update failed (${updated.status})`)
+        console.log(
+          `Updated ${model.modelName} model ${model.id} with pages pricing.`
+        )
+        return
+      }
+      console.log(`Preserved ${model.modelName} model ${model.id}.`)
+      return
+    }
+    if (page >= existing.meta.totalPages) break
+  }
+
+  const created = cli(
+    ["models", "create", "--body-file", "-"],
+    JSON.stringify(ocrModelBody())
+  )
+  if (created.status < 200 || created.status >= 300)
+    throw new Error(`Model creation failed (${created.status})`)
+  const model = z
+    .object({ id: z.string(), modelName: z.string() })
+    .parse(created.body)
+  console.log(
+    `Created ${model.modelName} model ${model.id} with pages pricing.`
+  )
+}
+
+function ocrModelBody() {
+  return {
+    modelName: OCR_MODEL_NAME,
+    matchPattern: OCR_MODEL_MATCH_PATTERN,
+    unit: "REQUESTS",
+    pricingTiers: [
+      {
+        name: "Standard",
+        isDefault: true,
+        priority: 0,
+        conditions: [],
+        prices: { pages: OCR_PAGE_PRICE_USD },
+      },
+    ],
+  }
+}
+
 try {
+  syncOcrModel()
   const loader = await createServer({
     root,
     configFile: false,
