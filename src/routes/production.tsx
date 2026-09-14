@@ -25,9 +25,10 @@ const PRODUCTION_IMPROVEMENTS = [
   },
   {
     title: "Operations console",
-    current: "Each run is inspected from its individual workflow view.",
+    current:
+      "Langfuse shows run volume, failures, review demand, cost, and business-step latency.",
     improvement:
-      "Show active runs, review queues, failures, latency, and cost controls.",
+      "Add service targets, alerts, cost budgets, and operator actions.",
   },
   {
     title: "Retrieval quality",
@@ -49,9 +50,10 @@ const PRODUCTION_IMPROVEMENTS = [
   },
   {
     title: "Evaluation and quality gates",
-    current: "Three synthetic scenarios make the workflow repeatable.",
+    current:
+      "Langfuse runs three synthetic scenarios and checks each pull request.",
     improvement:
-      "Use held-out sets, regression targets, and release quality gates.",
+      "Add held-out sets, calibrated confidence, and broader regression targets.",
   },
   {
     title: "Controlled learning loop",

@@ -21,6 +21,7 @@
  * this node reading `active` forever.
  */
 
+import { startActiveObservation } from "@langfuse/tracing"
 import { z } from "zod"
 
 import {
@@ -30,26 +31,25 @@ import {
   type CatalogProduct,
 } from "./catalog/retrieval"
 import { readConfig } from "./env"
+import { MATCH_LINE_OBSERVATION_NAME, withObservationId } from "./langfuse/ids"
+import { rerankPrompt, type RerankPrompt } from "./langfuse/rerank-prompt"
 import {
   applyIntegrityChecks,
   decideMatch,
-  readMatchHeuristics,
-  RERANK_INSTRUCTION,
   RERANK_SCHEMA_DESCRIPTION,
   RERANK_SCHEMA_NAME,
-  rerankSchema,
   validateRerankOutput,
   type MatchAlternative,
   type MatchDecision,
   type MatchHeuristics,
 } from "./product-matching"
 import {
-  estimateRerankCostUsd,
   renderRerankModelInput,
   RerankProviderError,
   selectRerankProvider,
   type RerankProvider,
 } from "./providers/rerank"
+import { selectLangfuseProvider } from "./providers/langfuse"
 import {
   CONFIDENCE_SCHEMA,
   labelFor,
@@ -140,6 +140,7 @@ const MATCH_LINE_SCHEMA = z.object({
   originalOutput: z.string().nullable(),
   latencyMs: z.number().nullable().catch(null),
   usage: RERANK_USAGE_SCHEMA.nullable().catch(null),
+  reportedCostUsd: z.number().nonnegative().finite().nullable().catch(null),
 })
 
 /**
@@ -176,8 +177,10 @@ export const MATCHES_EVIDENCE_SCHEMA = z.object({
       modelCalls: z.number(),
       providerLatencyMs: z.number(),
       usage: RERANK_USAGE_SCHEMA.nullable(),
-      /** `null` when no model was called; never a silently invented zero. */
+      /** Legacy compatibility only. New evidence never estimates model cost. */
       estimatedCostUsd: z.number().nullable(),
+      /** Exact sum reported by OpenRouter, or `null` if any call omitted it. */
+      reportedCostUsd: z.number().nonnegative().finite().nullable().catch(null),
       elapsedMs: z.number(),
     })
     .nullable()
@@ -244,6 +247,7 @@ type LineEvidenceFacts = Pick<
   | "originalOutput"
   | "latencyMs"
   | "usage"
+  | "reportedCostUsd"
 >
 
 export async function matchProducts(
@@ -298,8 +302,18 @@ async function match(
     `Ranking shortlisted products for ${lines.length} ${lines.length === 1 ? "line" : "lines"}…`
   )
 
-  const provider = selectRerankProvider(readConfig(env))
-  const heuristics = readMatchHeuristics(readConfig(env))
+  const config = readConfig(env)
+  const prompt = rerankPrompt(
+    await selectLangfuseProvider(config).prompts.get(
+      "rfq/rerank",
+      lines.flatMap((line) => [line.reference, line.description])
+    )
+  )
+  const provider = selectRerankProvider(config)
+  const heuristics = {
+    winnerStrength: prompt.config.winner_strength,
+    winnerGap: prompt.config.winner_gap,
+  }
   const skus = [...new Set(candidates.map((candidate) => candidate.sku))]
   const [products, aliases] = await Promise.all([
     loadActiveProducts(env, skus),
@@ -314,13 +328,48 @@ async function match(
     )
 
     try {
+      // One observation per line, so the rerank generation it makes nests
+      // under the line it decided, with the decision as the output.
       evidence.push(
-        await matchLine(runId, provider, heuristics, {
-          line,
-          shortlist,
-          products,
-          aliases,
-        })
+        await withObservationId(
+          runId,
+          MATCH_LINE_OBSERVATION_NAME,
+          line.position,
+          () =>
+            startActiveObservation(
+              MATCH_LINE_OBSERVATION_NAME,
+              async (observation) => {
+                observation.update({
+                  input: {
+                    position: line.position,
+                    reference: line.reference,
+                    description: line.description,
+                    shortlistSize: shortlist.length,
+                  },
+                })
+
+                const matched = await matchLine(
+                  runId,
+                  provider,
+                  prompt,
+                  heuristics,
+                  { line, shortlist, products, aliases }
+                )
+
+                observation.update({
+                  output: {
+                    state: matched.state,
+                    method: matched.method,
+                    sku: matched.sku,
+                    productName: matched.productName,
+                    confidence: matched.confidence,
+                  },
+                })
+
+                return matched
+              }
+            )
+        )
       )
     } catch (error) {
       const message =
@@ -343,10 +392,10 @@ async function match(
         state: "error",
         message,
         provider: provider.name,
-        model: provider.model,
+        model: prompt.config.model,
         heuristics: describeHeuristics(heuristics),
         lines: evidence,
-        totals: totalsOf(evidence, env, Date.now() - startedAt),
+        totals: totalsOf(evidence, Date.now() - startedAt),
       } satisfies MatchesEvidence)
 
       await step.fail(message)
@@ -365,10 +414,10 @@ async function match(
     state: "complete",
     message: null,
     provider: provider.name,
-    model: provider.model,
+    model: prompt.config.model,
     heuristics: describeHeuristics(heuristics),
     lines: evidence,
-    totals: totalsOf(evidence, env, elapsedMs),
+    totals: totalsOf(evidence, elapsedMs),
   } satisfies MatchesEvidence)
 
   await step.complete(
@@ -407,6 +456,7 @@ async function match(
 async function matchLine(
   runId: string,
   provider: RerankProvider,
+  prompt: RerankPrompt,
   heuristics: MatchHeuristics,
   input: {
     line: LineRow
@@ -432,6 +482,7 @@ async function matchLine(
     originalOutput: null,
     latencyMs: null,
     usage: null,
+    reportedCostUsd: null,
   }
 
   if (!leading) {
@@ -522,11 +573,10 @@ async function matchLine(
 
   const rerankRequest = {
     runId,
-    instruction: RERANK_INSTRUCTION,
+    prompt,
     reference: line.reference,
     description: line.description,
     candidates,
-    schema: rerankSchema,
     schemaName: RERANK_SCHEMA_NAME,
     schemaDescription: RERANK_SCHEMA_DESCRIPTION,
   }
@@ -541,6 +591,7 @@ async function matchLine(
     originalOutput: result.text.slice(0, MAX_STORED_OUTPUT_CHARS),
     latencyMs: result.latencyMs,
     usage: result.usage,
+    reportedCostUsd: result.reportedCostUsd,
   }
 
   const parsed = parseModelOutput(result.text)
@@ -561,7 +612,7 @@ async function matchLine(
     }
   }
 
-  const checked = validateRerankOutput(parsed.json)
+  const checked = validateRerankOutput(parsed.json, prompt.schema)
 
   if (checked.state === "invalid") {
     return {
@@ -663,7 +714,7 @@ function describeHeuristics(heuristics: MatchHeuristics) {
   }
 }
 
-function totalsOf(lines: LineEvidence[], env: Env, elapsedMs: number) {
+function totalsOf(lines: LineEvidence[], elapsedMs: number) {
   const usage = lines.reduce(
     (total, line) => ({
       inputTokens: total.inputTokens + (line.usage?.inputTokens ?? 0),
@@ -689,10 +740,27 @@ function totalsOf(lines: LineEvidence[], env: Env, elapsedMs: number) {
       0
     ),
     usage: reranked > 0 ? usage : null,
-    estimatedCostUsd:
-      reranked > 0 ? estimateRerankCostUsd(readConfig(env), usage) : null,
+    estimatedCostUsd: null,
+    reportedCostUsd: reportedRerankCost(lines, reranked),
     elapsedMs,
   }
+}
+
+function reportedRerankCost(
+  lines: LineEvidence[],
+  reranked: number
+): number | null {
+  if (reranked === 0) return null
+
+  const rerankedLines = lines.filter((line) => line.method === "rerank")
+  if (rerankedLines.some((line) => line.reportedCostUsd === null)) return null
+
+  const total = rerankedLines.reduce(
+    (total, line) => total + (line.reportedCostUsd ?? 0),
+    0
+  )
+  // Rounded to a billionth of a dollar, so float drift is not stored as spend.
+  return Number.isFinite(total) ? Math.round(total * 1e9) / 1e9 : null
 }
 
 /* -------------------------------------------------------------------------- */

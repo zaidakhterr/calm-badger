@@ -16,8 +16,6 @@
 import { env, exports } from "cloudflare:workers"
 import { describe, expect, it, vi } from "vitest"
 
-import { z } from "zod"
-
 import {
   ensureCatalogIndexes,
   normaliseText,
@@ -28,6 +26,8 @@ import {
 } from "../worker/catalog/retrieval"
 import { readConfig } from "../worker/env"
 import { loadCandidateEvidence, loadMatchEvidence } from "../worker/evidence"
+import { bundledPrompt } from "../worker/langfuse/fallbacks"
+import { rerankPrompt } from "../worker/langfuse/rerank-prompt"
 import {
   applyReviewProductDecision,
   type ReviewProductDecision,
@@ -35,7 +35,6 @@ import {
 import {
   applyIntegrityChecks,
   decideMatch,
-  readMatchHeuristics,
   RERANK_INSTRUCTION,
   validateRerankOutput,
   type MatchAlternative,
@@ -508,6 +507,10 @@ describe("matching a curated request", () => {
     expect(reranked.length).toBeGreaterThan(0)
     expect(matches.totals!.modelCalls).toBe(reranked.length)
     expect(matches.totals!.usage!.totalTokens).toBeGreaterThan(0)
+    expect(matches.heuristics).toMatchObject({
+      winnerStrength: 0.55,
+      winnerGap: 0.12,
+    })
 
     // A retrieved line is only ever asked about a bounded shortlist.
     for (const line of candidates.lines) {
@@ -833,7 +836,7 @@ describe("model output that has to be validated", () => {
 function rerankRequest(): RerankRequest {
   return {
     runId: "run-id",
-    instruction: "Answer with the probe object.",
+    prompt: rerankPrompt(bundledPrompt("rfq/rerank")),
     reference: "NX-VLV-2210",
     description: "Brass ball valve DN25",
     candidates: [
@@ -847,7 +850,6 @@ function rerankRequest(): RerankRequest {
         knownAs: ["ball valve"],
       },
     ],
-    schema: z.object({ ok: z.boolean() }),
     schemaName: "probe",
     schemaDescription: "A probe answer, so no run data reaches the stub.",
   }
@@ -920,33 +922,16 @@ describe("the acceptance heuristics", () => {
     expect(decision.topThree).toHaveLength(3)
   })
 
-  it("reads both thresholds from configuration and ignores nonsense", () => {
-    expect(readMatchHeuristics(readConfig(env))).toEqual({
-      winnerStrength: 0.55,
-      winnerGap: 0.12,
-    })
+  it("uses prompt thresholds when deciding whether to accept a winner", () => {
+    const prompt = bundledPrompt("rfq/rerank")
+    prompt.config.winner_strength = 0.95
+    prompt.config.winner_gap = 0.12
+    const selected = rerankPrompt(prompt)
 
-    expect(
-      readMatchHeuristics(
-        readConfig(
-          envWith({ MATCH_WINNER_STRENGTH: "0.9", MATCH_WINNER_GAP: "0.3" })
-        )
-      )
-    ).toEqual({ winnerStrength: 0.9, winnerGap: 0.3 })
-
-    expect(
-      readMatchHeuristics(
-        readConfig(
-          envWith({ MATCH_WINNER_STRENGTH: "strict", MATCH_WINNER_GAP: "-2" })
-        )
-      )
-    ).toEqual({ winnerStrength: 0.55, winnerGap: 0.12 })
-
-    // A stricter configuration turns the same ranking into a review.
     expect(
       decideMatch([winner, { ...runnerUp, score: 0.4 }], {
-        winnerStrength: 0.95,
-        winnerGap: 0.12,
+        winnerStrength: selected.config.winner_strength,
+        winnerGap: selected.config.winner_gap,
       }).state
     ).toBe("review_required")
   })

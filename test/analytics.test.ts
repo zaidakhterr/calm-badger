@@ -143,7 +143,7 @@ describe("what the funnel records", () => {
     )?.id
 
     const started = capturedAnalyticsEvents().find(
-      (event) => event.event === "rfq_run_started"
+      (event) => event.event === "rfq_run_started" && event.distinctId === runId
     )
 
     expect(started).toBeDefined()
@@ -302,10 +302,12 @@ describe("what the funnel records", () => {
     )?.id
 
     const decision = capturedAnalyticsEvents().find(
-      (event) => event.event === "rfq_review_decided"
+      (event) =>
+        event.event === "rfq_review_decided" && event.distinctId === runId
     )
     const delivery = capturedAnalyticsEvents().find(
-      (event) => event.event === "rfq_quote_delivered"
+      (event) =>
+        event.event === "rfq_quote_delivered" && event.distinctId === runId
     )
 
     // What was decided and where it went, keyed by the run. Not which items
@@ -338,6 +340,7 @@ describe("which analytics provider a deployment gets", () => {
       OCR_PROVIDER: "mistral",
       EXTRACTION_PROVIDER: "openrouter",
       RERANK_PROVIDER: "openrouter",
+      LANGFUSE_PROVIDER: "none",
       ...overrides,
     })
   }

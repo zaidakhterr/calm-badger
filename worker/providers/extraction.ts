@@ -15,12 +15,11 @@
  * be tested without a provider.
  */
 
-import type { z } from "zod"
+import type { ExtractionPrompt } from "../langfuse/extraction-prompt"
 
 import type { AppConfig } from "../env"
 
 import { createContractFakeExtractionProvider } from "./contract-fake-extraction"
-import { estimateOpenRouterCostUsd } from "./openrouter-cost"
 import { createOpenRouterExtractionProvider } from "./openrouter-extraction"
 
 /** One page of already-read document text handed to the model. */
@@ -35,11 +34,10 @@ export type ExtractionDocument = {
 export type ExtractionRequest = {
   /** Used only for structured logging. */
   runId: string
-  /** The task instruction. Built from static copy and stored as model input. */
-  instruction: string
+  /** Prompt text, settings, and schema accepted at the Langfuse boundary. */
+  prompt: ExtractionPrompt
   documents: ExtractionDocument[]
-  /** Constrains the response where the provider supports structured output. */
-  schema: z.ZodType
+  /** Names the provider's structured response. Its schema belongs to the prompt. */
   schemaName: string
   schemaDescription: string
 }
@@ -66,8 +64,10 @@ export function renderExtractionModelInput(
   })
 
   return {
-    system: request.instruction,
-    user: rendered.join("\n\n"),
+    system: request.prompt.messages[0].content,
+    user: request.prompt.messages[1].content.replaceAll("{{documents}}", () =>
+      rendered.join("\n\n")
+    ),
   }
 }
 
@@ -90,7 +90,6 @@ export type ExtractionResult = {
 
 export interface ExtractionProvider {
   readonly name: string
-  readonly model: string
   extract(request: ExtractionRequest): Promise<ExtractionResult>
 }
 
@@ -119,14 +118,6 @@ export function selectExtractionProvider(
   config: AppConfig
 ): ExtractionProvider {
   return config.extractionProvider === "contract-fake"
-    ? createContractFakeExtractionProvider(config)
+    ? createContractFakeExtractionProvider()
     : createOpenRouterExtractionProvider(config)
-}
-
-/** Estimated spend for one extraction call. Shared with reranking. */
-export function estimateExtractionCostUsd(
-  config: AppConfig,
-  usage: ExtractionUsage
-): number | null {
-  return estimateOpenRouterCostUsd(config, usage)
 }

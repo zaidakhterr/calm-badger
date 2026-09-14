@@ -1,14 +1,18 @@
 import { WorkflowEntrypoint } from "cloudflare:workers"
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers"
+import { createTraceId } from "@langfuse/tracing"
 
 import { DEFAULT_ADAPTER } from "./adapters"
 import { captureFunnelEvent } from "./analytics"
 import { buildEstimate } from "./build-estimate"
-import { deliverRun } from "./deliver"
+import { deliverRun, type DeliveryOutcome } from "./deliver"
 import { ConfigError, readConfig } from "./env"
+import type { LangfuseScore } from "./langfuse/contract"
+import { reviewApprovedScore, reviewLineScore } from "./langfuse/scores"
 import { applyReviewProductDecision, matchProducts } from "./match-products"
 import { readDocuments } from "./read-documents"
 import { applyReviewCustomer, resolveCustomer } from "./resolve-customer"
+import { selectLangfuseProvider } from "./providers/langfuse"
 import { retrieveCandidates } from "./retrieve-candidates"
 import type { ReviewOutcome } from "./review"
 import {
@@ -21,6 +25,11 @@ import {
 import { createRunStepRecorder } from "./run-steps"
 import { RFQ_RECEIVED_STEP_KEY } from "./runs"
 import { applyReviewLineDecision, structureRfq } from "./structure-rfq"
+import {
+  loadRunTraceContext,
+  traceRunStep,
+  type RunTraceContext,
+} from "./langfuse/tracing"
 
 export type RfqWorkflowParams = {
   runId: string
@@ -71,29 +80,14 @@ export class RfqWorkflow extends WorkflowEntrypoint<Env, RfqWorkflowParams> {
       return failure(runId, new Date().toISOString())
     }
 
-    const acknowledgedAt = await step.do("record RFQ receipt", async () => {
-      const now = new Date().toISOString()
+    // What every observation of this run carries. One read, before any step.
+    const run = await loadRunTraceContext(this.env, runId)
 
-      // Idempotent: the request handler already persisted RFQ receipt, so the
-      // durable orchestrator only confirms it owns the run. The receipt
-      // sentence and any earlier completion time are preserved by the
-      // recorder's `rfq-received` row, so a replay changes nothing.
-      await createRunStepRecorder(this.env, runId, "rfq-received").complete(
-        null,
-        { at: now }
-      )
-
-      console.log(
-        JSON.stringify({
-          event: "workflow_step_completed",
-          runId,
-          step: RFQ_RECEIVED_STEP_KEY,
-          instanceId: event.instanceId,
-        })
-      )
-
-      return now
-    })
+    // The first observation of the trace, so its input is the request as it
+    // arrived: the scenario, the source kind, and what each source is.
+    const acknowledgedAt = await step.do("record RFQ receipt", () =>
+      traceReceipt(this.env, run, runId, event.instanceId)
+    )
 
     // Every failure path in the steps below is handled inside the step, which
     // records a terminal error and returns. Nothing is thrown, so the workflow
@@ -102,24 +96,33 @@ export class RfqWorkflow extends WorkflowEntrypoint<Env, RfqWorkflowParams> {
     // later step can build on data that failed validation. (The one step that
     // deliberately throws is `apply review outcome`: it calls no provider, and
     // a half-applied correction must be retried, not recorded as a success.)
-    const documents = await step.do("read documents", async () =>
-      readDocuments(this.env, runId)
+    const documents = await step.do("read documents", () =>
+      traceRunStep(this.env, run, { name: "read-documents" }, () =>
+        readDocuments(this.env, runId)
+      )
     )
 
     if (documents.state !== "complete") {
       return failure(runId, acknowledgedAt)
     }
 
-    const structured = await step.do("structure RFQ", async () =>
-      structureRfq(this.env, runId)
+    const structured = await step.do("structure RFQ", () =>
+      traceRunStep(this.env, run, { name: "structure-rfq" }, () =>
+        structureRfq(this.env, runId)
+      )
     )
 
     if (structured.state !== "complete") {
       return failure(runId, acknowledgedAt)
     }
 
-    const customer = await step.do("resolve customer", async () =>
-      resolveCustomer(this.env, runId)
+    const customer = await step.do("resolve customer", () =>
+      traceRunStep(
+        this.env,
+        run,
+        { name: "resolve-customer", asType: "retriever" },
+        () => resolveCustomer(this.env, runId)
+      )
     )
 
     if (customer.state === "error") {
@@ -130,16 +133,23 @@ export class RfqWorkflow extends WorkflowEntrypoint<Env, RfqWorkflowParams> {
     // only that customer's private vocabulary is unavailable to it.
     const customerResolved = customer.state === "resolved"
 
-    const retrieved = await step.do("retrieve candidates", async () =>
-      retrieveCandidates(this.env, runId)
+    const retrieved = await step.do("retrieve candidates", () =>
+      traceRunStep(
+        this.env,
+        run,
+        { name: "retrieve-candidates", asType: "retriever" },
+        () => retrieveCandidates(this.env, runId)
+      )
     )
 
     if (retrieved.state !== "complete") {
       return failure(runId, acknowledgedAt, customerResolved)
     }
 
-    const matched = await step.do("match products", async () =>
-      matchProducts(this.env, runId)
+    const matched = await step.do("match products", () =>
+      traceRunStep(this.env, run, { name: "match-products" }, () =>
+        matchProducts(this.env, runId)
+      )
     )
 
     if (matched.state !== "complete") {
@@ -149,8 +159,10 @@ export class RfqWorkflow extends WorkflowEntrypoint<Env, RfqWorkflowParams> {
     // Everything the run could not decide for itself is consolidated into one
     // node here. When there is nothing to ask, no review node is ever shown and
     // pricing follows immediately.
-    const review = await step.do("open review", async () =>
-      openReview(this.env, runId)
+    const review = await step.do("open review", () =>
+      traceRunStep(this.env, run, { name: "open-review" }, () =>
+        openReview(this.env, runId)
+      )
     )
 
     if (review.state === "error") {
@@ -180,8 +192,8 @@ export class RfqWorkflow extends WorkflowEntrypoint<Env, RfqWorkflowParams> {
       // replayed, forged, or racing event therefore cannot move this run — and
       // whatever the persisted review says is applied here, in one durable
       // step, before anything downstream reads the corrected facts.
-      const settled = await step.do("apply review outcome", async () =>
-        applyReviewOutcome(this.env, runId)
+      const settled = await step.do("apply review outcome", () =>
+        traceReviewOutcome(this.env, run, runId)
       )
 
       if (settled !== "approved") {
@@ -198,8 +210,19 @@ export class RfqWorkflow extends WorkflowEntrypoint<Env, RfqWorkflowParams> {
     // settled, every line matched and quantified. Approved corrections are
     // already written into those same facts, so the corrected run is priced by
     // exactly the deterministic path an untouched run takes.
-    const estimate = await step.do("build estimate", async () =>
-      buildEstimate(this.env, runId, { reviewed: review.state === "required" })
+    const estimate = await step.do("build estimate", () =>
+      traceRunStep(
+        this.env,
+        run,
+        {
+          name: "build-estimate",
+          input: { reviewed: review.state === "required" },
+        },
+        () =>
+          buildEstimate(this.env, runId, {
+            reviewed: review.state === "required",
+          })
+      )
     )
 
     if (estimate.state === "error") {
@@ -218,8 +241,19 @@ export class RfqWorkflow extends WorkflowEntrypoint<Env, RfqWorkflowParams> {
     // Delivery needs no one's permission: the quote is priced, so it is
     // transformed by the fixed simulated webhook and the graph closes. The
     // step is idempotent, so a replay finds the stored delivery and stops.
-    const delivered = await step.do("deliver", async () =>
-      deliverRun(this.env, runId)
+    const delivered = await step.do("deliver", () =>
+      traceRunStep(
+        this.env,
+        run,
+        {
+          name: "deliver-quote",
+          asType: "tool",
+          input: { adapter: DEFAULT_ADAPTER },
+          // The payload is stored evidence; the trace records the receipt.
+          output: summarizeDelivery,
+        },
+        () => deliverRun(this.env, runId)
+      )
     )
 
     if (delivered.state === "delivered") {
@@ -281,6 +315,7 @@ export async function applyReviewOutcome(
   const recorder = createRunStepRecorder(env, runId, REVIEW_STEP_KEY)
 
   if (outcome.state === "rejected") {
+    await writeReviewScores(env, runId, outcome)
     await recorder.complete(
       "The owner rejected the review. The run stops here.",
       { variant: "rejected" }
@@ -313,6 +348,8 @@ export async function applyReviewOutcome(
     }
   }
 
+  await writeReviewScores(env, runId, outcome)
+
   const count = outcome.decisions.length
 
   await recorder.complete(
@@ -330,6 +367,174 @@ export async function applyReviewOutcome(
   )
 
   return "approved"
+}
+
+/**
+ * Writes the implicit signals created by the owner's settled review.
+ *
+ * Every write has a deterministic id. If the durable apply step retries after
+ * a partial Langfuse failure, it updates the same score instead of recording
+ * the review twice. Expiry is the absence of an owner decision and writes no
+ * score.
+ *
+ * Only product decisions score the match observation: a quantity or field fix
+ * says nothing about whether the reranker chose the right SKU. A Langfuse
+ * outage must not fail a run, so a failed write is logged and skipped.
+ */
+async function writeReviewScores(
+  env: Env,
+  runId: string,
+  outcome: ReviewOutcome
+): Promise<void> {
+  if (outcome.state === "expired") return
+
+  const provider = selectLangfuseProvider(readConfig(env))
+  const traceId = await createTraceId(runId)
+  const scores: LangfuseScore[] = []
+
+  if (outcome.state === "approved") {
+    const products = outcome.decisions
+      .filter((decision) => decision.kind === "product")
+      .sort((left, right) => left.position - right.position)
+
+    for (const decision of products) {
+      const accepted = decision.decision === "accepted_proposal"
+      scores.push(
+        await reviewLineScore(
+          runId,
+          traceId,
+          decision.position,
+          accepted ? 1 : 0,
+          accepted ? undefined : decision.sku
+        )
+      )
+    }
+  }
+
+  scores.push(
+    await reviewApprovedScore(
+      runId,
+      traceId,
+      outcome.state === "approved" ? 1 : 0
+    )
+  )
+
+  for (const score of scores) {
+    try {
+      await provider.scores.write(score)
+    } catch {
+      console.error(
+        JSON.stringify({
+          event: "review_score_write_failed",
+          runId,
+          score: score.name,
+        })
+      )
+    }
+  }
+}
+
+/**
+ * Records RFQ receipt as the trace's first observation.
+ *
+ * Idempotent: the request handler already persisted RFQ receipt, so the
+ * durable orchestrator only confirms it owns the run. The receipt sentence and
+ * any earlier completion time are preserved by the recorder's `rfq-received`
+ * row, so a replay changes nothing. The step's stored value stays the bare
+ * timestamp it always was.
+ */
+async function traceReceipt(
+  env: Env,
+  run: RunTraceContext | null,
+  runId: string,
+  instanceId: string
+): Promise<string> {
+  const traced = await traceRunStep(
+    env,
+    run,
+    {
+      name: "receive-rfq",
+      input: {
+        scenarioId: run?.scenarioId ?? null,
+        sourceKind: run?.sourceKind ?? null,
+        sources: run?.sources ?? [],
+      },
+    },
+    async () => {
+      const now = new Date().toISOString()
+
+      await createRunStepRecorder(env, runId, "rfq-received").complete(null, {
+        at: now,
+      })
+
+      console.log(
+        JSON.stringify({
+          event: "workflow_step_completed",
+          runId,
+          step: RFQ_RECEIVED_STEP_KEY,
+          instanceId,
+        })
+      )
+
+      return {
+        state: "received",
+        sourceCount: run?.sources.length ?? 0,
+        acknowledgedAt: now,
+      }
+    }
+  )
+
+  return traced.acknowledgedAt
+}
+
+/**
+ * The review outcome as one traced step. The outcome is a bare state, so it is
+ * wrapped for the observation and unwrapped for the workflow, which keeps the
+ * durable step's stored value exactly what it was.
+ */
+async function traceReviewOutcome(
+  env: Env,
+  run: RunTraceContext | null,
+  runId: string
+): Promise<ReviewOutcome["state"] | "pending"> {
+  const traced = await traceRunStep(
+    env,
+    run,
+    { name: "apply-review-outcome" },
+    async () => ({ state: await applyReviewOutcome(env, runId) })
+  )
+
+  return traced.state
+}
+
+/** What the trace keeps of a delivery: the receipt, never the payload. */
+type DeliverySummary =
+  | { state: "delivered"; externalEstimateId: string; acceptedAt: string }
+  | {
+      state: "already_delivered"
+      externalEstimateId: string
+      deliveredAt: string
+    }
+  | { state: "not_priced" }
+  | { state: "error"; message: string }
+
+function summarizeDelivery(outcome: DeliveryOutcome): DeliverySummary {
+  switch (outcome.state) {
+    case "delivered":
+      return {
+        state: outcome.state,
+        externalEstimateId: outcome.delivery.receipt.externalEstimateId,
+        acceptedAt: outcome.delivery.receipt.acceptedAt,
+      }
+    case "already_delivered":
+      return {
+        state: outcome.state,
+        externalEstimateId: outcome.delivery.externalEstimateId,
+        deliveredAt: outcome.delivery.deliveredAt,
+      }
+    default:
+      return outcome
+  }
 }
 
 function failure(

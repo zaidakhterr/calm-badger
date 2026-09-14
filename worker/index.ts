@@ -14,6 +14,7 @@ import {
   loadReceivedEvidence,
   loadStructureEvidence,
 } from "./evidence"
+import { OWNER_FEEDBACK_BODY_SCHEMA, recordOwnerFeedback } from "./feedback"
 import {
   loadReviewEvidence,
   recordDecisions,
@@ -201,8 +202,8 @@ async function routeRequest(
       return methodNotAllowed("GET")
     }
 
-    // Curated source material only. Expected outcomes are test fixtures and are
-    // never served to a client.
+    // Curated source material only. Expected outcomes live only in the
+    // Langfuse dataset, so the Worker has nothing to serve.
     return Response.json(
       { scenarios: scenarioPreviews() },
       { headers: jsonHeaders }
@@ -253,7 +254,7 @@ async function routeRequest(
   }
 
   const runMatch =
-    /^\/api\/runs\/([A-Za-z0-9_-]+)(?:\/(reset|received|documents|structure|customer|candidates|matches|estimate|delivery|quote|review)|\/review\/(decisions|catalog|customers)|\/sources\/([A-Za-z0-9-]+))?$/.exec(
+    /^\/api\/runs\/([A-Za-z0-9_-]+)(?:\/(reset|received|documents|structure|customer|candidates|matches|estimate|delivery|quote|review|feedback)|\/review\/(decisions|catalog|customers)|\/sources\/([A-Za-z0-9-]+))?$/.exec(
       url.pathname
     )
 
@@ -278,6 +279,14 @@ async function routeRequest(
 
     if (segment === "review" && request.method === "POST") {
       return reviewDecisionResponse(request, env, ctx, viewId)
+    }
+
+    if (segment === "feedback") {
+      if (request.method !== "POST") {
+        return methodNotAllowed("POST")
+      }
+
+      return ownerFeedbackResponse(request, env, viewId)
     }
 
     if (segment === "reset") {
@@ -328,6 +337,59 @@ async function routeRequest(
   }
 
   return env.ASSETS.fetch(request)
+}
+
+/** Writes explicit owner feedback without exposing Langfuse credentials. */
+async function ownerFeedbackResponse(
+  request: Request,
+  env: Env,
+  viewId: string
+): Promise<Response> {
+  const authorization = await authorizeOwner(
+    env,
+    viewId,
+    request.headers.get("authorization")
+  )
+
+  if (!authorization.ok) return ownerRejection(authorization.reason)
+
+  const body = await readJsonBody(request, OWNER_FEEDBACK_BODY_SCHEMA)
+
+  if (!body.ok) {
+    return Response.json(
+      { error: "Choose a known feedback target and a thumbs value." },
+      { status: 400, headers: jsonHeaders }
+    )
+  }
+
+  const outcome = await recordOwnerFeedback(
+    env,
+    authorization.runId,
+    body.value
+  )
+
+  if (outcome.state === "before_matches") {
+    return Response.json(
+      { error: "Feedback is available after product matches." },
+      { status: 409, headers: jsonHeaders }
+    )
+  }
+
+  if (outcome.state === "unknown_line") {
+    return Response.json(
+      { error: "This run does not have that matched line." },
+      { status: 400, headers: jsonHeaders }
+    )
+  }
+
+  if (outcome.state === "unavailable") {
+    return Response.json(
+      { error: "Feedback could not be saved right now. Try again later." },
+      { status: 503, headers: jsonHeaders }
+    )
+  }
+
+  return Response.json({ status: "recorded" }, { headers: jsonHeaders })
 }
 
 function methodNotAllowed(allow: string): Response {

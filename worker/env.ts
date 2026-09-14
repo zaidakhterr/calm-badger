@@ -3,8 +3,8 @@
  *
  * `Env` is the Cloudflare binding object: `DB`, `ARTIFACTS`, `RFQ_WORKFLOW`,
  * `ASSETS`, and a set of strings. Everything on it that is a string is parsed
- * here, once, into `AppConfig` — provider names as enums, models as non-empty
- * text, costs and thresholds and windows as numbers, secrets as `string | null`
+ * here, once, into `AppConfig` — provider names as enums, the OCR model as
+ * non-empty text, windows as numbers, secrets as `string | null`
  * — so that no call site anywhere else reads a raw variable off the binding
  * object and decides for itself what a blank one means.
  *
@@ -15,31 +15,23 @@
  *   that has one;
  * - an *effective* PostHog target cannot exist without a project key, so the
  *   analytics provider never has to ask whether its key is present;
- * - thresholds are ratios and review windows are positive.
+ * - review windows are positive.
  *
  * Where a bad value has an honest fallback the schema takes it, because that
- * is the behaviour these variables already had: a malformed price yields `null`
- * (an uncosted call and a free call are different facts), and a nonsense
- * threshold or window yields the documented default. Where a bad value has no
- * honest fallback — an unknown provider, a fake in production — parsing fails,
- * and the Worker and the workflow turn that into one clear line rather than a
- * surprise halfway through a run.
+ * is the behaviour these variables already had: a nonsense window yields the
+ * documented default. Where a bad value has no honest fallback — an unknown
+ * provider, a fake in production — parsing fails, and the Worker and the
+ * workflow turn that into one clear line rather than a surprise halfway
+ * through a run.
  */
 
 import { z } from "zod"
 
+import { langfuseTarget, tracingTarget } from "./langfuse/target"
+
 /** The deployed defaults, repeated here so a missing variable is not fatal. */
 const DEFAULT_MISTRAL_OCR_MODEL = "mistral-ocr-latest"
-const DEFAULT_OPENROUTER_MODEL = "openai/gpt-5.6-luna"
 const DEFAULT_POSTHOG_HOST = "https://eu.i.posthog.com"
-
-/**
- * The winner-strength default is the same 0.55 that separates a Medium
- * confidence label from a Review one, so "accepted" and "at least Medium" mean
- * the same thing.
- */
-const DEFAULT_WINNER_STRENGTH = 0.55
-const DEFAULT_WINNER_GAP = 0.12
 
 /**
  * How long an owner has to decide. The window mirrors the run's own retention,
@@ -54,29 +46,6 @@ const DEFAULT_WINDOW_SECONDS_CUSTOM = 24 * 60 * 60
 /** Required text with a deployed default. Absent falls back; blank is a fault. */
 function text(fallback: string) {
   return z.string().trim().min(1).default(fallback)
-}
-
-/**
- * A configured price. Blank, absent, negative, or unparseable yields `null`
- * rather than zero: an estimator that prints "$0.0000" for a deployment whose
- * prices were never configured is telling a quiet lie.
- */
-const priceUsd = z
-  .string()
-  .trim()
-  .transform((raw) => Number.parseFloat(raw))
-  .refine((value) => Number.isFinite(value) && value >= 0)
-  .nullable()
-  .catch(null)
-
-/** A demo heuristic between 0 and 1. Nonsense takes the documented default. */
-function ratio(fallback: number) {
-  return z
-    .string()
-    .trim()
-    .transform((raw) => Number.parseFloat(raw))
-    .refine((value) => Number.isFinite(value) && value >= 0 && value <= 1)
-    .catch(fallback)
 }
 
 /** A positive duration in seconds. Nonsense takes the documented default. */
@@ -99,22 +68,14 @@ const VARIABLES_SCHEMA = z.object({
   OCR_PROVIDER: z.enum(["mistral", "contract-fake"]).default("mistral"),
   MISTRAL_OCR_MODEL: text(DEFAULT_MISTRAL_OCR_MODEL),
   MISTRAL_API_KEY: secret,
-  OCR_COST_PER_1000_PAGES_USD: priceUsd,
 
   EXTRACTION_PROVIDER: z
     .enum(["openrouter", "contract-fake"])
     .default("openrouter"),
-  OPENROUTER_EXTRACTION_MODEL: text(DEFAULT_OPENROUTER_MODEL),
   RERANK_PROVIDER: z
     .enum(["openrouter", "contract-fake"])
     .default("openrouter"),
-  OPENROUTER_RERANK_MODEL: text(DEFAULT_OPENROUTER_MODEL),
   OPENROUTER_API_KEY: secret,
-  OPENROUTER_COST_PER_1M_INPUT_TOKENS_USD: priceUsd,
-  OPENROUTER_COST_PER_1M_OUTPUT_TOKENS_USD: priceUsd,
-
-  MATCH_WINNER_STRENGTH: ratio(DEFAULT_WINNER_STRENGTH),
-  MATCH_WINNER_GAP: ratio(DEFAULT_WINNER_GAP),
 
   REVIEW_WINDOW_SECONDS_CURATED: seconds(DEFAULT_WINDOW_SECONDS_CURATED),
   REVIEW_WINDOW_SECONDS_CUSTOM: seconds(DEFAULT_WINDOW_SECONDS_CUSTOM),
@@ -126,6 +87,13 @@ const VARIABLES_SCHEMA = z.object({
   POSTHOG_API_KEY: secret,
 
   RATE_LIMIT_SALT: secret,
+
+  LANGFUSE_PROVIDER: z
+    .enum(["langfuse", "contract-fake", "none"])
+    .default("none"),
+  LANGFUSE_PUBLIC_KEY: secret,
+  LANGFUSE_SECRET_KEY: secret,
+  LANGFUSE_BASE_URL: secret,
 })
 
 type Variables = z.infer<typeof VARIABLES_SCHEMA>
@@ -184,15 +152,50 @@ function analyticsTarget(variables: Variables): AnalyticsTarget {
 }
 
 /**
- * The deterministic fakes exist for tests and fixture evaluation. Production is
+ * The deterministic fakes exist for tests. Production is
  * the one environment where selecting one would be a silent lie about what ran,
  * so the configuration itself is refused rather than each seam checking again.
  */
 export const APP_CONFIG_SCHEMA = VARIABLES_SCHEMA.superRefine(
   (variables, ctx) => {
+    if (variables.LANGFUSE_PROVIDER === "langfuse") {
+      for (const variable of [
+        "LANGFUSE_PUBLIC_KEY",
+        "LANGFUSE_SECRET_KEY",
+        "LANGFUSE_BASE_URL",
+      ] as const) {
+        if (variables[variable] !== null) continue
+        ctx.addIssue({
+          code: "custom",
+          path: [variable],
+          message: "Required when LANGFUSE_PROVIDER is langfuse",
+        })
+      }
+    }
+
+    // Without a salt the Langfuse user id falls back to a per-isolate value,
+    // and a resumed workflow would report the same trace under a new user.
+    if (
+      variables.LANGFUSE_PUBLIC_KEY !== null &&
+      variables.LANGFUSE_SECRET_KEY !== null &&
+      variables.LANGFUSE_BASE_URL !== null &&
+      variables.RATE_LIMIT_SALT === null
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["RATE_LIMIT_SALT"],
+        message: "Required when Langfuse tracing is configured",
+      })
+    }
+
     if (variables.APP_ENV !== "production") return
 
     const fakes = [
+      {
+        variable: "LANGFUSE_PROVIDER",
+        configured: variables.LANGFUSE_PROVIDER,
+        label: "Langfuse",
+      },
       {
         variable: "OCR_PROVIDER",
         configured: variables.OCR_PROVIDER,
@@ -231,25 +234,28 @@ export const APP_CONFIG_SCHEMA = VARIABLES_SCHEMA.superRefine(
   ocrProvider: variables.OCR_PROVIDER,
   mistralOcrModel: variables.MISTRAL_OCR_MODEL,
   mistralApiKey: variables.MISTRAL_API_KEY,
-  ocrCostPer1000PagesUsd: variables.OCR_COST_PER_1000_PAGES_USD,
 
   extractionProvider: variables.EXTRACTION_PROVIDER,
-  extractionModel: variables.OPENROUTER_EXTRACTION_MODEL,
   rerankProvider: variables.RERANK_PROVIDER,
-  rerankModel: variables.OPENROUTER_RERANK_MODEL,
   openRouterApiKey: variables.OPENROUTER_API_KEY,
-  openRouterCostPer1MInputTokensUsd:
-    variables.OPENROUTER_COST_PER_1M_INPUT_TOKENS_USD,
-  openRouterCostPer1MOutputTokensUsd:
-    variables.OPENROUTER_COST_PER_1M_OUTPUT_TOKENS_USD,
-
-  matchWinnerStrength: variables.MATCH_WINNER_STRENGTH,
-  matchWinnerGap: variables.MATCH_WINNER_GAP,
 
   reviewWindowSecondsCurated: variables.REVIEW_WINDOW_SECONDS_CURATED,
   reviewWindowSecondsCustom: variables.REVIEW_WINDOW_SECONDS_CUSTOM,
 
   analytics: analyticsTarget(variables),
+  tracing: tracingTarget(
+    variables.LANGFUSE_PUBLIC_KEY,
+    variables.LANGFUSE_SECRET_KEY,
+    variables.LANGFUSE_BASE_URL
+  ),
+  langfuse: langfuseTarget(
+    variables.LANGFUSE_PROVIDER,
+    tracingTarget(
+      variables.LANGFUSE_PUBLIC_KEY,
+      variables.LANGFUSE_SECRET_KEY,
+      variables.LANGFUSE_BASE_URL
+    )
+  ),
 
   rateLimitSalt: variables.RATE_LIMIT_SALT,
 }))

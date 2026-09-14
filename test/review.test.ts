@@ -1,7 +1,19 @@
 import { env, exports } from "cloudflare:workers"
-import { describe, expect, it } from "vitest"
+import { createTraceId } from "@langfuse/tracing"
+import { beforeEach, describe, expect, it } from "vitest"
 
 import { normaliseText } from "../worker/catalog/retrieval"
+import { LANGFUSE_SCORE_NAMES } from "../worker/langfuse/contract"
+import {
+  createObservationId,
+  createScoreId,
+  MATCH_LINE_OBSERVATION_NAME,
+} from "../worker/langfuse/ids"
+import {
+  capturedLangfuseScores,
+  failLangfuseScoreWrites,
+  resetCapturedLangfuseScores,
+} from "../worker/providers/contract-fake-langfuse"
 import {
   loadReviewEvidence,
   loadReviewOutcome,
@@ -134,7 +146,10 @@ async function pausedRun(workspaceId?: string) {
  * The marker is a contract-fake trigger, which is how a quantity or a field
  * that fails business validation is produced deterministically.
  */
-async function customPausedRun(marker: string) {
+async function customPausedRun(
+  marker: string,
+  requestLines = ["10 x panel filter 592x592 G4", "4 x LED high bay 150W"]
+) {
   const form = new FormData()
   form.set(
     "emailBody",
@@ -144,8 +159,7 @@ async function customPausedRun(marker: string) {
       "Subject: Request for quotation",
       "",
       "Please quote the following:",
-      "10 x panel filter 592x592 G4",
-      "4 x LED high bay 150W",
+      ...requestLines,
       "",
       marker,
     ].join("\n")
@@ -1109,6 +1123,291 @@ describe("repeated, premature, and rejected decisions", () => {
     expect(
       (await exports.default.fetch(`${base}/api/runs/${run.viewId}`)).status
     ).toBe(404)
+  })
+})
+
+/* -------------------------------------------------------------------------- */
+/* Review outcome scores                                                      */
+/* -------------------------------------------------------------------------- */
+
+describe("review outcome scores", () => {
+  beforeEach(resetCapturedLangfuseScores)
+
+  it("records each corrected product line on its match observation", async () => {
+    const { run, ownerCapability, review } = await pausedRun()
+    const runId = await runIdOf(run.viewId)
+    const productItems = review.items.filter((item) => item.kind === "product")
+    const corrections = new Map<number, string>()
+
+    expect(productItems.length).toBeGreaterThan(0)
+
+    const decisions = straightforwardDecisions(review).map((decision) => {
+      const item = productItems.find((entry) => entry.id === decision.itemId)
+      if (!item) return decision
+
+      const correctedSku = item.alternatives.find(
+        (alternative) => alternative.value !== item.proposal.sku
+      )?.value
+      if (!correctedSku) {
+        throw new Error(`No correction is available for line ${item.position}.`)
+      }
+
+      corrections.set(item.position, correctedSku)
+      return {
+        itemId: item.id,
+        action: "alternative",
+        sku: correctedSku,
+      }
+    })
+
+    expect((await decide(run.viewId, ownerCapability, decisions)).status).toBe(
+      200
+    )
+    expect((await settle(run.viewId, ownerCapability, "approve")).status).toBe(
+      200
+    )
+    await settledRun(run.viewId, "delivered", "a scored approved run")
+
+    const traceId = await createTraceId(runId)
+    const scores = capturedLangfuseScores().filter(
+      (score) => score.traceId === traceId
+    )
+
+    expect(scores).toHaveLength(productItems.length + 1)
+
+    for (const item of productItems) {
+      const correctedSku = corrections.get(item.position)
+      expect(correctedSku).toBeDefined()
+      expect(scores).toContainEqual({
+        id: await createScoreId(
+          runId,
+          LANGFUSE_SCORE_NAMES.reviewLineCorrect,
+          `${MATCH_LINE_OBSERVATION_NAME}:${item.position}`
+        ),
+        traceId,
+        observationId: await createObservationId(
+          runId,
+          MATCH_LINE_OBSERVATION_NAME,
+          item.position
+        ),
+        name: LANGFUSE_SCORE_NAMES.reviewLineCorrect,
+        value: 0,
+        comment: correctedSku,
+      })
+    }
+
+    expect(scores).toContainEqual({
+      id: await createScoreId(
+        runId,
+        LANGFUSE_SCORE_NAMES.reviewApproved,
+        "trace"
+      ),
+      traceId,
+      name: LANGFUSE_SCORE_NAMES.reviewApproved,
+      value: 1,
+    })
+  })
+
+  it("records an accepted product proposal as correct without a comment", async () => {
+    const { run, ownerCapability, review } = await pausedRun()
+    const runId = await runIdOf(run.viewId)
+    const accepted = review.items.find(
+      (item) => item.kind === "product" && item.proposal.sku !== null
+    )
+
+    expect(accepted).toBeDefined()
+    expect(
+      (
+        await decide(
+          run.viewId,
+          ownerCapability,
+          straightforwardDecisions(review)
+        )
+      ).status
+    ).toBe(200)
+    expect((await settle(run.viewId, ownerCapability, "approve")).status).toBe(
+      200
+    )
+    await settledRun(run.viewId, "delivered", "a scored accepted proposal")
+
+    const traceId = await createTraceId(runId)
+    expect(
+      capturedLangfuseScores().filter((score) => score.traceId === traceId)
+    ).toContainEqual({
+      id: await createScoreId(
+        runId,
+        LANGFUSE_SCORE_NAMES.reviewLineCorrect,
+        `${MATCH_LINE_OBSERVATION_NAME}:${accepted!.position}`
+      ),
+      traceId,
+      observationId: await createObservationId(
+        runId,
+        MATCH_LINE_OBSERVATION_NAME,
+        accepted!.position
+      ),
+      name: LANGFUSE_SCORE_NAMES.reviewLineCorrect,
+      value: 1,
+    })
+  })
+
+  it("records quantity and field corrections without a product choice", async () => {
+    const cases = [
+      { marker: "trigger-invalid-quantity", kind: "quantity" },
+      { marker: "trigger-invented-sku", kind: "field" },
+    ]
+
+    for (const expected of cases) {
+      resetCapturedLangfuseScores()
+      const { run, ownerCapability, review } = await customPausedRun(
+        expected.marker,
+        [
+          "10 x NX-FLT-1120 panel filter 592x592x48",
+          "4 x NX-LUB-3040 lithium grease EP2 400g",
+        ]
+      )
+      const runId = await runIdOf(run.viewId)
+      const corrected = review.items.find((item) => item.kind === expected.kind)
+
+      expect(corrected).toBeDefined()
+      expect(
+        review.items.some(
+          (item) =>
+            item.kind === "product" && item.position === corrected!.position
+        )
+      ).toBe(false)
+      expect(
+        (
+          await decide(
+            run.viewId,
+            ownerCapability,
+            straightforwardDecisions(review)
+          )
+        ).status
+      ).toBe(200)
+      expect(
+        (await settle(run.viewId, ownerCapability, "approve")).status
+      ).toBe(200)
+      await settledRun(run.viewId, "delivered", `a scored ${expected.kind}`)
+
+      // A quantity or field fix says nothing about the reranker's SKU choice.
+      const traceId = await createTraceId(runId)
+      const lineScoreId = await createScoreId(
+        runId,
+        LANGFUSE_SCORE_NAMES.reviewLineCorrect,
+        `${MATCH_LINE_OBSERVATION_NAME}:${corrected!.position}`
+      )
+      const scores = capturedLangfuseScores().filter(
+        (score) => score.traceId === traceId
+      )
+      expect(scores.some((score) => score.id === lineScoreId)).toBe(false)
+      expect(scores).toContainEqual(
+        expect.objectContaining({
+          name: LANGFUSE_SCORE_NAMES.reviewApproved,
+          value: 1,
+        })
+      )
+    }
+  })
+
+  it("delivers an approved run while Langfuse cannot take its scores", async () => {
+    const { run, ownerCapability, review } = await pausedRun()
+    const runId = await runIdOf(run.viewId)
+
+    failLangfuseScoreWrites(true)
+    try {
+      expect(
+        (
+          await decide(
+            run.viewId,
+            ownerCapability,
+            straightforwardDecisions(review)
+          )
+        ).status
+      ).toBe(200)
+      expect(
+        (await settle(run.viewId, ownerCapability, "approve")).status
+      ).toBe(200)
+      await settledRun(
+        run.viewId,
+        "delivered",
+        "an approved run during an outage"
+      )
+    } finally {
+      failLangfuseScoreWrites(false)
+    }
+
+    const traceId = await createTraceId(runId)
+    expect(
+      capturedLangfuseScores().filter((score) => score.traceId === traceId)
+    ).toEqual([])
+  })
+
+  it("records only trace approval when no product match needed review", async () => {
+    const { run, ownerCapability, review } = await customPausedRun(
+      "customer-only-review",
+      [
+        "10 x NX-FLT-1120 panel filter 592x592x48",
+        "4 x NX-LUB-3040 lithium grease EP2 400g",
+      ]
+    )
+    const runId = await runIdOf(run.viewId)
+
+    expect(review.items.map((item) => item.kind)).toEqual(["customer"])
+    expect(
+      (
+        await decide(
+          run.viewId,
+          ownerCapability,
+          straightforwardDecisions(review)
+        )
+      ).status
+    ).toBe(200)
+    expect((await settle(run.viewId, ownerCapability, "approve")).status).toBe(
+      200
+    )
+    await settledRun(run.viewId, "delivered", "an approved run without matches")
+
+    const traceId = await createTraceId(runId)
+    expect(
+      capturedLangfuseScores().filter((score) => score.traceId === traceId)
+    ).toEqual([
+      {
+        id: await createScoreId(
+          runId,
+          LANGFUSE_SCORE_NAMES.reviewApproved,
+          "trace"
+        ),
+        traceId,
+        name: LANGFUSE_SCORE_NAMES.reviewApproved,
+        value: 1,
+      },
+    ])
+  })
+
+  it("records rejection on the trace without applying open decisions", async () => {
+    const { run, ownerCapability } = await pausedRun()
+    const runId = await runIdOf(run.viewId)
+
+    expect((await settle(run.viewId, ownerCapability, "reject")).status).toBe(
+      200
+    )
+    await settledRun(run.viewId, "review_rejected", "a scored rejected run")
+
+    const traceId = await createTraceId(runId)
+    expect(
+      capturedLangfuseScores().filter((score) => score.traceId === traceId)
+    ).toEqual([
+      {
+        id: await createScoreId(
+          runId,
+          LANGFUSE_SCORE_NAMES.reviewApproved,
+          "trace"
+        ),
+        traceId,
+        name: LANGFUSE_SCORE_NAMES.reviewApproved,
+        value: 0,
+      },
+    ])
   })
 })
 

@@ -23,17 +23,10 @@ const EXAMPLE_VARIABLES = {
   APP_ENV: "development",
   OCR_PROVIDER: "mistral",
   MISTRAL_OCR_MODEL: "mistral-ocr-latest",
-  OCR_COST_PER_1000_PAGES_USD: "1",
   EXTRACTION_PROVIDER: "openrouter",
-  OPENROUTER_EXTRACTION_MODEL: "openai/gpt-5.6-luna",
   RERANK_PROVIDER: "openrouter",
-  OPENROUTER_RERANK_MODEL: "openai/gpt-5.6-luna",
-  MATCH_WINNER_STRENGTH: "0.55",
-  MATCH_WINNER_GAP: "0.12",
   REVIEW_WINDOW_SECONDS_CURATED: "604800",
   REVIEW_WINDOW_SECONDS_CUSTOM: "86400",
-  OPENROUTER_COST_PER_1M_INPUT_TOKENS_USD: "1.25",
-  OPENROUTER_COST_PER_1M_OUTPUT_TOKENS_USD: "10",
   ANALYTICS_PROVIDER: "posthog",
   POSTHOG_HOST: "https://eu.i.posthog.com",
   MISTRAL_API_KEY: "",
@@ -60,7 +53,6 @@ describe("the configuration schema", () => {
     expect(config.extractionProvider).toBe("openrouter")
     expect(config.rerankProvider).toBe("openrouter")
     expect(config.mistralOcrModel).toBe("mistral-ocr-latest")
-    expect(config.extractionModel).toBe("openai/gpt-5.6-luna")
 
     // Blank secrets are not configured secrets, and say so in one way.
     expect(config.mistralApiKey).toBeNull()
@@ -68,35 +60,20 @@ describe("the configuration schema", () => {
     expect(config.rateLimitSalt).toBeNull()
   })
 
-  it("reads costs, thresholds, and windows as numbers", () => {
+  it("reads windows as numbers", () => {
     const config = APP_CONFIG_SCHEMA.parse(EXAMPLE_VARIABLES)
 
-    expect(config.ocrCostPer1000PagesUsd).toBe(1)
-    expect(config.openRouterCostPer1MInputTokensUsd).toBe(1.25)
-    expect(config.openRouterCostPer1MOutputTokensUsd).toBe(10)
-    expect(config.matchWinnerStrength).toBe(0.55)
-    expect(config.matchWinnerGap).toBe(0.12)
     expect(config.reviewWindowSecondsCurated).toBe(604800)
     expect(config.reviewWindowSecondsCustom).toBe(86400)
   })
 
-  it("reports an unknown price rather than zero, and keeps demo defaults", () => {
+  it("keeps defaults for malformed windows", () => {
     const config = APP_CONFIG_SCHEMA.parse(
       exampleWith({
-        OCR_COST_PER_1000_PAGES_USD: "",
-        OPENROUTER_COST_PER_1M_INPUT_TOKENS_USD: "free",
-        OPENROUTER_COST_PER_1M_OUTPUT_TOKENS_USD: "-1",
-        MATCH_WINNER_STRENGTH: "strict",
-        MATCH_WINNER_GAP: "-2",
         REVIEW_WINDOW_SECONDS_CUSTOM: "0",
       })
     )
 
-    expect(config.ocrCostPer1000PagesUsd).toBeNull()
-    expect(config.openRouterCostPer1MInputTokensUsd).toBeNull()
-    expect(config.openRouterCostPer1MOutputTokensUsd).toBeNull()
-    expect(config.matchWinnerStrength).toBe(0.55)
-    expect(config.matchWinnerGap).toBe(0.12)
     expect(config.reviewWindowSecondsCustom).toBe(86400)
   })
 
@@ -108,10 +85,7 @@ describe("the configuration schema", () => {
     expect(config.extractionProvider).toBe("openrouter")
     expect(config.rerankProvider).toBe("openrouter")
     expect(config.mistralOcrModel).toBe("mistral-ocr-latest")
-    expect(config.rerankModel).toBe("openai/gpt-5.6-luna")
-    expect(config.matchWinnerStrength).toBe(0.55)
     expect(config.reviewWindowSecondsCurated).toBe(604800)
-    expect(config.ocrCostPer1000PagesUsd).toBeNull()
     expect(config.analytics).toEqual({ provider: "none", reason: "disabled" })
   })
 
@@ -121,6 +95,7 @@ describe("the configuration schema", () => {
       "EXTRACTION_PROVIDER",
       "RERANK_PROVIDER",
       "ANALYTICS_PROVIDER",
+      "LANGFUSE_PROVIDER",
     ]) {
       expect(() =>
         APP_CONFIG_SCHEMA.parse(
@@ -186,6 +161,7 @@ describe("reading configuration from the binding object", () => {
     expect(config.ocrProvider).toBe("contract-fake")
     expect(config.analytics).toEqual({ provider: "contract-fake" })
     expect(config.rateLimitSalt).toBe("test-rate-limit-salt")
+    expect(config.langfuse).toEqual({ provider: "contract-fake" })
   })
 
   it("fails a misconfigured deployment's first request rather than a run", async () => {
@@ -216,5 +192,67 @@ describe("reading configuration from the binding object", () => {
     expect(readConfig(overridden)).toBe(readConfig(overridden))
     expect(readConfig(overridden)).not.toBe(readConfig(env))
     expect(readConfig(overridden).ocrProvider).toBe("mistral")
+  })
+})
+
+describe("Langfuse provider configuration", () => {
+  const credentials = {
+    LANGFUSE_PUBLIC_KEY: "test-public",
+    LANGFUSE_SECRET_KEY: "test-secret",
+    LANGFUSE_BASE_URL: "https://langfuse.example.test/",
+  }
+
+  it("defaults to none and keeps tracing independent of prompt and score selection", () => {
+    expect(APP_CONFIG_SCHEMA.parse({}).langfuse).toEqual({ provider: "none" })
+    const config = APP_CONFIG_SCHEMA.parse({
+      ...credentials,
+      RATE_LIMIT_SALT: "salt",
+      LANGFUSE_PROVIDER: "none",
+    })
+    expect(config.langfuse).toEqual({ provider: "none" })
+    expect(config.tracing.provider).toBe("langfuse")
+  })
+
+  it("requires all three credentials for the live provider in every environment", () => {
+    for (const appEnv of ["development", "production"]) {
+      for (const variable of Object.keys(credentials)) {
+        expect(() =>
+          APP_CONFIG_SCHEMA.parse({
+            ...credentials,
+            APP_ENV: appEnv,
+            LANGFUSE_PROVIDER: "langfuse",
+            [variable]: "",
+          })
+        ).toThrow(/Required when LANGFUSE_PROVIDER is langfuse/)
+      }
+    }
+    expect(
+      APP_CONFIG_SCHEMA.parse({
+        ...credentials,
+        RATE_LIMIT_SALT: "salt",
+        LANGFUSE_PROVIDER: "langfuse",
+      }).langfuse
+    ).toEqual({
+      provider: "langfuse",
+      publicKey: "test-public",
+      secretKey: "test-secret",
+      baseUrl: "https://langfuse.example.test",
+    })
+  })
+
+  it("requires the salt once tracing is configured", () => {
+    expect(() => APP_CONFIG_SCHEMA.parse(credentials)).toThrow(
+      /Required when Langfuse tracing is configured/
+    )
+    expect(
+      APP_CONFIG_SCHEMA.parse({ ...credentials, RATE_LIMIT_SALT: "salt" })
+        .rateLimitSalt
+    ).toBe("salt")
+  })
+
+  it("refuses an unsupported provider name", () => {
+    expect(() =>
+      APP_CONFIG_SCHEMA.parse({ LANGFUSE_PROVIDER: "langfus" })
+    ).toThrow()
   })
 })

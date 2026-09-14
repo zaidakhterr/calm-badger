@@ -13,11 +13,11 @@
  * by the same outer boundary, so the step can never be abandoned mid-flight.
  */
 
+import { startActiveObservation } from "@langfuse/tracing"
 import { z } from "zod"
 
 import { readConfig } from "./env"
 import {
-  estimateOcrCostUsd,
   OcrPageLimitError,
   OcrProviderError,
   selectOcrProvider,
@@ -45,7 +45,7 @@ export const DOCUMENTS_EVIDENCE_KIND = "documents"
  * what it answered — default rather than fail, so evidence written by an
  * earlier build still renders instead of blanking the whole step. An absent
  * measurement reads as `null`, never as zero: "not recorded" and "nothing" are
- * different facts, exactly as they are for the estimated cost.
+ * different facts.
  */
 const SOURCE_EVIDENCE_SCHEMA = z.object({
   sourceId: z.string(),
@@ -58,7 +58,7 @@ const SOURCE_EVIDENCE_SCHEMA = z.object({
   pageCount: z.number(),
   pagesProcessed: z.number(),
   latencyMs: z.number().nullable().catch(null),
-  /** `null` when the configured page price is missing or malformed. */
+  /** Legacy compatibility only. New evidence never estimates OCR cost. */
   estimatedCostUsd: z.number().nullable().catch(null),
   /** Provider evidence as the provider seam sanitized it, or nothing. */
   sanitizedResponse: z.unknown().default(null),
@@ -70,7 +70,7 @@ const DOCUMENTS_TOTALS_SCHEMA = z.object({
   pageCount: z.number(),
   pagesProcessed: z.number(),
   providerLatencyMs: z.number(),
-  /** `null` when one source was uncosted; never a silently understated total. */
+  /** Legacy compatibility only. New evidence never estimates OCR cost. */
   estimatedCostUsd: z.number().nullable(),
   elapsedMs: z.number(),
 })
@@ -307,7 +307,7 @@ async function readSource(
         pageCount: 1,
         pagesProcessed: 0,
         latencyMs: 0,
-        estimatedCostUsd: 0,
+        estimatedCostUsd: null,
         sanitizedResponse: null,
       },
     }
@@ -317,16 +317,48 @@ async function readSource(
     throw new OcrPageLimitError(provider.name, MAX_OCR_PAGES_PER_RUN)
   }
 
-  const document = await provider.read({
-    sourceId: source.id,
-    label: source.label,
-    // Narrowed by the `text/plain` return above: what is left of the stored
-    // vocabulary is exactly the set of upload types the reader accepts.
-    mediaType: source.mediaType,
-    bytes,
-    maxPages,
-    runPageLimit: MAX_OCR_PAGES_PER_RUN,
-  })
+  // Narrowed by the `text/plain` return above: what is left of the stored
+  // vocabulary is exactly the set of upload types the reader accepts.
+  const mediaType = source.mediaType
+
+  // The read is a paid model call, so it is traced as a generation with pages
+  // as its usage unit. The input names the document; it never carries the
+  // bytes, which would otherwise be uploaded as media.
+  const document = await startActiveObservation(
+    "read-document",
+    async (generation) => {
+      generation.update({
+        model: provider.model,
+        input: {
+          label: source.label,
+          mediaType,
+          byteSize: source.byteSize,
+          maxPages,
+        },
+      })
+
+      const read = await provider.read({
+        sourceId: source.id,
+        label: source.label,
+        mediaType,
+        bytes,
+        maxPages,
+        runPageLimit: MAX_OCR_PAGES_PER_RUN,
+      })
+
+      generation.update({
+        output: {
+          pageCount: read.pages.length,
+          pagesProcessed: read.usage.pagesProcessed,
+          latencyMs: read.latencyMs,
+        },
+        usageDetails: { pages: read.usage.pagesProcessed },
+      })
+
+      return read
+    },
+    { asType: "generation" }
+  )
 
   if (
     document.pages.length > maxPages ||
@@ -347,10 +379,7 @@ async function readSource(
       pageCount: document.pages.length,
       pagesProcessed: document.usage.pagesProcessed,
       latencyMs: document.latencyMs,
-      estimatedCostUsd: estimateOcrCostUsd(
-        readConfig(env),
-        document.usage.pagesProcessed
-      ),
+      estimatedCostUsd: null,
       sanitizedResponse: document.sanitizedResponse,
     },
   }
@@ -368,16 +397,8 @@ function totalsOf(sources: SourceEvidence[], elapsedMs: number) {
       (total, source) => total + (source.latencyMs ?? 0),
       0
     ),
-    // One uncosted source makes the whole total unknown rather than
-    // understated, so the interface can say so instead of showing $0.0000.
-    estimatedCostUsd: sources.some((source) => source.estimatedCostUsd === null)
-      ? null
-      : Math.round(
-          sources.reduce(
-            (total, source) => total + (source.estimatedCostUsd ?? 0),
-            0
-          ) * 1e6
-        ) / 1e6,
+    // OCR price resolution now belongs to Langfuse's model table.
+    estimatedCostUsd: null,
     elapsedMs,
   }
 }

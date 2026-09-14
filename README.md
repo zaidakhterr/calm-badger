@@ -30,9 +30,9 @@ This style is based on ASD-STE100 Simplified Technical English.
 - [Security](#security)
 - [Data retention](#data-retention)
 - [Analytics](#analytics)
+- [Langfuse](#langfuse)
 - [Local development](#local-development)
 - [Checks](#checks)
-- [Evaluation](#evaluation)
 - [Cloudflare resources](#cloudflare-resources)
 - [First setup](#first-setup)
 - [Continuous integration and deployment](#continuous-integration-and-deployment)
@@ -118,7 +118,7 @@ The run has nine possible steps:
 
 Each completed step can show its validated result and decision evidence.
 Technical details are optional. They include model output, latency, token use,
-and estimated cost.
+and provider-reported cost.
 
 ## Retrieval and product matching
 
@@ -131,7 +131,7 @@ The system does not send the full catalogue to a language model.
 5. The system checks the product score and the score gap.
 6. It sends an uncertain line to Review.
 
-Set `MATCH_WINNER_STRENGTH` and `MATCH_WINNER_GAP` in `wrangler.jsonc`.
+The rerank prompt in Langfuse stores the product score and score-gap limits.
 
 The owner can use the proposed product, select an alternative, or search the
 catalogue. The owner can also correct a customer or quantity. The system cannot
@@ -199,7 +199,7 @@ or delete stored records.
 
 `GET /api/scenarios` returns three sample requests. Each request contains email
 text, one photo, one PDF file, and six lines. Expected results stay in
-`test/fixtures/gold-scenarios.ts`. Runtime code cannot read them.
+the Langfuse dataset `rfq-scenarios`. Runtime code cannot read them.
 
 Custom requests can contain email text and PDF, JPEG, or PNG files. The maximum
 size is 10 MB. A run can contain a maximum of 20 pages.
@@ -263,6 +263,89 @@ Set `ANALYTICS_PROVIDER=none` to turn analytics off. Set
 `APP_ENV=development` in `.dev.vars` to keep local events out of production
 analytics.
 
+## Langfuse
+
+Langfuse Cloud EU manages prompts, traces, evaluation data, feedback, cost, and
+operations metrics. Set `LANGFUSE_PROVIDER=langfuse` to fetch prompts and write
+scores. Tracing starts when all three values are set:
+
+```bash
+pnpm wrangler secret put LANGFUSE_PUBLIC_KEY
+pnpm wrangler secret put LANGFUSE_SECRET_KEY
+pnpm wrangler secret put LANGFUSE_BASE_URL
+```
+
+For local development, set the same values in `.dev.vars`. Use
+`https://cloud.langfuse.com` for the European Union region.
+
+The `rfq/extract` and `rfq/rerank` prompts store the model, settings, and output
+schema. The rerank prompt also stores its product-match limits. Production uses
+the `production` label. Development uses `latest` without a cache delay. The
+Worker uses a bundled fallback when a prompt is unavailable or incompatible.
+
+Expected results live in the Langfuse dataset `rfq-scenarios`. The pull request
+workflow runs these scenarios with real providers. It posts scores and a
+comparison link on the pull request. The [experiment view](https://cloud.langfuse.com/project/cmtykeufs0geead0ii4y5mwhq/datasets/cmu09dh30014aad0cq703wi5l/experiments)
+keeps the accuracy record.
+
+Review decisions create `review-approved` and `review-line-correct` scores.
+Owner thumbs create `owner-quote-thumbs` and `owner-line-thumbs` scores. The
+Worker writes these scores, so no Langfuse key reaches the browser.
+
+One run is one trace. Each business step is one observation in it, and the
+model calls of a step nest under it. The trace carries the `environment` from
+`APP_ENV`, a tag with the source kind (`curated` or `custom`), and the run,
+view, and scenario identifiers as metadata.
+
+Each trace uses its run view ID as the session ID. The user ID is a salted hash
+of the stored owner-capability hash. The app currently creates a new owner
+capability for each run. User grouping is per run until the app stores one
+owner identity across runs.
+
+Unlike analytics, tracing sends business content. Langfuse receives:
+
+- the model input and output of every extraction and reranking call. The
+  input holds the document text after reading, and the output holds the
+  customer name and contact details the model extracted.
+- the name, media type, and size of every document, but not the document bytes
+- the page count of every document read. Langfuse calculates its cost from the
+  configured model price.
+- the outcome and message of every step
+
+Langfuse masks email addresses and phone numbers before export. This includes
+owner feedback comments. Names remain visible. A phone number needs a
+recognisable shape to be masked: a leading `+`, `0`, or `00` with separators,
+an area code in parentheses, or 3-3-4 groups. A bare digit run such as
+`5551234567` is exported unmasked, because it cannot be told apart from an
+order number.
+
+Langfuse uses the cost reported by OpenRouter. It calculates optical character
+recognition (OCR) cost from the `pages` price in its model table. The product
+shows only provider-reported cost and does not estimate a missing value.
+
+Custom runs are tagged `custom`, so their traces can be filtered or deleted to
+match the 24-hour retention of the run.
+
+The [RFQ Relay operations dashboard](https://cloud.langfuse.com/project/cmtykeufs0geead0ii4y5mwhq/dashboards/cmu0d75jf027ead0imtrxhgio?dateRange=30d)
+shows runs per day and P95 latency for each business step. It also shows exact
+components for error rate, review rate, and cost per run. Divide error runs by
+all runs. Divide `open-review` runs by all runs. Divide total cost by distinct
+run traces. Langfuse v4 custom widgets do not support calculated fields.
+
+Claude Code can reach the Langfuse MCP server with a Basic authentication
+header derived from the project keys. Start Claude Code with the existing
+`.dev.vars` values:
+
+```bash
+set -a
+source .dev.vars
+set +a
+LANGFUSE_MCP_AUTH="$(printf '%s:%s' "$LANGFUSE_PUBLIC_KEY" "$LANGFUSE_SECRET_KEY" | base64 | tr -d '\n')" claude
+```
+
+This command keeps the derived Basic authentication value in the Claude Code
+process. It does not store the value in the workspace config.
+
 ## Local development
 
 ```bash
@@ -306,27 +389,7 @@ The lint command runs ESLint and Oxlint. The local Oxlint plug-in requires code
 to parse data at each interface. Zod schemas define stored evidence, provider
 responses, configuration, client responses, and script data.
 
-## Evaluation
-
-The test replays all three sample requests through the public API. It compares
-the results with the expected fixtures.
-
-```bash
-pnpm eval:fixtures
-node scripts/run-evaluation.mjs --check
-```
-
-Test providers make this evaluation repeatable. The command does not need a
-provider key. It does not make a network request or have a provider cost.
-
-Run the same evaluation with live providers:
-
-```bash
-pnpm eval:live
-```
-
-The live command reports latency, token use, estimated cost, and differences.
-It can have a provider cost. CI does not run it.
+For experiments with real providers, see [RFQ experiments](evals/README.md).
 
 ## Cloudflare resources
 
@@ -345,7 +408,19 @@ pnpm wrangler secret put MISTRAL_API_KEY
 pnpm wrangler secret put OPENROUTER_API_KEY
 pnpm wrangler secret put POSTHOG_API_KEY
 pnpm wrangler secret put RATE_LIMIT_SALT
+pnpm wrangler secret put LANGFUSE_PUBLIC_KEY
+pnpm wrangler secret put LANGFUSE_SECRET_KEY
+pnpm wrangler secret put LANGFUSE_BASE_URL
 ```
+
+`wrangler.jsonc` sets `LANGFUSE_PROVIDER` to `langfuse`. The Worker refuses to
+start without the three Langfuse secrets, and tracing requires
+`RATE_LIMIT_SALT`.
+
+Run `pnpm langfuse:sync` once per Langfuse project. It seeds both prompts, the
+`rfq-scenarios` dataset, and the `mistral-ocr-latest` model definition with its
+`pages` price. Without that model, Langfuse reports OCR cost as zero. The sync
+never overwrites prompts, dataset answers, or a model that already exists.
 
 The setup tool selects one neutral resource name. It uses this name for the
 Worker, D1 database, R2 bucket, and Workflow. The committed `calm-badger` names
@@ -384,17 +459,23 @@ Run the structural check without external changes:
 ## Continuous integration and deployment
 
 `.github/workflows/validate.yml` runs for pull requests and non-main branches.
-It runs `pnpm check` and the fixture evaluation.
+It runs `pnpm check`.
+
+`.github/workflows/langfuse-experiment.yml` runs the curated Langfuse
+experiment for pull requests from branches in this repository. It uses real
+Mistral and OpenRouter providers against a local Worker and a local D1
+database. The gate posts scores and the comparison link on the pull request.
+Fork pull requests skip this workflow because GitHub does not give repository
+secrets or a write token to fork workflows.
 
 `.github/workflows/deploy.yml` runs for changes to `main` and for manual
 deployments. It performs these tasks in order:
 
 1. Runs all checks.
-2. Runs the fixture evaluation.
-3. Applies additive D1 migrations.
-4. Checks the remote catalogue.
-5. Adds the seed only when the catalogue is empty.
-6. Deploys the Worker.
+2. Applies additive D1 migrations.
+3. Checks the remote catalogue.
+4. Adds the seed only when the catalogue is empty.
+5. Deploys the Worker.
 
 A failed check stops deployment. Deployments do not overlap.
 
@@ -402,10 +483,19 @@ CI uses these GitHub values:
 
 - `CLOUDFLARE_API_TOKEN`: Actions secret.
 - `CLOUDFLARE_ACCOUNT_ID`: Actions variable.
+- `MISTRAL_API_KEY`: Actions secret for the experiment Worker.
+- `OPENROUTER_API_KEY`: Actions secret for the experiment Worker.
+- `LANGFUSE_PUBLIC_KEY`: Actions secret for the experiment and Worker.
+- `LANGFUSE_SECRET_KEY`: Actions secret for the experiment and Worker.
+- `LANGFUSE_BASE_URL`: Actions secret for the Langfuse project URL.
 
-GitHub does not receive provider keys.
+The experiment creates a new rate-limit salt for each CI run. It disables
+PostHog for the local Worker.
 
 ## Production gaps
+
+Langfuse addresses the operations-console gap. The saved dashboard shows run
+volume, failures, review demand, cost, and business-step latency.
 
 The demo does not implement these production functions:
 
@@ -414,10 +504,10 @@ The demo does not implement these production functions:
 - Automatic retry, backoff, dead-letter handling, and operator recovery.
 - Real delivery, idempotency, a durable outbox, and reconciliation.
 - GAEB, spreadsheet, Word, presentation, voice, and batch RFQ inputs.
-- Service-level objectives, alerts, cost budgets, and full provider traces.
-- A held-out evaluation set, quality gates, and confidence calibration.
+- Service-level objectives, alerts, and cost budgets.
+- A held-out evaluation set and confidence calibration.
 - Global learning from human feedback.
-- PDF quote generation and a production activity dashboard.
+- PDF quote generation.
 
 ## License
 

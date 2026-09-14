@@ -163,7 +163,7 @@ export type DocumentEvidenceProjection = {
     pageCount: number
     pagesProcessed: number
     providerLatencyMs: number
-    /** `null` when a page price was not configured; never silently zero. */
+    /** Legacy compatibility only. New evidence never estimates OCR cost. */
     estimatedCostUsd: number | null
     elapsedMs: number
   } | null
@@ -560,6 +560,7 @@ export type MatchLineProjection = {
     outputTokens: number
     totalTokens: number
   } | null
+  reportedCostUsd: number | null
 }
 
 export type MatchEvidenceProjection = {
@@ -588,6 +589,7 @@ export type MatchEvidenceProjection = {
       totalTokens: number
     } | null
     estimatedCostUsd: number | null
+    reportedCostUsd: number | null
     elapsedMs: number
   } | null
 }

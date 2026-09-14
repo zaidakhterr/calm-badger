@@ -14,7 +14,6 @@ import { z } from "zod"
 import { readConfig } from "../worker/env"
 import { loadDocumentEvidence } from "../worker/evidence"
 import {
-  estimateOcrCostUsd,
   OcrPageLimitError,
   OcrProviderError,
   SANITIZED_OCR_RESPONSE_SCHEMA,
@@ -301,7 +300,7 @@ describe("reading the sources of a curated request", () => {
     expect(step.completedAt).not.toBeNull()
   })
 
-  it("exposes page evidence with provenance, model, latency, usage, and cost", async () => {
+  it("exposes page evidence with usage and no application estimate", async () => {
     const { run } = await createCuratedRun("routine-replenishment")
     await waitForStep(run.viewId, "read-documents", ["complete"])
 
@@ -313,7 +312,7 @@ describe("reading the sources of a curated request", () => {
     expect(evidence.totals).toMatchObject({ sourceCount: 3 })
     expect(evidence.totals!.pageCount).toBeGreaterThanOrEqual(3)
     expect(evidence.totals!.pagesProcessed).toBe(2)
-    expect(evidence.totals!.estimatedCostUsd).toBeCloseTo(0.002, 6)
+    expect(evidence.totals!.estimatedCostUsd).toBeNull()
     expect(evidence.totals!.elapsedMs).toBeGreaterThanOrEqual(0)
 
     const [email, image, pdf] = evidence.sources
@@ -334,33 +333,8 @@ describe("reading the sources of a curated request", () => {
     expect(pdf.pages[0].markdown).toContain("NX-FLT-1120")
     expect(pdf.latencyMs).toBeGreaterThanOrEqual(0)
     expect(pdf.pagesProcessed).toBe(1)
-    expect(pdf.estimatedCostUsd).toBeCloseTo(0.001, 6)
-    expect(pdf.sanitizedResponse).not.toBeNull()
-  })
-
-  it("shows an unknown cost, not zero, when the page price is not configured", async () => {
-    const { run } = await createCuratedRun("routine-replenishment")
-    await waitForStep(run.viewId, "read-documents", ["complete"])
-
-    const row = await env.DB.prepare(`SELECT id FROM runs WHERE view_id = ?`)
-      .bind(run.viewId)
-      .first<{ id: string }>()
-
-    // The same sources, read by a deployment whose page price was never set.
-    const outcome = await readDocuments(
-      envWith({ OCR_COST_PER_1000_PAGES_USD: "" }),
-      row!.id
-    )
-
-    expect(outcome.state).toBe("complete")
-
-    const evidence = await readEvidence(run.viewId)
-    const pdf = evidence.sources.find(
-      (source) => source.mediaType === "application/pdf"
-    )!
-
-    expect(evidence.totals!.estimatedCostUsd).toBeNull()
     expect(pdf.estimatedCostUsd).toBeNull()
+    expect(pdf.sanitizedResponse).not.toBeNull()
   })
 
   it("shows the request exactly as received, from the moment the run exists", async () => {
@@ -817,28 +791,6 @@ describe("selecting the OCR provider", () => {
         .success
     ).toBe(true)
     expect(JSON.stringify(document.sanitizedResponse)).not.toContain("c2VjcmV0")
-  })
-
-  it("reports an unknown cost rather than zero when the page price is misconfigured", () => {
-    expect(estimateOcrCostUsd(readConfig(env), 2)).toBeGreaterThan(0)
-    expect(
-      estimateOcrCostUsd(
-        readConfig(envWith({ OCR_COST_PER_1000_PAGES_USD: "" })),
-        2
-      )
-    ).toBeNull()
-    expect(
-      estimateOcrCostUsd(
-        readConfig(envWith({ OCR_COST_PER_1000_PAGES_USD: "free" })),
-        2
-      )
-    ).toBeNull()
-    expect(
-      estimateOcrCostUsd(
-        readConfig(envWith({ OCR_COST_PER_1000_PAGES_USD: "-1" })),
-        2
-      )
-    ).toBeNull()
   })
 })
 

@@ -87,7 +87,40 @@ export const rfqExtractionSchema = z.object({
     .max(60),
 })
 
-export type RfqExtraction = z.infer<typeof rfqExtractionSchema>
+/** Fields read by storage and business validation. Prompt policy lives in its full schema. */
+export const RFQ_EXTRACTION_CONTRACT = z.object({
+  customer: z.object({
+    companyName: z.string().nullable(),
+    contactName: z.string().nullable(),
+    contactEmail: z.string().nullable(),
+    contactPhone: z.string().nullable(),
+    deliveryLocation: z.string().nullable(),
+  }),
+  source: z.object({
+    channel: z.enum(["email", "pdf", "image", "mixed"]),
+    subject: z.string().nullable(),
+    receivedAt: z.string().nullable(),
+    references: z.array(z.string()),
+  }),
+  deadline: z.object({
+    date: z.string().nullable(),
+    text: z.string().nullable(),
+  }),
+  lineItems: z.array(
+    z.object({
+      position: z.number().int(),
+      reference: z.string(),
+      description: z.string(),
+      quantity: z.number().nullable(),
+      unit: z.string().nullable(),
+      catalogSku: z.string().nullable(),
+      sourceLabel: z.string(),
+      sourcePage: z.number().int().nullable(),
+    })
+  ),
+})
+
+export type RfqExtraction = z.infer<typeof RFQ_EXTRACTION_CONTRACT>
 
 /* -------------------------------------------------------------------------- */
 /* Gate 1: parse, with at most one repair attempt                             */
@@ -175,10 +208,13 @@ export type SchemaOutcome =
   | { state: "invalid"; issues: string[] }
 
 /** The extraction contract over the JSON text gate one accepted. */
-const RFQ_EXTRACTION_JSON_SCHEMA = JSON_TEXT_SCHEMA.pipe(rfqExtractionSchema)
-
-export function validateAgainstSchema(json: string): SchemaOutcome {
-  const result = RFQ_EXTRACTION_JSON_SCHEMA.safeParse(json)
+export function validateAgainstSchema(
+  json: string,
+  schema: z.ZodType = rfqExtractionSchema
+): SchemaOutcome {
+  const result = JSON_TEXT_SCHEMA.pipe(schema)
+    .pipe(RFQ_EXTRACTION_CONTRACT)
+    .safeParse(json)
 
   if (result.success) return { state: "valid", rfq: result.data }
 

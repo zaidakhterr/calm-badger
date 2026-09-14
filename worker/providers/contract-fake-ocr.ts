@@ -1,7 +1,7 @@
 /**
  * Deterministic contract fake for document reading.
  *
- * It exists so tests and fixture evaluation can exercise the real workflow
+ * It exists so tests can exercise the real workflow
  * without provider credentials, network access, or cost. It implements the same
  * `OcrProvider` contract as the live client and produces output derived only
  * from the submitted bytes: no expected answer, no recorded provider response,

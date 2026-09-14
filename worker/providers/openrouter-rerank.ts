@@ -27,15 +27,20 @@
  * ranking of empty text, and `requestFetch` is injectable so that contract can
  * be tested without a network.
  *
- * The model comes from `OPENROUTER_RERANK_MODEL`, which is configured
- * independently of the extraction model. The API key comes from the
- * `OPENROUTER_API_KEY` secret binding; it is never logged, persisted, or
- * included in stored evidence. The shared renderer lets the workflow store the
- * exact system and user messages without touching provider request headers.
+ * The model, settings, and schema come from the resolved rerank prompt. The API
+ * key comes from the `OPENROUTER_API_KEY` secret binding; it is never logged,
+ * persisted, or included in stored evidence. The shared renderer lets the
+ * workflow store the exact messages without touching provider request headers.
  */
 
 import { createOpenRouter } from "@openrouter/ai-sdk-provider"
-import { APICallError, generateText, NoObjectGeneratedError, Output } from "ai"
+import {
+  APICallError,
+  generateText,
+  jsonSchema,
+  NoObjectGeneratedError,
+  Output,
+} from "ai"
 
 import type { AppConfig } from "../env"
 
@@ -54,8 +59,6 @@ import {
 
 const PROVIDER = "openrouter"
 const REQUEST_TIMEOUT_MS = 45_000
-const MAX_OUTPUT_TOKENS = 1_500
-
 const UNRECOGNISED_RESPONSE =
   "The reranking model returned a response in an unrecognised shape."
 
@@ -63,13 +66,11 @@ export function createOpenRouterRerankProvider(
   config: AppConfig,
   requestFetch: typeof fetch = fetch
 ): RerankProvider {
-  const model = config.rerankModel
-
   return {
     name: PROVIDER,
-    model,
 
     async rerank(request: RerankRequest): Promise<RerankResult> {
+      const { model, temperature, max_tokens } = request.prompt.config
       const apiKey = config.openRouterApiKey
 
       if (!apiKey) {
@@ -93,14 +94,32 @@ export function createOpenRouterRerankProvider(
           system: modelInput.system,
           prompt: modelInput.user,
           output: Output.object({
-            schema: request.schema,
+            schema: jsonSchema(request.prompt.config.response_format),
             name: request.schemaName,
             description: request.schemaDescription,
           }),
-          temperature: 0,
-          maxOutputTokens: MAX_OUTPUT_TOKENS,
+          temperature,
+          maxOutputTokens: max_tokens,
           maxRetries: 0,
           abortSignal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+          // Names the generation in the trace. Which trace, if any, is the
+          // caller's context; this client never learns it.
+          runtimeContext: {
+            langfusePrompt: {
+              name: request.prompt.prompt.name,
+              version: request.prompt.prompt.version,
+              isFallback: request.prompt.prompt.isFallback,
+            },
+            // The integration drops prompt attributes for a fallback, so this
+            // is the only trace-side sign that the bundled prompt ran.
+            promptSource: request.prompt.prompt.isFallback
+              ? "bundled"
+              : "langfuse",
+          },
+          telemetry: {
+            functionId: "rerank-candidates",
+            includeRuntimeContext: { langfusePrompt: true, promptSource: true },
+          },
         })
 
         // The one boundary this client reads the provider across. A result

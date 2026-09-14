@@ -191,7 +191,7 @@ const DOCUMENT_EVIDENCE_SCHEMA = z.object({
       pageCount: z.number(),
       pagesProcessed: z.number(),
       providerLatencyMs: z.number(),
-      /** `null` when a page price was not configured; never silently zero. */
+      /** Legacy compatibility only. New evidence never estimates OCR cost. */
       estimatedCostUsd: z.number().nullable().catch(null),
       elapsedMs: z.number(),
     })
@@ -280,7 +280,7 @@ const STRUCTURE_EVIDENCE_SCHEMA = z.object({
     .nullable()
     .catch(null),
   estimatedCostUsd: z.number().nullable().catch(null),
-  reportedCostUsd: z.number().nullable().catch(null),
+  reportedCostUsd: z.number().nonnegative().finite().nullable().catch(null),
 })
 
 export type StructureEvidence = z.infer<typeof STRUCTURE_EVIDENCE_SCHEMA>
@@ -430,6 +430,7 @@ const MATCH_LINE_SCHEMA = z.object({
   originalOutput: z.string().nullable().catch(null),
   latencyMs: z.number().nullable().catch(null),
   usage: USAGE_SCHEMA.nullable().catch(null),
+  reportedCostUsd: z.number().nonnegative().finite().nullable().catch(null),
 })
 
 export type MatchLine = z.infer<typeof MATCH_LINE_SCHEMA>
@@ -460,6 +461,7 @@ const MATCH_EVIDENCE_SCHEMA = z.object({
       providerLatencyMs: z.number(),
       usage: USAGE_SCHEMA.nullable().catch(null),
       estimatedCostUsd: z.number().nullable().catch(null),
+      reportedCostUsd: z.number().nonnegative().finite().nullable().catch(null),
       elapsedMs: z.number(),
     })
     .nullable()
@@ -860,9 +862,7 @@ const SYSTEM_DETAILS_SCHEMA = z.object({
     ),
   }),
   evaluation: z.object({
-    state: z.enum(["planned", "measured"]),
-    summary: z.string(),
-    rows: z.array(z.string()),
+    url: z.url(),
   }),
 })
 
@@ -1193,6 +1193,34 @@ export async function settleReview(
   )
 
   return body.review
+}
+
+export type OwnerFeedbackTarget = number | "quote"
+export type OwnerFeedbackValue = "up" | "down"
+
+/** Owner-only: records one thumbs signal on a matched line or the quote. */
+export async function submitOwnerFeedback(
+  viewId: string,
+  target: OwnerFeedbackTarget,
+  value: OwnerFeedbackValue,
+  comment?: string
+): Promise<void> {
+  const response = await fetch(
+    `/api/runs/${encodeURIComponent(viewId)}/feedback`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json", ...ownerHeaders(viewId) },
+      body: JSON.stringify({ target, value, comment }),
+    }
+  )
+
+  if (!response.ok) throw new Error(await readError(response))
+
+  await readBody(
+    response,
+    z.object({ status: z.literal("recorded") }),
+    "owner feedback"
+  )
 }
 
 const CATALOG_SEARCH_RESULT_SCHEMA = z.object({

@@ -42,7 +42,7 @@ describe("RFQ Relay Worker", () => {
         retention: { state: string }
         rateLimit: { state: string; summary: string }
         adapterContract: { adapters: { id: string; simulated: boolean }[] }
-        evaluation: { state: string; summary: string; rows: string[] }
+        evaluation: { url: string }
       }
     }>()
 
@@ -71,15 +71,9 @@ describe("RFQ Relay Worker", () => {
     expect(system.retention.state).toBe("enforced")
     expect(system.rateLimit.state).toBe("enforced")
     expect(system.rateLimit.summary).toContain("5 runs each hour")
-    // Scored evaluation is measured now, and the drawer says what was measured:
-    // the three curated fixtures, through the deterministic contract fakes,
-    // including the lines where the run asked for confirmation.
-    expect(system.evaluation.state).toBe("measured")
-    expect(system.evaluation.summary).toContain("Test providers")
-    expect(system.evaluation.rows.join(" ")).toContain("18 lines in 3 runs")
-    expect(system.evaluation.rows.join(" ")).toContain("eval:live")
-    // The counts are served; the answers behind them are not.
-    expect(JSON.stringify(system.evaluation)).not.toMatch(/NX-[A-Z]{3}-\d{4}/)
+    expect(system.evaluation.url).toBe(
+      "https://cloud.langfuse.com/project/cmtykeufs0geead0ii4y5mwhq/datasets/cmu09dh30014aad0cq703wi5l/experiments"
+    )
 
     const serialized = JSON.stringify(system)
     expect(serialized).not.toContain("API_KEY")

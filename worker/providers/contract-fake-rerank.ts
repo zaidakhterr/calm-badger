@@ -1,7 +1,7 @@
 /**
  * Deterministic contract fake for candidate reranking.
  *
- * It exists so tests and fixture evaluation can exercise the real workflow
+ * It exists so tests can exercise the real workflow
  * without provider credentials, network access, or cost. It implements the same
  * `RerankProvider` contract as the live client and behaves like a plausible
  * reranker: it compares the request's own wording with the catalogue text of
@@ -29,7 +29,6 @@
  * schema, and integrity contracts are exercised.
  */
 
-import type { AppConfig } from "../env"
 import type { RankedCandidate, RerankRanking } from "../product-matching"
 
 import {
@@ -64,16 +63,12 @@ const STOP_WORDS = new Set([
   "with",
 ])
 
-export function createContractFakeRerankProvider(
-  config: AppConfig
-): RerankProvider {
-  const model = `${config.rerankModel}-contract-fake`
-
+export function createContractFakeRerankProvider(): RerankProvider {
   return {
     name: PROVIDER,
-    model,
 
     rerank(request: RerankRequest): Promise<RerankResult> {
+      const model = `${request.prompt.config.model}-contract-fake`
       const startedAt = Date.now()
       const wording =
         `${request.reference} ${request.description}`.toLowerCase()
