@@ -62,7 +62,7 @@
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.21.1",
     "@eslint/js": "^10",
-    "@opentelemetry/sdk-trace-node": "^2.11.0",
+    "@opentelemetry/sdk-node": "^0.222.0",
     "@oxlint/plugins": "1.78.0",
     "@tanstack/router-plugin": "^1.168.30",
     "@types/node": "^24",

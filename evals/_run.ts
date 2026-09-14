@@ -4,13 +4,14 @@ import {
   RunnerContext,
 } from "@langfuse/client"
 import { LangfuseSpanProcessor } from "@langfuse/otel"
-import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node"
+// langfuse/experiment-action loads this package from the project, so it stays.
+import { NodeSDK } from "@opentelemetry/sdk-node"
 import { maskContactDetails } from "../worker/langfuse/tracing"
 import { experiment } from "./rfq"
 
 const processor = new LangfuseSpanProcessor({ mask: maskContactDetails })
-const provider = new NodeTracerProvider({ spanProcessors: [processor] })
-provider.register()
+const sdk = new NodeSDK({ spanProcessors: [processor] })
+sdk.start()
 const client = new LangfuseClient()
 try {
   const result = await experiment(
@@ -44,5 +45,5 @@ try {
   process.exitCode = 1
 } finally {
   await client.shutdown()
-  await provider.shutdown()
+  await sdk.shutdown()
 }
