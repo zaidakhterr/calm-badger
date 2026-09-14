@@ -7,7 +7,6 @@ Use `experiment_path: evals/rfq.ts` and `should_skip_sdk_installation: true` aft
 The action supplies dataset version and comparison metadata. It receives a `RegressionError` when the absolute gate fails.
 
 Start the configured local Worker with real Mistral and OpenRouter providers. Seed its local D1 database first.
-In this workspace, use only the preview server named `calm-badger` from `.claude/launch.json`.
 Load Langfuse credentials into the environment, then run:
 
 ```sh

@@ -4,7 +4,7 @@
  * Everything downstream of this file works with `OcrDocument`, never with a
  * provider response. Two implementations exist: the live Mistral OCR client
  * (`mistral-ocr.ts`) and a deterministic contract fake (`contract-fake-ocr.ts`)
- * used by tests and fixture evaluation. Which one runs is decided by the
+ * used by tests. Which one runs is decided by the
  * `OCR_PROVIDER` variable, so no code path silently falls back to a fake in
  * production and no test can reach the network.
  */

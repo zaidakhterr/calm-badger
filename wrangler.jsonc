@@ -34,16 +34,16 @@
   "vars": {
     "APP_ENV": "production",
     // "mistral" is the live reader. "contract-fake" is the deterministic
-    // provider used by tests and fixture evaluation; it refuses to run when
+    // provider used by tests; it refuses to run when
     // APP_ENV is production.
     "OCR_PROVIDER": "mistral",
     "MISTRAL_OCR_MODEL": "mistral-ocr-latest",
     // "openrouter" is the live extractor. "contract-fake" is the deterministic
-    // provider used by tests and fixture evaluation; it refuses to run when
+    // provider used by tests; it refuses to run when
     // APP_ENV is production.
     "EXTRACTION_PROVIDER": "openrouter",
     // "openrouter" is the live reranker. "contract-fake" is the deterministic
-    // provider used by tests and fixture evaluation; it refuses to run when
+    // provider used by tests; it refuses to run when
     // APP_ENV is production.
     "RERANK_PROVIDER": "openrouter",
     // How long an owner has to decide a review before it expires. The window

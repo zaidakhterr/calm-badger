@@ -1,7 +1,7 @@
 /**
  * Deterministic contract fake for candidate reranking.
  *
- * It exists so tests and fixture evaluation can exercise the real workflow
+ * It exists so tests can exercise the real workflow
  * without provider credentials, network access, or cost. It implements the same
  * `RerankProvider` contract as the live client and behaves like a plausible
  * reranker: it compares the request's own wording with the catalogue text of

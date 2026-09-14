@@ -759,7 +759,8 @@ function reportedRerankCost(
     (total, line) => total + (line.reportedCostUsd ?? 0),
     0
   )
-  return Number.isFinite(total) ? total : null
+  // Rounded to a billionth of a dollar, so float drift is not stored as spend.
+  return Number.isFinite(total) ? Math.round(total * 1e9) / 1e9 : null
 }
 
 /* -------------------------------------------------------------------------- */

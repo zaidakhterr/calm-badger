@@ -1,7 +1,7 @@
 /**
  * Deterministic contract fake for structured extraction.
  *
- * It exists so tests and fixture evaluation can exercise the real workflow
+ * It exists so tests can exercise the real workflow
  * without provider credentials, network access, or cost. It implements the same
  * `ExtractionProvider` contract as the live client and behaves like a plausible
  * extractor: it reads the document text it was given — which in tests is the

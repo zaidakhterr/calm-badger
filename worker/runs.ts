@@ -336,11 +336,21 @@ export async function authorizeOwner(
   if (!row) return { ok: false, reason: "unknown_run" }
 
   const presented = await hashCapability(capability)
-  if (presented !== row.owner_capability_hash) {
+  if (!sameDigest(presented, row.owner_capability_hash)) {
     return { ok: false, reason: "forbidden" }
   }
 
   return { ok: true, runId: row.id, viewId }
+}
+
+/** Compares two hex digests in time that does not depend on where they differ. */
+function sameDigest(left: string, right: string): boolean {
+  if (left.length !== right.length) return false
+  let difference = 0
+  for (let index = 0; index < left.length; index += 1) {
+    difference |= left.charCodeAt(index) ^ right.charCodeAt(index)
+  }
+  return difference === 0
 }
 
 export async function isOwnerRequest(

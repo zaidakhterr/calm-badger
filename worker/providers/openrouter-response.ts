@@ -4,9 +4,7 @@
  * Extraction and reranking make the same call, through the same SDK and the
  * same provider, so the slice of a result they consume is one contract rather
  * than two: the model's text, why it stopped, the token accounting, and the
- * spend OpenRouter reports under its own provider metadata. It lives beside
- * `openrouter-cost.ts` for the same reason — the price of a call and the shape
- * of a call are both facts about the provider, not about a workflow step.
+ * spend OpenRouter reports under its own provider metadata.
  *
  * Both adapters `safeParse` into `OpenRouterResult` and turn a result that does
  * not fit into their own provider error, so an unrecognised response ends the
