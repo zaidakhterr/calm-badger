@@ -11,6 +11,7 @@ import {
 } from "../worker/langfuse/ids"
 import {
   capturedLangfuseScores,
+  failLangfuseScoreWrites,
   resetCapturedLangfuseScores,
 } from "../worker/providers/contract-fake-langfuse"
 import {
@@ -1288,25 +1289,57 @@ describe("review outcome scores", () => {
       ).toBe(200)
       await settledRun(run.viewId, "delivered", `a scored ${expected.kind}`)
 
+      // A quantity or field fix says nothing about the reranker's SKU choice.
       const traceId = await createTraceId(runId)
-      expect(
-        capturedLangfuseScores().filter((score) => score.traceId === traceId)
-      ).toContainEqual({
-        id: await createScoreId(
-          runId,
-          LANGFUSE_SCORE_NAMES.reviewLineCorrect,
-          `${MATCH_LINE_OBSERVATION_NAME}:${corrected!.position}`
-        ),
-        traceId,
-        observationId: await createObservationId(
-          runId,
-          MATCH_LINE_OBSERVATION_NAME,
-          corrected!.position
-        ),
-        name: LANGFUSE_SCORE_NAMES.reviewLineCorrect,
-        value: 0,
-      })
+      const lineScoreId = await createScoreId(
+        runId,
+        LANGFUSE_SCORE_NAMES.reviewLineCorrect,
+        `${MATCH_LINE_OBSERVATION_NAME}:${corrected!.position}`
+      )
+      const scores = capturedLangfuseScores().filter(
+        (score) => score.traceId === traceId
+      )
+      expect(scores.some((score) => score.id === lineScoreId)).toBe(false)
+      expect(scores).toContainEqual(
+        expect.objectContaining({
+          name: LANGFUSE_SCORE_NAMES.reviewApproved,
+          value: 1,
+        })
+      )
     }
+  })
+
+  it("delivers an approved run while Langfuse cannot take its scores", async () => {
+    const { run, ownerCapability, review } = await pausedRun()
+    const runId = await runIdOf(run.viewId)
+
+    failLangfuseScoreWrites(true)
+    try {
+      expect(
+        (
+          await decide(
+            run.viewId,
+            ownerCapability,
+            straightforwardDecisions(review)
+          )
+        ).status
+      ).toBe(200)
+      expect(
+        (await settle(run.viewId, ownerCapability, "approve")).status
+      ).toBe(200)
+      await settledRun(
+        run.viewId,
+        "delivered",
+        "an approved run during an outage"
+      )
+    } finally {
+      failLangfuseScoreWrites(false)
+    }
+
+    const traceId = await createTraceId(runId)
+    expect(
+      capturedLangfuseScores().filter((score) => score.traceId === traceId)
+    ).toEqual([])
   })
 
   it("records only trace approval when no product match needed review", async () => {

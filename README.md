@@ -312,8 +312,12 @@ Unlike analytics, tracing sends business content. Langfuse receives:
   configured model price.
 - the outcome and message of every step
 
-Langfuse masks email addresses and phone numbers before export. Names remain
-visible.
+Langfuse masks email addresses and phone numbers before export. This includes
+owner feedback comments. Names remain visible. A phone number needs a
+recognisable shape to be masked: a leading `+`, `0`, or `00` with separators,
+an area code in parentheses, or 3-3-4 groups. A bare digit run such as
+`5551234567` is exported unmasked, because it cannot be told apart from an
+order number.
 
 Langfuse uses the cost reported by OpenRouter. It calculates optical character
 recognition (OCR) cost from the `pages` price in its model table. The product
@@ -328,12 +332,13 @@ components for error rate, review rate, and cost per run. Divide error runs by
 all runs. Divide `open-review` runs by all runs. Divide total cost by distinct
 run traces. Langfuse v4 custom widgets do not support calculated fields.
 
-The parent case-study workspace contains a project `.mcp.json` for Claude Code.
-Start Claude Code from the workspace root with the existing `.dev.vars` values:
+Claude Code can reach the Langfuse MCP server with a Basic authentication
+header derived from the project keys. Start Claude Code with the existing
+`.dev.vars` values:
 
 ```bash
 set -a
-source calm-badger/.dev.vars
+source .dev.vars
 set +a
 LANGFUSE_MCP_AUTH="$(printf '%s:%s' "$LANGFUSE_PUBLIC_KEY" "$LANGFUSE_SECRET_KEY" | base64 | tr -d '\n')" claude
 ```
@@ -403,7 +408,19 @@ pnpm wrangler secret put MISTRAL_API_KEY
 pnpm wrangler secret put OPENROUTER_API_KEY
 pnpm wrangler secret put POSTHOG_API_KEY
 pnpm wrangler secret put RATE_LIMIT_SALT
+pnpm wrangler secret put LANGFUSE_PUBLIC_KEY
+pnpm wrangler secret put LANGFUSE_SECRET_KEY
+pnpm wrangler secret put LANGFUSE_BASE_URL
 ```
+
+`wrangler.jsonc` sets `LANGFUSE_PROVIDER` to `langfuse`. The Worker refuses to
+start without the three Langfuse secrets, and tracing requires
+`RATE_LIMIT_SALT`.
+
+Run `pnpm langfuse:sync` once per Langfuse project. It seeds both prompts, the
+`rfq-scenarios` dataset, and the `mistral-ocr-latest` model definition with its
+`pages` price. Without that model, Langfuse reports OCR cost as zero. The sync
+never overwrites prompts, dataset answers, or a model that already exists.
 
 The setup tool selects one neutral resource name. It uses this name for the
 Worker, D1 database, R2 bucket, and Workflow. The committed `calm-badger` names

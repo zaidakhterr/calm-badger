@@ -205,6 +205,57 @@ it("links the fetched extraction version on the actual provider generation", asy
   expect(generation?.attributes["langfuse.observation.prompt.version"]).toBe(41)
 })
 
+it("marks a bundled fallback generation, which carries no prompt link", async () => {
+  const selected = extractionPrompt(bundledPrompt("rfq/extract"))
+  expect(selected.prompt.isFallback).toBe(true)
+  const client = createOpenRouterExtractionProvider(
+    readConfig(envWith({ OPENROUTER_API_KEY: "offline-test" })),
+    () =>
+      Promise.resolve(
+        Response.json({
+          id: "fallback-generation-probe",
+          model: selected.config.model,
+          choices: [
+            {
+              index: 0,
+              message: { role: "assistant", content: "{}" },
+              finish_reason: "stop",
+            },
+          ],
+          usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
+        })
+      )
+  )
+  await traceRunStep(env, RUN, { name: "structure-rfq" }, async () => {
+    await client.extract({
+      runId: RUN.runId,
+      prompt: selected,
+      documents: [
+        {
+          label: "email",
+          kind: "email_body",
+          pageNumber: 1,
+          markdown: "Please quote belts",
+        },
+      ],
+      schemaName: "rfq_extraction",
+      schemaDescription: "RFQ facts",
+    })
+    return { state: "complete" }
+  })
+  const generation = exporter
+    .getFinishedSpans()
+    .find(
+      (span) =>
+        span.attributes["langfuse.observation.metadata.promptSource"] ===
+        "bundled"
+    )
+  expect(generation).toBeDefined()
+  expect(
+    generation?.attributes["langfuse.observation.prompt.name"]
+  ).toBeUndefined()
+})
+
 it("links the fetched rerank version and forwards its full schema", async () => {
   const prompt = bundledPrompt("rfq/rerank")
   prompt.version = 43
@@ -704,7 +755,26 @@ describe("contact masking", () => {
       "+49 (30) 12345678",
       "(030) 5550 119",
       "202-555-0100",
+      "030 12345678",
+      "030/12345678",
+      "0049 30 12345678",
+      "555 123 4567",
+      "555.123.4567",
     ]
+    // Order data that shares digits and separators with phone numbers.
+    const orderData = [
+      "NX-FLT-1120",
+      "OLD ITEM NR 45-221-B",
+      "2026-08-03T07:42:00Z",
+      "03.08.2026",
+      "16 pleeted panel filter 592x592",
+      "20260813",
+      "6205-2",
+      "SPA1250",
+      "DN50",
+    ]
+    // Known gap: a bare digit run cannot be told apart from an order number.
+    const bareDigits = "5551234567"
     const multiplySerializedContacts = JSON.stringify(
       JSON.stringify({
         email: "next\nbuyer@northwind.example",
@@ -726,6 +796,9 @@ describe("contact masking", () => {
         uuid,
         sku,
         amount,
+        localContacts: contacts.slice(7),
+        orderData,
+        bareDigits,
       })
     )
     span.setAttribute(
@@ -791,6 +864,8 @@ describe("contact masking", () => {
     expect(attributes).toContain(MASKED_EMAIL)
     expect(attributes).toContain(MASKED_PHONE)
     for (const contact of contacts) expect(attributes).not.toContain(contact)
+    for (const value of orderData) expect(attributes).toContain(value)
+    expect(attributes).toContain(bareDigits)
     expect(attributes).not.toMatch(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i)
     // Independent of PHONE_PATTERN: catch international numbers even when a
     // serialized escape leaves a word character immediately before the plus.

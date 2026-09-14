@@ -3,6 +3,7 @@ import { z } from "zod"
 
 import { readConfig } from "./env"
 import { ownerLineThumbsScore, ownerQuoteThumbsScore } from "./langfuse/scores"
+import { maskContactDetails } from "./langfuse/tracing"
 import { selectLangfuseProvider } from "./providers/langfuse"
 
 export const OWNER_FEEDBACK_BODY_SCHEMA = z
@@ -19,6 +20,7 @@ export type OwnerFeedbackOutcome =
   | { state: "recorded" }
   | { state: "before_matches" }
   | { state: "unknown_line" }
+  | { state: "unavailable" }
 
 /** Records one owner signal after the run has produced its product matches. */
 export async function recordOwnerFeedback(
@@ -42,17 +44,29 @@ export async function recordOwnerFeedback(
 
   const traceId = await createTraceId(runId)
   const value = feedback.value === "up" ? 1 : 0
+  // The score API bypasses the span processor, so the comment is masked here.
+  const comment =
+    feedback.comment === undefined
+      ? undefined
+      : maskContactDetails({ data: feedback.comment })
   const score =
     feedback.target === "quote"
-      ? await ownerQuoteThumbsScore(runId, traceId, value, feedback.comment)
+      ? await ownerQuoteThumbsScore(runId, traceId, value, comment)
       : await ownerLineThumbsScore(
           runId,
           traceId,
           feedback.target,
           value,
-          feedback.comment
+          comment
         )
 
-  await selectLangfuseProvider(readConfig(env)).scores.write(score)
+  try {
+    await selectLangfuseProvider(readConfig(env)).scores.write(score)
+  } catch {
+    console.error(
+      JSON.stringify({ event: "owner_feedback_write_failed", runId })
+    )
+    return { state: "unavailable" }
+  }
   return { state: "recorded" }
 }

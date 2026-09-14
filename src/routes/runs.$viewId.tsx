@@ -858,7 +858,7 @@ function StructureEvidencePanel({ evidence }: { evidence: StructureEvidence }) {
           {evidence.reportedCostUsd !== null ? (
             <MetaRow
               label="Provider-reported cost"
-              value={`$${evidence.reportedCostUsd.toFixed(4)}`}
+              value={formatReportedCost(evidence.reportedCostUsd)}
             />
           ) : null}
         </dl>
@@ -1219,7 +1219,7 @@ function MatchEvidencePanel({
             {evidence.totals.reportedCostUsd !== null ? (
               <MetaRow
                 label="Provider-reported cost"
-                value={`$${evidence.totals.reportedCostUsd.toFixed(4)}`}
+                value={formatReportedCost(evidence.totals.reportedCostUsd)}
               />
             ) : null}
           </dl>
@@ -1515,7 +1515,7 @@ function OwnerFeedbackControls({
         </Button>
       </div>
       <p className="mt-1.5 text-[11px] text-muted-foreground">
-        A blank comment keeps any earlier comment.
+        Saving replaces your earlier feedback and comment.
       </p>
       {error ? (
         <p className="mt-2 text-[11px] text-destructive">{error}</p>
@@ -2523,4 +2523,15 @@ function formatDeadline(value: string): string {
         hour: "2-digit",
         minute: "2-digit",
       })
+}
+
+/** Two significant digits below a cent, so a real fraction never reads as $0.0000. */
+function formatReportedCost(usd: number): string {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    ...(usd > 0 && usd < 0.01
+      ? { maximumSignificantDigits: 2 }
+      : { minimumFractionDigits: 2, maximumFractionDigits: 4 }),
+  }).format(usd)
 }

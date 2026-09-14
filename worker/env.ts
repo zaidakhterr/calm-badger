@@ -152,7 +152,7 @@ function analyticsTarget(variables: Variables): AnalyticsTarget {
 }
 
 /**
- * The deterministic fakes exist for tests and fixture evaluation. Production is
+ * The deterministic fakes exist for tests. Production is
  * the one environment where selecting one would be a silent lie about what ran,
  * so the configuration itself is refused rather than each seam checking again.
  */
@@ -171,6 +171,21 @@ export const APP_CONFIG_SCHEMA = VARIABLES_SCHEMA.superRefine(
           message: "Required when LANGFUSE_PROVIDER is langfuse",
         })
       }
+    }
+
+    // Without a salt the Langfuse user id falls back to a per-isolate value,
+    // and a resumed workflow would report the same trace under a new user.
+    if (
+      variables.LANGFUSE_PUBLIC_KEY !== null &&
+      variables.LANGFUSE_SECRET_KEY !== null &&
+      variables.LANGFUSE_BASE_URL !== null &&
+      variables.RATE_LIMIT_SALT === null
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["RATE_LIMIT_SALT"],
+        message: "Required when Langfuse tracing is configured",
+      })
     }
 
     if (variables.APP_ENV !== "production") return

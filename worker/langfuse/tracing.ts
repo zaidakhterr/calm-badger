@@ -349,11 +349,18 @@ const LANGFUSE_METADATA_PREFIXES = [
 
 /**
  * Matches common phone numbers without treating UUIDs, SKUs, or amounts as
- * contact details. International numbers need a leading plus. Local numbers
- * need either an area-code pair of parentheses or the 3-3-4 hyphen form.
+ * contact details. A candidate needs a recognisable shape: a leading plus, a
+ * leading `0` or `00` trunk or international prefix followed by a separator,
+ * an area code in parentheses, or 3-3-4 groups. It must also hold 9 to 15
+ * digits, which keeps dates such as `03.08.2026` out. A bare digit run such as
+ * `5551234567` stays unmasked, because it cannot be told from an order number.
  */
 const PHONE_PATTERN =
-  /(^|[^\w-]|\\(?:n|r|t))(?:\+\d{8,15}|\+\d{1,3}[ .-]?(?:\(\d{2,5}\)|\d{2,5})(?:[ .-]?\d{2,8}){1,4}|\(\d{2,4}\)[ .-]\d{3,4}(?:[ .-]\d{2,4}){1,2}|\d{3}-\d{3}-\d{4})(?![\w-])/g
+  /(^|[^\w-]|\\(?:n|r|t))(\+\d{8,15}|\+\d{1,3}[ .-]?(?:\(\d{2,5}\)|\d{2,5})(?:[ .-]?\d{2,8}){1,4}|0\d{1,4}[ ./-]\d{2,8}(?:[ .-]\d{2,8}){0,3}|\(\d{2,5}\)[ .-]?\d{3,8}(?:[ .-]\d{2,4}){0,2}|\d{3}([ .-])\d{3}\3\d{4})(?![\w-])/g
+const PHONE_DIGITS = { min: 9, max: 15 }
+
+/** How long one durable step waits for its spans to leave the isolate. */
+const FLUSH_TIMEOUT_MS = 5_000
 
 /**
  * Masks the stringified input, output, or metadata value supplied by the
@@ -368,7 +375,12 @@ export function maskContactDetails({ data }: { data: string }): string {
     )
     .replace(
       PHONE_PATTERN,
-      (_phoneWithBoundary, boundary: string) => `${boundary}${MASKED_PHONE}`
+      (phoneWithBoundary: string, boundary: string, phone: string) => {
+        const digits = phone.replace(/\D/g, "").length
+        return digits >= PHONE_DIGITS.min && digits <= PHONE_DIGITS.max
+          ? `${boundary}${MASKED_PHONE}`
+          : phoneWithBoundary
+      }
     )
 }
 
@@ -426,8 +438,26 @@ async function flushTracing(
 ): Promise<void> {
   if (!processor) return
 
+  // A hanging endpoint must not hold a durable step until its own timeout and
+  // then retry the paid provider call inside it.
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<"timeout">((resolve) => {
+    timer = setTimeout(() => resolve("timeout"), FLUSH_TIMEOUT_MS)
+  })
+
   try {
-    await processor.forceFlush()
+    const flushed = await Promise.race([
+      processor.forceFlush().then(() => "flushed" as const),
+      deadline,
+    ])
+    if (flushed === "timeout") {
+      console.error(
+        JSON.stringify({
+          event: "tracing_flush_timeout",
+          timeoutMs: FLUSH_TIMEOUT_MS,
+        })
+      )
+    }
   } catch (error) {
     console.error(
       JSON.stringify({
@@ -435,5 +465,7 @@ async function flushTracing(
         message: error instanceof Error ? error.message : "unknown",
       })
     )
+  } finally {
+    clearTimeout(timer)
   }
 }

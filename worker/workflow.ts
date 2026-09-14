@@ -7,6 +7,7 @@ import { captureFunnelEvent } from "./analytics"
 import { buildEstimate } from "./build-estimate"
 import { deliverRun, type DeliveryOutcome } from "./deliver"
 import { ConfigError, readConfig } from "./env"
+import type { LangfuseScore } from "./langfuse/contract"
 import { reviewApprovedScore, reviewLineScore } from "./langfuse/scores"
 import { applyReviewProductDecision, matchProducts } from "./match-products"
 import { readDocuments } from "./read-documents"
@@ -375,6 +376,10 @@ export async function applyReviewOutcome(
  * a partial Langfuse failure, it updates the same score instead of recording
  * the review twice. Expiry is the absence of an owner decision and writes no
  * score.
+ *
+ * Only product decisions score the match observation: a quantity or field fix
+ * says nothing about whether the reranker chose the right SKU. A Langfuse
+ * outage must not fail a run, so a failed write is logged and skipped.
  */
 async function writeReviewScores(
   env: Env,
@@ -385,55 +390,49 @@ async function writeReviewScores(
 
   const provider = selectLangfuseProvider(readConfig(env))
   const traceId = await createTraceId(runId)
+  const scores: LangfuseScore[] = []
 
   if (outcome.state === "approved") {
-    const lineScores = new Map<number, ReviewLineScore>()
+    const products = outcome.decisions
+      .filter((decision) => decision.kind === "product")
+      .sort((left, right) => left.position - right.position)
 
-    for (const decision of outcome.decisions) {
-      if (decision.kind === "customer") continue
-
-      const current = lineScores.get(decision.position)
-
-      if (
-        decision.kind === "product" &&
-        decision.decision === "accepted_proposal"
-      ) {
-        if (!current) lineScores.set(decision.position, { value: 1 })
-        continue
-      }
-
-      const comment =
-        decision.kind === "product" ? decision.sku : current?.comment
-      const score: ReviewLineScore = { value: 0 }
-      if (comment !== undefined) score.comment = comment
-      lineScores.set(decision.position, score)
-    }
-
-    for (const [position, score] of [...lineScores].sort(
-      ([left], [right]) => left - right
-    )) {
-      await provider.scores.write(
+    for (const decision of products) {
+      const accepted = decision.decision === "accepted_proposal"
+      scores.push(
         await reviewLineScore(
           runId,
           traceId,
-          position,
-          score.value,
-          score.comment
+          decision.position,
+          accepted ? 1 : 0,
+          accepted ? undefined : decision.sku
         )
       )
     }
   }
 
-  await provider.scores.write(
+  scores.push(
     await reviewApprovedScore(
       runId,
       traceId,
       outcome.state === "approved" ? 1 : 0
     )
   )
-}
 
-type ReviewLineScore = { value: 0 | 1; comment?: string }
+  for (const score of scores) {
+    try {
+      await provider.scores.write(score)
+    } catch {
+      console.error(
+        JSON.stringify({
+          event: "review_score_write_failed",
+          runId,
+          score: score.name,
+        })
+      )
+    }
+  }
+}
 
 /**
  * Records RFQ receipt as the trace's first observation.

@@ -202,8 +202,8 @@ async function routeRequest(
       return methodNotAllowed("GET")
     }
 
-    // Curated source material only. Expected outcomes are test fixtures and are
-    // never served to a client.
+    // Curated source material only. Expected outcomes live only in the
+    // Langfuse dataset, so the Worker has nothing to serve.
     return Response.json(
       { scenarios: scenarioPreviews() },
       { headers: jsonHeaders }
@@ -379,6 +379,13 @@ async function ownerFeedbackResponse(
     return Response.json(
       { error: "This run does not have that matched line." },
       { status: 400, headers: jsonHeaders }
+    )
+  }
+
+  if (outcome.state === "unavailable") {
+    return Response.json(
+      { error: "Feedback could not be saved right now. Try again later." },
+      { status: 503, headers: jsonHeaders }
     )
   }
 

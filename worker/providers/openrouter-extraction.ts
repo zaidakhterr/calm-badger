@@ -111,10 +111,15 @@ export function createOpenRouterExtractionProvider(
               version: request.prompt.prompt.version,
               isFallback: request.prompt.prompt.isFallback,
             },
+            // The integration drops prompt attributes for a fallback, so this
+            // is the only trace-side sign that the bundled prompt ran.
+            promptSource: request.prompt.prompt.isFallback
+              ? "bundled"
+              : "langfuse",
           },
           telemetry: {
             functionId: "extract-rfq",
-            includeRuntimeContext: { langfusePrompt: true },
+            includeRuntimeContext: { langfusePrompt: true, promptSource: true },
           },
         })
 

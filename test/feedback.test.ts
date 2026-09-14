@@ -8,8 +8,10 @@ import {
   createScoreId,
   MATCH_LINE_OBSERVATION_NAME,
 } from "../worker/langfuse/ids"
+import { MASKED_EMAIL, MASKED_PHONE } from "../worker/langfuse/tracing"
 import {
   capturedLangfuseScores,
+  failLangfuseScoreWrites,
   resetCapturedLangfuseScores,
 } from "../worker/providers/contract-fake-langfuse"
 import { hashCapability } from "../worker/runs"
@@ -134,11 +136,12 @@ describe("owner feedback", () => {
       ).status
     ).toBe(200)
     expect(await capturedScoresForRun(runId)).toHaveLength(2)
+    // Langfuse replaces a score with the same id, so a blank comment clears it.
     expect((await capturedScoresForRun(runId))[0]).toMatchObject({
       name: LANGFUSE_SCORE_NAMES.ownerLineThumbs,
       value: 0,
-      comment: "Correct product",
     })
+    expect((await capturedScoresForRun(runId))[0].comment).toBeUndefined()
 
     expect(
       (
@@ -159,6 +162,43 @@ describe("owner feedback", () => {
       value: 1,
       comment: "Updated after owner review",
     })
+  })
+
+  it("masks contact details in a comment before it reaches Langfuse", async () => {
+    const { runId, viewId, ownerCapability } = await storedRun(true)
+
+    expect(
+      (
+        await sendFeedback(viewId, ownerCapability, {
+          target: "quote",
+          value: "down",
+          comment: "Ask buyer@northwind.example or call 030 12345678.",
+        })
+      ).status
+    ).toBe(200)
+    expect((await capturedScoresForRun(runId))[0].comment).toBe(
+      `Ask ${MASKED_EMAIL} or call ${MASKED_PHONE}.`
+    )
+  })
+
+  it("answers 503 rather than 500 while Langfuse is unavailable", async () => {
+    const { runId, viewId, ownerCapability } = await storedRun(true)
+
+    failLangfuseScoreWrites(true)
+    try {
+      const response = await sendFeedback(viewId, ownerCapability, {
+        target: "quote",
+        value: "up",
+      })
+
+      expect(response.status).toBe(503)
+      expect(await response.json()).toEqual({
+        error: "Feedback could not be saved right now. Try again later.",
+      })
+    } finally {
+      failLangfuseScoreWrites(false)
+    }
+    expect(await capturedScoresForRun(runId)).toEqual([])
   })
 
   it("forbids a viewer from writing feedback", async () => {

@@ -38,22 +38,24 @@ export function createContractFakeLangfuseProvider(): LangfuseProvider {
     },
     scores: {
       write(score) {
+        if (failingScoreWrites) {
+          return Promise.reject(new Error("Langfuse score write failed"))
+        }
+        // Same id replaces the whole score, as Langfuse ingestion does.
         const previous = captured.findIndex((entry) => entry.id === score.id)
         if (previous === -1) captured.push(structuredClone(score))
-        else {
-          const replacement = structuredClone(score)
-          if (
-            replacement.comment === undefined &&
-            captured[previous].comment !== undefined
-          ) {
-            replacement.comment = captured[previous].comment
-          }
-          captured[previous] = replacement
-        }
+        else captured[previous] = structuredClone(score)
         return Promise.resolve()
       },
     },
   }
+}
+
+let failingScoreWrites = false
+
+/** Simulates a Langfuse outage for every later score write. */
+export function failLangfuseScoreWrites(failing: boolean): void {
+  failingScoreWrites = failing
 }
 
 export function capturedLangfuseScores(): LangfuseScore[] {

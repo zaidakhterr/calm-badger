@@ -101,6 +101,7 @@ describe("the Langfuse provider contract", () => {
       LANGFUSE_PUBLIC_KEY: "test-public",
       LANGFUSE_SECRET_KEY: "test-secret",
       LANGFUSE_BASE_URL: "https://langfuse.example.test",
+      RATE_LIMIT_SALT: "test-salt",
     })
     const provider = selectLangfuseProvider(config)
     expect(provider.name).toBe("langfuse")
@@ -275,6 +276,15 @@ describe("rerank prompt compatibility", () => {
 
     prompt.config.winner_strength = "strict"
     prompt.config.winner_gap = -2
+    expect(compatibleRerankPrompt(prompt)).toEqual(bundledPrompt("rfq/rerank"))
+
+    // Zero thresholds would accept every line without human review.
+    prompt.config.winner_strength = 0
+    prompt.config.winner_gap = 0
+    expect(compatibleRerankPrompt(prompt)).toEqual(bundledPrompt("rfq/rerank"))
+
+    prompt.config.winner_strength = 0.2
+    prompt.config.winner_gap = 0.3
     expect(compatibleRerankPrompt(prompt)).toEqual(bundledPrompt("rfq/rerank"))
   })
 

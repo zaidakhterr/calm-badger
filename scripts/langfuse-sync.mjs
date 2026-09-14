@@ -34,14 +34,15 @@ const modelPage = z.object({
 })
 
 const OCR_MODEL_NAME = "mistral-ocr-latest"
-const OCR_MODEL_MATCH_PATTERN = "(?i)^mistral-ocr-latest$"
+// Matches every Mistral OCR model id, so MISTRAL_OCR_MODEL can change.
+const OCR_MODEL_MATCH_PATTERN = "(?i)^mistral-ocr(-[a-z0-9.-]+)?$"
 // Mistral's current OCR 4.1 price is $4 per 1,000 pages.
 const OCR_PAGE_PRICE_USD = 0.004
 
 function cli(args, input) {
   const result = spawnSync(
     "npx",
-    ["-y", "langfuse-cli", "api", ...args, "--json"],
+    ["-y", "langfuse-cli@1.2.3", "api", ...args, "--json"],
     {
       cwd: root,
       encoding: "utf8",
@@ -216,25 +217,19 @@ function syncOcrModel() {
       throw new Error(`Model lookup failed (${response.status})`)
     const existing = modelPage.parse(response.body)
     const model = existing.data.find(
-      (entry) =>
-        !entry.isLangfuseManaged &&
-        entry.modelName === OCR_MODEL_NAME &&
-        entry.matchPattern === OCR_MODEL_MATCH_PATTERN
+      (entry) => !entry.isLangfuseManaged && entry.modelName === OCR_MODEL_NAME
     )
     if (model) {
+      // Cloud owns an existing model definition. A drifted price, unit, or
+      // pattern is reported, never overwritten.
       const defaultTier = model.pricingTiers.find((tier) => tier.isDefault)
       if (
         model.unit !== "REQUESTS" ||
+        model.matchPattern !== OCR_MODEL_MATCH_PATTERN ||
         defaultTier?.prices.pages !== OCR_PAGE_PRICE_USD
       ) {
-        const updated = cli(
-          ["models", "upsert", model.id, "--body-file", "-"],
-          JSON.stringify(ocrModelBody())
-        )
-        if (updated.status < 200 || updated.status >= 300)
-          throw new Error(`Model update failed (${updated.status})`)
-        console.log(
-          `Updated ${model.modelName} model ${model.id} with pages pricing.`
+        console.warn(
+          `Preserved ${model.modelName} model ${model.id}. Its unit, pattern, or pages price differs from the seed.`
         )
         return
       }

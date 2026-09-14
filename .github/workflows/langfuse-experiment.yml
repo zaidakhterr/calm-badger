@@ -8,6 +8,11 @@ permissions:
   contents: read
   pull-requests: write
 
+# A newer push supersedes the paid run for the same pull request.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   experiment:
     if: github.event.pull_request.head.repo.full_name == github.repository
@@ -16,31 +21,54 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # A workflow-level paths filter would leave this required check pending,
+      # so a Markdown-only change passes the job without spending credits.
+      - name: Detect documentation-only change
+        id: changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if git diff --name-only "${BASE_SHA}" HEAD | grep -qvE '\.md$'; then
+            echo "run=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "Only Markdown changed. Skipping the experiment."
+            echo "run=false" >> "${GITHUB_OUTPUT}"
+          fi
 
       - name: Install pnpm
+        if: steps.changes.outputs.run == 'true'
         uses: pnpm/action-setup@v4
         with:
           version: 11.21.0
 
       - name: Install Node.js
+        if: steps.changes.outputs.run == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: pnpm
 
       - name: Install dependencies
+        if: steps.changes.outputs.run == 'true'
         run: npx -y pnpm@11.21.0 install --frozen-lockfile
 
       - name: Build client
+        if: steps.changes.outputs.run == 'true'
         run: npx -y pnpm@11.21.0 build:client
 
       - name: Apply local D1 migrations
+        if: steps.changes.outputs.run == 'true'
         run: npx -y pnpm@11.21.0 db:migrate:local
 
       - name: Seed local D1 database
+        if: steps.changes.outputs.run == 'true'
         run: npx -y pnpm@11.21.0 db:seed:local
 
       - name: Start local Worker
+        if: steps.changes.outputs.run == 'true'
         env:
           LANGFUSE_BASE_URL: ${{ secrets.LANGFUSE_BASE_URL }}
           LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
@@ -75,6 +103,7 @@ jobs:
           exit 1
 
       - name: Run Langfuse experiment
+        if: steps.changes.outputs.run == 'true'
         uses: langfuse/experiment-action@b945f9bf921b24a4074306078f621cba729d173e # v1.0.10
         env:
           RFQ_BASE_URL: http://127.0.0.1:8787

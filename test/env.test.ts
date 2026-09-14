@@ -206,6 +206,7 @@ describe("Langfuse provider configuration", () => {
     expect(APP_CONFIG_SCHEMA.parse({}).langfuse).toEqual({ provider: "none" })
     const config = APP_CONFIG_SCHEMA.parse({
       ...credentials,
+      RATE_LIMIT_SALT: "salt",
       LANGFUSE_PROVIDER: "none",
     })
     expect(config.langfuse).toEqual({ provider: "none" })
@@ -226,14 +227,27 @@ describe("Langfuse provider configuration", () => {
       }
     }
     expect(
-      APP_CONFIG_SCHEMA.parse({ ...credentials, LANGFUSE_PROVIDER: "langfuse" })
-        .langfuse
+      APP_CONFIG_SCHEMA.parse({
+        ...credentials,
+        RATE_LIMIT_SALT: "salt",
+        LANGFUSE_PROVIDER: "langfuse",
+      }).langfuse
     ).toEqual({
       provider: "langfuse",
       publicKey: "test-public",
       secretKey: "test-secret",
       baseUrl: "https://langfuse.example.test",
     })
+  })
+
+  it("requires the salt once tracing is configured", () => {
+    expect(() => APP_CONFIG_SCHEMA.parse(credentials)).toThrow(
+      /Required when Langfuse tracing is configured/
+    )
+    expect(
+      APP_CONFIG_SCHEMA.parse({ ...credentials, RATE_LIMIT_SALT: "salt" })
+        .rateLimitSalt
+    ).toBe("salt")
   })
 
   it("refuses an unsupported provider name", () => {
